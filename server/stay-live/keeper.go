@@ -194,7 +194,8 @@ type keeper struct {
 	counters   *keeperCounters
 	status     func(keeperStatus) // called when what the app polls changes (state.json); nil = nobody listens
 	lastStatus keeperStatus
-	liveSize   string
+	slateSize  string // picture size of the BRB slate, from its SPS ("" if unreadable)
+	liveSize   string // ...and of the live video, from its last checked keyframe
 	slateMatch string
 	filledSaid time.Time
 	nextStats  time.Time
@@ -217,7 +218,7 @@ type keeperStatus struct {
 type keeperCounters struct {
 	videoBackwards atomic.Int64 // live video dropped: its DTS didn't move forward
 	audioBackwards atomic.Int64 // audio dropped: its PTS didn't move forward
-	audioOverlap   atomic.Int64 // audio dropped: it overlapped what was sent by half a frame or more (splices)
+	audioOverlap   atomic.Int64 // audio dropped: it overlapped what was sent (half a frame between live AUs, 1 ms at a splice)
 	audioRetimed   atomic.Int64 // audio moved by more than 1 ms to follow on from the previous AU
 	audioFilled    atomic.Int64 // silent frames put into holes in live audio
 	audioFilledMs  atomic.Int64
@@ -374,6 +375,7 @@ func newKeeper(out auWriter, slate []*au, frameDur int64, stall, hold time.Durat
 		aSlate:   a,
 		frameDur: frameDur, stall: stall, hold: hold, events: events,
 		slateParams: params,
+		slateSize:   paramSize(params),
 		slateSource: "default",
 		silent:      silentFrame(a),
 		lastV:       10 * 90000, lastA: 10 * 90000, lastVDur: frameDur,
@@ -381,7 +383,7 @@ func newKeeper(out auWriter, slate []*au, frameDur int64, stall, hold time.Durat
 		counters: &keeperCounters{},
 	}
 	k.curV, k.curA = &k.vSlate, &k.aSlate
-	events(fmt.Sprintf("slate loaded: video %.3fs (%s, %s), audio %.3fs", float64(k.vSlate.dur)/90000, paramSize(params), fpsOf(v.frameDur), float64(k.aSlate.dur)/90000))
+	events(fmt.Sprintf("slate loaded: video %.3fs (%s, %s), audio %.3fs", float64(k.vSlate.dur)/90000, orUnknown(k.slateSize), fpsOf(v.frameDur), float64(k.aSlate.dur)/90000))
 	return k, nil
 }
 
@@ -463,12 +465,13 @@ func (k *keeper) installSlate(slate []*au) {
 	k.setSlate(slate, "phone")
 	k.fallback = nil
 	k.events(fmt.Sprintf("slate from the phone installed: video %.3fs (%s, %s), audio %.3fs", float64(k.vSlate.dur)/90000,
-		paramSize(k.slateParams), fpsOf(k.vSlate.frameDur), float64(k.aSlate.dur)/90000))
+		orUnknown(k.slateSize), fpsOf(k.vSlate.frameDur), float64(k.aSlate.dur)/90000))
 }
 
 func (k *keeper) setSlate(slate []*au, source string) {
 	v, a, params, _ := prepareSlate(slate, k.frameDur)
 	k.vSlate, k.aSlate, k.slateParams = v, a, params
+	k.slateSize = paramSize(params)
 	k.silent = silentFrame(a)
 	k.slateSource = source
 	k.checkedLive = 0
@@ -498,7 +501,7 @@ func (k *keeper) checkParams(a *au) {
 		k.events("slate matches the live video format (SPS/PPS identical)")
 	default:
 		k.slateMatch = "mismatch"
-		slate := paramSize(k.slateParams)
+		slate := k.slateSize
 		if k.slateSource == "saved" && k.fallback != nil && k.liveSize != "" && slate != k.liveSize {
 			k.events(fmt.Sprintf("the phone's saved slate is %s but the live video is %s: using the default slate until the phone sends this stream's", slate, k.liveSize))
 			k.setSlate(k.fallback, "default")
@@ -591,7 +594,7 @@ func (k *keeper) publishStatus(now time.Time) {
 			!k.lastLiveAt.IsZero() && now.Sub(k.lastLiveAt) <= keyframeWanted,
 		SlateMatch:  k.slateMatch,
 		SlateSource: k.slateSource,
-		SlateSize:   paramSize(k.slateParams),
+		SlateSize:   k.slateSize,
 		LiveSize:    k.liveSize,
 	}
 	if st != k.lastStatus {
