@@ -190,6 +190,27 @@ class SrtlaSchedulingTest {
     }
 
     @Test
+    fun `a slow link's loss is charged to it when the NAK comes back over the fast link within the slow round trip`() {
+        val sim = Sim(rtt = mapOf(0 to 20L, 1 to 150L))
+        sim.srtAcks = false
+        sim.connect(0, 1)
+        sim.run(1_800)
+        sim.loseNextOn[1] = 1
+        while (sim.lostSeqs.isEmpty()) sim.run(1)
+        val lostAt = now
+        val seq = sim.lostSeqs.single()
+        // The receiver notices the gap as later packets arrive over the fast link and reports it down that link,
+        // long before a round trip of the slow link has passed.
+        sim.run(40)
+        val nak = ByteArray(20).also { Bytes.writeU16(it, 0, Srt.TYPE_NAK); Bytes.writeInt(it, 8, 1); Bytes.writeInt(it, 16, seq) }
+        sim.feed(0, nak)
+        val links = sim.stats().links
+        assertTrue(now - lostAt < links[1].minRttMs!!, "NAK ${now - lostAt} ms after the loss, slow RTT ${links[1].minRttMs}")
+        assertEquals(1, links[1].naks, "the slow link lost it")
+        assertEquals(0, links[0].naks)
+    }
+
+    @Test
     fun `a backup link carries only a trickle while the primary has room, and the whole stream soon after it dies`() {
         val sim = Sim()
         sim.connect(0, 1) { if (it == 1) LinkPriority.BACKUP else LinkPriority.PRIMARY }

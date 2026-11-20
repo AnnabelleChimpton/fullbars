@@ -265,7 +265,7 @@ class MoblinkTest {
     }
 
     @Test
-    fun aHelperWhoseFirstTunnelFailsGetsOneWithinAboutTwoSeconds() {
+    fun aHelperWhoseFirstTunnelFailsGetsOneWellBeforeTheOldTenSecondWait() {
         EchoServer().use { echo ->
             val tunnels = ArrayBlockingQueue<InetSocketAddress>(4)
             val streamer = MoblinkStreamer("pw", listenPort = 0, onTunnel = { _, at -> tunnels.add(at) }, onTunnelGone = {})
@@ -282,7 +282,9 @@ class MoblinkTest {
             try {
                 assertNotNull(tunnels.poll(5, TimeUnit.SECONDS))
                 val ms = (System.nanoTime() - failedAt.get()) / 1_000_000
-                assertTrue(ms < 2_500, "tunnel $ms ms after the failure")
+                // The first retry is due after 1 s. The bound leaves room for a loaded CI machine while still being far
+                // under the fixed 10 s wait this replaced.
+                assertTrue(ms < 4_000, "tunnel $ms ms after the failure")
             } finally {
                 relay.stop()
                 streamer.stop()
@@ -296,7 +298,7 @@ class MoblinkTest {
             val tunnels = ArrayBlockingQueue<InetSocketAddress>(4)
             // The retry wait alone would take a minute; the status poll every 200 ms is what asks again.
             val streamer = MoblinkStreamer("pw", listenPort = 0, onTunnel = { _, at -> tunnels.add(at) }, onTunnelGone = {},
-                statusIntervalMs = 200, tunnelRetryMs = 60_000)
+                statusIntervalMs = 200, tunnelRetryMs = 60_000, tunnelRetryMaxMs = 60_000)
             streamer.setDestination("127.0.0.1", echo.port)
             val opens = AtomicInteger()
             val relay = MoblinkRelay("127.0.0.1", streamer.port, UUID.randomUUID().toString(), "Late data", "pw",

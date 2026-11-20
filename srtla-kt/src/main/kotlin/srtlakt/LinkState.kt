@@ -52,7 +52,10 @@ internal class LinkState(val id: Int, val label: String, private val config: Srt
      */
     var capScale = 1.0
 
-    /** seq -> send time (ms), with [NAKED] set once a NAK for it was charged to this link. */
+    /**
+     * seq -> send time (ms), with [NAKED] set once a NAK for it was charged to this link and [RESENT] set when this
+     * copy was itself a retransmission.
+     */
     private val log = SeqLog(config.maxInFlightLog)
     /** The newest sequence number appended to [log], and whether [log] is still in sequence order (see onSrtAck). */
     private var logTailSeq = 0
@@ -212,19 +215,27 @@ internal class LinkState(val id: Int, val label: String, private val config: Srt
 
     /**
      * [seq]: the SRT data sequence number, or [Srt.NO_SEQ] for control packets.
-     * [retransmit]: the core saw this sequence number go out before (possibly on another link).
+     * [retransmit]: another link sent this sequence number before, so this link's copy can't be timed.
+     * [resend]: this copy is a retransmission (the sequence number went out before on any link, this one included).
      */
-    fun onSent(seq: Int, bytes: Int, nowMs: Long, overCap: Boolean = false, retransmit: Boolean = false) {
+    fun onSent(
+        seq: Int,
+        bytes: Int,
+        nowMs: Long,
+        overCap: Boolean = false,
+        retransmit: Boolean = false,
+        resend: Boolean = retransmit,
+    ) {
         if (overCap) overCapSent++
         if (seq != Srt.NO_SEQ) {
             val k = seq.toLong()
             // A retransmit re-enters at the tail. A key that sorts before the old tail breaks the sequence order
             // onSrtAck's fast path relies on.
             if (log.size > 0 && !SeqMath.after(seq, logTailSeq)) logOrdered = false
-            log.putLast(k, nowMs)
-            logTailSeq = seq
             // Karn's rule: a resent packet's ACK can't be matched to a transmission, so it's never a delay sample.
             val resent = retransmit || sentLog.remove(k, ABSENT) != ABSENT
+            log.putLast(k, (nowMs and TIME_MASK) or (if (resend || resent) RESENT else 0L))
+            logTailSeq = seq
             sentLog.putLast(k, (nowMs shl 12) or bytes.coerceIn(0, 4095).toLong() or (if (resent) NO_SAMPLE else 0L))
             sentSinceProof = true
         }
@@ -272,6 +283,8 @@ internal class LinkState(val id: Int, val label: String, private val config: Srt
             s = log.next(s)
         }
         logOrdered = ordered
+        // The newest entry may have been cleared: the next append must be checked against the tail that's left.
+        if (havePrev) logTailSeq = prev
     }
 
     /** True if this link's in-flight log still holds [seq] (it carried it, and no cumulative ACK has cleared it). */
@@ -283,7 +296,13 @@ internal class LinkState(val id: Int, val label: String, private val config: Srt
      */
     fun unpenalisedSendMs(seq: Int): Long {
         val v = log.get(seq.toLong(), ABSENT)
-        return if (v == ABSENT || v and NAKED != 0L) NOT_UNPENALISED else v
+        return if (v == ABSENT || v and NAKED != 0L) NOT_UNPENALISED else v and TIME_MASK
+    }
+
+    /** Whether this link's copy of [seq] in the in-flight log was a retransmission. */
+    fun carriedResend(seq: Int): Boolean {
+        val v = log.get(seq.toLong(), ABSENT)
+        return v != ABSENT && v and RESENT != 0L
     }
 
     /** Whether this link holds [seq] already charged with a NAK (periodic NAK reports repeat the same losses). */
@@ -422,6 +441,10 @@ internal class LinkState(val id: Int, val label: String, private val config: Srt
         const val NEVER = Long.MIN_VALUE
         /** Flag bit in [log] values: a NAK for this packet was charged to the link. The send time stays readable. */
         private const val NAKED = 1L shl 62
+        /** Flag bit in [log] values: this copy was a retransmission. */
+        private const val RESENT = 1L shl 61
+        /** The send time's bits in a [log] value (clock values are positive milliseconds, far below 2^61). */
+        private const val TIME_MASK = RESENT - 1
         private const val ABSENT = Long.MIN_VALUE + 1
         const val NOT_UNPENALISED = Long.MIN_VALUE
         const val DEFAULT_WINDOW = Srtla.WINDOW_DEF * Srtla.WINDOW_MULT

@@ -324,7 +324,7 @@ class SrtlaCore(
                 }
             }
         }
-        link.onSent(seq, len, nowMs, overCap, resentElsewhere)
+        link.onSent(seq, len, nowMs, overCap, resentElsewhere, resend)
     }
 
     fun onLinkPacket(linkId: Int, buf: ByteArray, len: Int, nowMs: Long, out: SrtlaOutput) {
@@ -694,9 +694,13 @@ class SrtlaCore(
 
     /**
      * Charges a reported loss to the link that lost it: the latest carrier not yet charged for it. A resend that is
-     * lost again is then blamed on the link that carried the resend, not on the first one forever. A carrier that
-     * sent its copy less than a round trip ago can't be the subject of this report (the receiver couldn't know yet):
-     * that's a periodic repeat of the earlier loss, and nobody is charged twice.
+     * lost again is then blamed on the link that carried the resend, not on the first one forever.
+     *
+     * One exception: when the latest carrier's copy is itself a resend sent less than a round trip ago, the receiver
+     * can't know about it yet, so this report is a periodic repeat of the earlier loss and nobody is charged twice.
+     * An original transmission is always charged, however soon the NAK comes: in a bond the receiver spots a gap
+     * when later packets arrive on the faster links and reports it down the fastest one, so the NAK for a slow
+     * link's loss routinely arrives well inside that slow link's own round trip.
      */
     private fun chargeNak(seq: Int, nowMs: Long) {
         var latest: LinkState? = null
@@ -710,8 +714,10 @@ class SrtlaCore(
             }
         }
         if (latest == null) return
-        val rtt = max(latest.minRttMs, latest.srttMs.toLong())
-        if (rtt > 0 && nowMs - latestMs < rtt) return
+        if (latest.carriedResend(seq)) {
+            val rtt = max(latest.minRttMs, latest.srttMs.toLong())
+            if (rtt > 0 && nowMs - latestMs < rtt) return
+        }
         latest.penalise(seq)
     }
 

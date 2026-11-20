@@ -410,4 +410,17 @@ class SrtlaCoreTest {
         feed(0, ack(26))
         assertEquals(5, core.stats(now).links[0].inFlight)
     }
+
+    @Test
+    fun `after an out-of-order entry is cleared, a later out-of-order append is still noticed`() {
+        register(1)
+        val ack = { n: Int -> ByteArray(44).also { Bytes.writeU16(it, 0, Srt.TYPE_ACK); Bytes.writeInt(it, 4, n); Bytes.writeInt(it, 16, n) } }
+        for (s in 50..60) core.onClientPacket(dataPkt(s), 1316, now, out)
+        core.onClientPacket(dataPkt(3), 1316, now, out) // behind the head: the log is out of order
+        feed(0, ack(10)) // clears 3; the log is 50..60 and in order again
+        assertEquals(11, core.stats(now).links[0].inFlight)
+        core.onClientPacket(dataPkt(40), 1316, now, out) // behind 60, the real tail
+        feed(0, ack(41))
+        assertEquals(11, core.stats(now).links[0].inFlight, "40 cleared, 50..60 left")
+    }
 }

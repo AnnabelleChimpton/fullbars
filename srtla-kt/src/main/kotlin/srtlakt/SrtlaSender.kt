@@ -22,6 +22,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * One background thread owns the core; public methods are thread-safe.
  *
+ * [clock]: milliseconds, never negative (the core keeps flag bits above the send times it logs). The default counts
+ * from when this class was first loaded.
  * [log]: one-off diagnostics (socket buffer sizes the OS granted, sockets replaced); never called per packet.
  * [onThreadStart]: runs first on the sender thread, e.g. to raise its scheduling priority on Android.
  * [linkSendBufferBytes] / [clientReceiveBufferBytes]: socket buffers to ask for (0 = leave the OS default). The OS may
@@ -31,7 +33,7 @@ class SrtlaSender(
     listenAddress: InetSocketAddress = InetSocketAddress("127.0.0.1", 0),
     private val config: SrtlaConfig = SrtlaConfig(),
     private val tickIntervalMs: Long = 50,
-    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val clock: () -> Long = { (System.nanoTime() - CLOCK_ORIGIN_NS) / 1_000_000 + 1 },
     private val onEvent: (SrtlaEvent) -> Unit = {},
     private val log: (String) -> Unit = {},
     private val onThreadStart: () -> Unit = {},
@@ -272,7 +274,11 @@ class SrtlaSender(
      * packets silently. Bounded only so a runaway sender can't stall housekeeping forever.
      */
     private fun drainClient(ch: DatagramChannel) {
-        repeat(CLIENT_DRAIN_MAX) {
+        // The clock is a () -> Long, so each read boxes a Long: read it once per batch, not once per packet. A batch
+        // of datagrams takes well under a millisecond to hand out.
+        var now = 0L
+        repeat(CLIENT_DRAIN_MAX) { i ->
+            if (i % CLOCK_EVERY_PACKETS == 0) now = clock()
             rx.clear()
             val from = try {
                 ch.receive(rx)
@@ -280,13 +286,15 @@ class SrtlaSender(
                 null
             } ?: return
             if (from != clientAddress) clientAddress = from
-            core.onClientPacket(rxArray, rx.position(), clock(), output)
+            core.onClientPacket(rxArray, rx.position(), now, output)
         }
     }
 
     /** A link's socket is connected, so read() (no sender address to allocate). Bounded so one link can't starve the others. */
     private fun drainLink(ch: DatagramChannel, id: Int) {
-        repeat(LINK_DRAIN_MAX) {
+        var now = 0L
+        repeat(LINK_DRAIN_MAX) { i ->
+            if (i % CLOCK_EVERY_PACKETS == 0) now = clock()
             rx.clear()
             val n = try {
                 ch.read(rx)
@@ -294,7 +302,7 @@ class SrtlaSender(
                 0
             }
             if (n <= 0) return
-            core.onLinkPacket(id, rxArray, n, clock(), output)
+            core.onLinkPacket(id, rxArray, n, now, output)
         }
     }
 
@@ -303,6 +311,8 @@ class SrtlaSender(
         private const val MAX_DATAGRAM = 2048
         private const val CLIENT_DRAIN_MAX = 4096
         private const val LINK_DRAIN_MAX = 64
+        private const val CLOCK_EVERY_PACKETS = 32
+        private val CLOCK_ORIGIN_NS = System.nanoTime()
         /** About a second of a 6-8 Mbps stream: a keyframe burst fits, a weak link can't hide seconds of queue. */
         const val DEFAULT_LINK_SEND_BUFFER = 1 shl 20
         const val DEFAULT_CLIENT_RECEIVE_BUFFER = 4 shl 20
