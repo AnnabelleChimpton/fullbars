@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window and splash only; Compose draws everything else (ui/theme/Theme.kt). -->
+    <style name="Theme.Fullbars" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/fb_bone</item>
+        <item name="android:windowSplashScreenBackground">@color/fb_ink</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+    </style>
+</resources>

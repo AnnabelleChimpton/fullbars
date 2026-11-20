@@ -1,0 +1,21 @@
+# Build outputs
+build/
+.gradle/
+.kotlin/
+*.apk
+*.aab
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
+local.properties
+
+# Secrets. The release keystore and its properties file belong outside the repo (android/README.md); these catch
+# copies that end up here by mistake.
+*.keystore
+*.jks
+keystore.properties
+*-keystore.properties
+.env
+

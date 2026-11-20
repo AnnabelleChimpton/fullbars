@@ -1,0 +1,59 @@
+# The app: unit tests, lint and a debug build, only when the app, the engine or the bonding library it builds with
+# changes (runs are the long ones). No secrets: the CI APK has no Twitch Client ID, so its sign-in can't work; test
+# builds for phones are on the Releases page.
+name: App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "srtla-kt/src/main/**"
+      - "srtla-kt/*.kts"
+      - "srtla-kt/gradle/**"
+      - ".github/workflows/app.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "srtla-kt/src/main/**"
+      - "srtla-kt/*.kts"
+      - "srtla-kt/gradle/**"
+      - ".github/workflows/app.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: App (tests, lint, debug build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test, lint, build
+        working-directory: android
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :engine:testDebugUnitTest :twitch:testDebugUnitTest :app:lintDebug :app:assembleDebug
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-reports
+          path: |
+            android/*/build/reports/
+            android/*/build/test-results/
+          retention-days: 14
+      - name: Keep the debug APK (no Twitch sign-in)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fullbars-debug-ci
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14

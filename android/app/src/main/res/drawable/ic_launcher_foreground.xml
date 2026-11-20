@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The "Steady" icon: three white bars of rising height, off-centre to the lower left; the tallest bar
+     continues across the top as one line holding the others up ("full bars, held steady"). 108 dp adaptive canvas,
+     artwork inside the 72 dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M30,66h9v12h-9z M45,55h9v23h-9z M30,38h39v6h-39z M60,38h9v40h-9z" />
+</vector>
