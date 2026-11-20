@@ -46,6 +46,8 @@ class HelperHost(
                 listenPort = hosting.port,
                 onTunnel = { h, endpoint -> links.addHelper(h.id, h.name, endpoint, h.localAddress) },
                 onTunnelGone = { h -> links.removeHelper(h.id) },
+                // Heat and battery, every few seconds: a helper that runs hot or low carries less before it fails.
+                onStatus = { h -> links.helperStatus(h.id, h.thermal, h.batteryPercentage) },
                 log = { Log.i(TAG, it) },
             )
         } catch (e: java.io.IOException) {

@@ -50,7 +50,10 @@ object Srt {
     const val HS_REQTYPE_INDUCTION = 1
     const val SEQ_MASK = 0x7fffffff
     private const val NAK_RANGE_FLAG = 0x80000000.toInt()
-    private const val NAK_MAX_IDS = 1000
+    /** Most sequence numbers taken from one NAK (a reused buffer for [nakSeqsInto] should be this big). */
+    const val NAK_MAX_IDS = 1000
+    /** "Not a data packet" from [dataSeqOrNone] / [ackNumberOrNone]. */
+    const val NO_SEQ = -1
 
     fun isControl(buf: ByteArray, len: Int): Boolean = len >= 1 && (buf[0].toInt() and 0x80) != 0
 
@@ -61,22 +64,45 @@ object Srt {
         return if (v and 0x80000000.toInt() == 0) v else null
     }
 
+    /**
+     * Like [dataSeq] without boxing (this runs for every packet): the sequence number, or -1 for control packets and
+     * short buffers. SRT sequence numbers are 31-bit, so -1 never collides with a real one.
+     */
+    fun dataSeqOrNone(buf: ByteArray, len: Int): Int {
+        if (len < 4) return NO_SEQ
+        val v = Bytes.readInt(buf, 0)
+        return if (v and 0x80000000.toInt() == 0) v else NO_SEQ
+    }
+
     /** Cumulative ACK number (next expected sequence) of an SRT ACK, or null. */
-    fun ackNumber(buf: ByteArray, len: Int): Int? {
-        if (len < 20 || Packets.type(buf, len) != TYPE_ACK) return null
+    fun ackNumber(buf: ByteArray, len: Int): Int? = ackNumberOrNone(buf, len).takeIf { it != NO_SEQ }
+
+    /** [ackNumber] without boxing: -1 when [buf] isn't an SRT ACK. */
+    fun ackNumberOrNone(buf: ByteArray, len: Int): Int {
+        if (len < 20 || Packets.typeOrNone(buf, len) != TYPE_ACK) return NO_SEQ
         return Bytes.readInt(buf, 16) and SEQ_MASK
     }
 
     /** Lost sequence numbers listed in an SRT NAK (loss report), with ranges expanded (capped). */
     fun nakSeqs(buf: ByteArray, len: Int): IntArray {
-        if (len < CONTROL_HEADER_LEN + 4 || Packets.type(buf, len) != TYPE_NAK) return IntArray(0)
-        val out = ArrayList<Int>()
+        val out = IntArray(NAK_MAX_IDS)
+        return out.copyOf(nakSeqsInto(buf, len, out))
+    }
+
+    /**
+     * Writes the lost sequence numbers of an SRT NAK into [out] (ranges expanded, at most `out.size`) and returns how
+     * many it wrote: 0 when [buf] isn't a NAK. Lets the caller keep one array for every NAK instead of allocating.
+     */
+    fun nakSeqsInto(buf: ByteArray, len: Int, out: IntArray): Int {
+        if (len < CONTROL_HEADER_LEN + 4 || Packets.typeOrNone(buf, len) != TYPE_NAK) return 0
+        val max = out.size
+        var n = 0
         var i = CONTROL_HEADER_LEN
-        while (i + 3 < len && out.size < NAK_MAX_IDS) {
+        while (i + 3 < len && n < max) {
             val id = Bytes.readInt(buf, i)
             i += 4
             if (id and NAK_RANGE_FLAG == 0) {
-                out.add(id)
+                out[n++] = id
                 continue
             }
             if (i + 3 >= len) break
@@ -85,19 +111,19 @@ object Srt {
             i += 4
             if (end and NAK_RANGE_FLAG != 0 || SeqMath.diff(end, start) < 0) continue
             var s = start
-            while (out.size < NAK_MAX_IDS) {
-                out.add(s)
+            while (n < max) {
+                out[n++] = s
                 if (s == end) break
                 s = SeqMath.next(s)
             }
         }
-        return out.toIntArray()
+        return n
     }
 
     /** True for the first handshake packet of a new SRT connection from the caller. */
     fun isHandshakeInduction(buf: ByteArray, len: Int): Boolean {
         if (len < CONTROL_HEADER_LEN + HANDSHAKE_CIF_LEN) return false
-        if (Packets.type(buf, len) != TYPE_HANDSHAKE) return false
+        if (Packets.typeOrNone(buf, len) != TYPE_HANDSHAKE) return false
         return Bytes.readInt(buf, CONTROL_HEADER_LEN + 20) == HS_REQTYPE_INDUCTION
     }
 }
@@ -115,6 +141,11 @@ data class KeepaliveInfo(
 object Packets {
     /** 16-bit packet type (SRT control type or SRTLA type), or null if too short. */
     fun type(buf: ByteArray, len: Int): Int? = if (len < 2) null else Bytes.readU16(buf, 0)
+
+    /** [type] without boxing, for the per-packet paths: [NO_TYPE] when too short. */
+    fun typeOrNone(buf: ByteArray, len: Int): Int = if (len < 2) NO_TYPE else Bytes.readU16(buf, 0)
+
+    const val NO_TYPE = -1
 
     fun reg1(id: ByteArray): ByteArray = typed(Srtla.TYPE_REG1, id)
     fun reg2(id: ByteArray): ByteArray = typed(Srtla.TYPE_REG2, id)
@@ -167,11 +198,13 @@ object Packets {
         seqs.forEachIndexed { i, s -> Bytes.writeInt(it, 4 + 4 * i, s) }
     }
 
-    fun srtlaAckSeqs(buf: ByteArray, len: Int): IntArray {
-        if (len < 8 || type(buf, len) != Srtla.TYPE_ACK) return IntArray(0)
-        val n = (len - 4) / 4
-        return IntArray(n) { Bytes.readInt(buf, 4 + 4 * it) }
-    }
+    fun srtlaAckSeqs(buf: ByteArray, len: Int): IntArray = IntArray(srtlaAckCount(buf, len)) { srtlaAckSeq(buf, it) }
+
+    /** How many sequence numbers an SRTLA ACK carries (0 if it isn't one); read each with [srtlaAckSeq], no copy. */
+    fun srtlaAckCount(buf: ByteArray, len: Int): Int =
+        if (len < 8 || typeOrNone(buf, len) != Srtla.TYPE_ACK) 0 else (len - 4) / 4
+
+    fun srtlaAckSeq(buf: ByteArray, i: Int): Int = Bytes.readInt(buf, 4 + 4 * i)
 
     private fun typed(type: Int, id: ByteArray): ByteArray {
         require(id.size == Srtla.ID_LEN) { "SRTLA id must be ${Srtla.ID_LEN} bytes" }

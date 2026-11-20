@@ -60,7 +60,7 @@ class LoopbackIntegrationTest {
         // A long dedup window: a copy of an ACK delayed past the app's 500 ms by a starved CI thread would otherwise count
         // as a second delivery (harmless in a real stream, where SRT ignores an ACK it has already had).
         val cfg = SrtlaConfig(connTimeoutMs = 1_000, dedupWindowMs = 5_000)
-        val sender = SrtlaSender(config = cfg, onEvent = { events += it }).start()
+        val sender = SrtlaSender(config = cfg, onEvent = { events += it }, log = { println(it) }).start()
         val linkPorts = mutableListOf<Int>()
         repeat(3) { i ->
             sender.addLink("link$i", receiver.address) {
@@ -121,10 +121,46 @@ class LoopbackIntegrationTest {
             // Bring it back: it re-registers by itself.
             receiver.blackholed.clear()
             waitFor(PROTOCOL_WAIT_MS, "link recovered") { sender.stats.connectedLinks == 3 }
+
+            val st = sender.stats
+            println(
+                "socket buffers granted: localhost receive ${st.clientReceiveBufferBytes / 1024} KB, " +
+                    "links send ${st.links.map { it.sendBufferBytes / 1024 }} KB; " +
+                    "local drops ${st.localDrops} (every link full: ${st.droppedLocal}), client send drops ${st.clientSendDrops}",
+            )
+            assertTrue(st.clientReceiveBufferBytes > 0 && st.links.all { it.sendBufferBytes > 0 }, "buffer sizes read back: $st")
+            assertEquals(0L, st.droppedLocal, "loopback never fills every link's socket")
         } finally {
             running.set(false)
             sender.close(); receiver.close(); client.close(); server.close()
             serverThread.join(500); clientRx.join(500)
+        }
+    }
+
+    @Test
+    fun `relink opens a fresh socket for the link and it registers again`() {
+        val server = DatagramSocket(0, loopback).apply { soTimeout = 100 }
+        val receiver = FakeSrtlaReceiver(InetSocketAddress("127.0.0.1", server.localPort))
+        val events = Collections.synchronizedList(mutableListOf<SrtlaEvent>())
+        val sender = SrtlaSender(onEvent = { events += it }).start()
+        val opened = Collections.synchronizedList(mutableListOf<Int>())
+        val id = sender.addLink("wifi", receiver.address) {
+            DatagramChannel.open().bind(InetSocketAddress(loopback, 0)).also { opened += (it.localAddress as InetSocketAddress).port }
+        }
+        try {
+            waitFor(WAIT_MS, "link connected") { sender.stats.connectedLinks == 1 }
+            val t0 = System.nanoTime()
+            sender.relink(id)
+            waitFor(PROTOCOL_WAIT_MS, "re-registered on a new socket") {
+                events.count { it is SrtlaEvent.LinkUp } == 2 && sender.stats.connectedLinks == 1
+            }
+            println("relink: back up after ${(System.nanoTime() - t0) / 1_000_000} ms")
+            assertEquals(2, opened.size, "a second socket was opened")
+            assertTrue(opened[0] != opened[1], "from a new local port: $opened")
+            assertTrue(events.any { it is SrtlaEvent.LinkDown && it.reason == "address changed" })
+            assertEquals(listOf(id), sender.stats.links.map { it.id }, "same link id")
+        } finally {
+            sender.close(); receiver.close(); server.close()
         }
     }
 

@@ -27,8 +27,12 @@ class MoblinkStreamer(
     private val onStatus: (Helper) -> Unit = {},
     private val log: (String) -> Unit = {},
     private val statusIntervalMs: Long = 5_000,
-    /** A helper that couldn't open a tunnel (no mobile data yet, say) is asked again this often while it stays. */
-    private val tunnelRetryMs: Long = 10_000,
+    /**
+     * A helper that couldn't open a tunnel (no mobile data yet, say) is asked again after this long, then twice as
+     * long each time up to [tunnelRetryMaxMs], for as long as it stays. A tunnel that opens starts the wait over.
+     */
+    private val tunnelRetryMs: Long = 1_000,
+    private val tunnelRetryMaxMs: Long = 10_000,
 ) {
     /** A connected helper. [localAddress]: this phone's end of its connection (which network it's on). */
     class Helper(val id: String, val name: String, val localAddress: java.net.InetAddress) {
@@ -47,6 +51,8 @@ class MoblinkStreamer(
         var helper: Helper? = null
         val nextId = AtomicInteger(1)
         val pending = ConcurrentHashMap<Int, Moblink.RequestData>()
+        /** Tunnel requests that failed in a row (sets the retry wait). */
+        @Volatile var tunnelFailures = 0
         fun request(d: Moblink.RequestData) {
             val id = nextId.getAndIncrement()
             pending[id] = d
@@ -160,17 +166,23 @@ class MoblinkStreamer(
                 val endpoint = InetSocketAddress(s.ws.remoteAddress, m.data.port)
                 if (h.tunnel != null) tunnelGone(h)
                 h.tunnel = endpoint
+                s.tunnelFailures = 0
                 log("moblink: $h tunnel at $endpoint")
                 safely("onTunnel") { onTunnel(h, endpoint) }
             }
             asked is Moblink.StartTunnel -> {
-                log("moblink: $h couldn't open a tunnel (${m.result}); asking again in ${tunnelRetryMs / 1000.0} s")
-                askAgainLater(s, h)
+                val wait = tunnelRetryDelayMs(s.tunnelFailures++, tunnelRetryMs, tunnelRetryMaxMs)
+                log("moblink: $h couldn't open a tunnel (${m.result}); asking again in ${wait / 1000.0} s")
+                askAgainLater(s, h, wait)
             }
             asked == Moblink.Status && m.data is Moblink.StatusReport -> {
                 h.batteryPercentage = m.data.batteryPercentage
                 h.thermal = m.data.thermal
-                onStatus(h)
+                // It answers, so it's reachable: a helper still without a tunnel is asked again now rather than at
+                // the end of its retry wait (its mobile data may just have come up).
+                val d = destination
+                if (h.tunnel == null && d != null && s.pending.values.none { it is Moblink.StartTunnel }) runCatching { s.request(d) }
+                safely("onStatus") { onStatus(h) }
             }
         }
     }
@@ -182,7 +194,7 @@ class MoblinkStreamer(
     }
 
     /** Asks [h] for a tunnel again unless it left, the stream ended, or a newer request is already out. */
-    private fun askAgainLater(s: Session, h: Helper) {
+    private fun askAgainLater(s: Session, h: Helper, waitMs: Long) {
         if (!running) return
         try {
             timer.schedule({
@@ -190,7 +202,7 @@ class MoblinkStreamer(
                 if (running && d != null && sessions[h.id] === s && s.pending.values.none { it is Moblink.StartTunnel }) {
                     runCatching { s.request(d) }
                 }
-            }, tunnelRetryMs, TimeUnit.MILLISECONDS)
+            }, waitMs, TimeUnit.MILLISECONDS)
         } catch (_: RejectedExecutionException) {} // stopping
     }
 
@@ -212,8 +224,12 @@ class MoblinkStreamer(
         sessions[helperId]?.let { s -> runCatching { s.request(d) } }
     }
 
-    private companion object {
+    internal companion object {
         const val HANDSHAKE_TIMEOUT_MS = 10_000
         const val IDLE_TIMEOUT_MS = 30_000
+
+        /** The wait before tunnel request number [failures] + 1: [firstMs], doubling, at most [maxMs]. */
+        fun tunnelRetryDelayMs(failures: Int, firstMs: Long, maxMs: Long): Long =
+            (firstMs shl failures.coerceIn(0, 20)).coerceAtMost(maxMs)
     }
 }

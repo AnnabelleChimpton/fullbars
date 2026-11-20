@@ -258,6 +258,62 @@ class MoblinkTest {
         }
     }
 
+    @Test
+    fun tunnelRetriesBackOffFromOneSecondToTen() {
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 10_000L, 10_000L),
+            (0..5).map { MoblinkStreamer.tunnelRetryDelayMs(it, 1_000, 10_000) })
+    }
+
+    @Test
+    fun aHelperWhoseFirstTunnelFailsGetsOneWellBeforeTheOldTenSecondWait() {
+        EchoServer().use { echo ->
+            val tunnels = ArrayBlockingQueue<InetSocketAddress>(4)
+            val streamer = MoblinkStreamer("pw", listenPort = 0, onTunnel = { _, at -> tunnels.add(at) }, onTunnelGone = {})
+            streamer.setDestination("127.0.0.1", echo.port)
+            val opens = AtomicInteger()
+            val failedAt = java.util.concurrent.atomic.AtomicLong()
+            val relay = MoblinkRelay("127.0.0.1", streamer.port, UUID.randomUUID().toString(), "Late data", "pw",
+                destinationChannel = {
+                    if (opens.getAndIncrement() == 0) {
+                        failedAt.set(System.nanoTime())
+                        throw IOException("no mobile data yet")
+                    } else DatagramChannel.open()
+                }).start()
+            try {
+                assertNotNull(tunnels.poll(5, TimeUnit.SECONDS))
+                val ms = (System.nanoTime() - failedAt.get()) / 1_000_000
+                // The first retry is due after 1 s. The bound leaves room for a loaded CI machine while still being far
+                // under the fixed 10 s wait this replaced.
+                assertTrue(ms < 4_000, "tunnel $ms ms after the failure")
+            } finally {
+                relay.stop()
+                streamer.stop()
+            }
+        }
+    }
+
+    @Test
+    fun aStatusReplyFromAHelperWithoutATunnelAsksAgainAtOnce() {
+        EchoServer().use { echo ->
+            val tunnels = ArrayBlockingQueue<InetSocketAddress>(4)
+            // The retry wait alone would take a minute; the status poll every 200 ms is what asks again.
+            val streamer = MoblinkStreamer("pw", listenPort = 0, onTunnel = { _, at -> tunnels.add(at) }, onTunnelGone = {},
+                statusIntervalMs = 200, tunnelRetryMs = 60_000, tunnelRetryMaxMs = 60_000)
+            streamer.setDestination("127.0.0.1", echo.port)
+            val opens = AtomicInteger()
+            val relay = MoblinkRelay("127.0.0.1", streamer.port, UUID.randomUUID().toString(), "Late data", "pw",
+                destinationChannel = {
+                    if (opens.getAndIncrement() == 0) throw IOException("no mobile data yet") else DatagramChannel.open()
+                }).start()
+            try {
+                assertNotNull(tunnels.poll(5, TimeUnit.SECONDS))
+            } finally {
+                relay.stop()
+                streamer.stop()
+            }
+        }
+    }
+
     /** The app's link manager may already be shut down when a helper's tunnel goes at stream end: no crash. */
     @Test
     fun callbackFailuresAtStopStayOnTheStreamersThreads() {
