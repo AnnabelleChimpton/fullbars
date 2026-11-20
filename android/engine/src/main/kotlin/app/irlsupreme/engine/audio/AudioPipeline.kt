@@ -51,9 +51,9 @@ class AudioPipeline(
      * ([AvDelayLine]). Asked once per chunk on the capture thread, so it must be cheap (a volatile read). Default: no
      * delay, as before.
      */
-    private val videoDelayNs: () -> Long = { 0L },
+    private val videoDelayNs: DelaySource = DelaySource { 0L },
     /** The user's own A/V offset, ns (+: audio later). See [videoDelayNs]. */
-    private val userAvOffsetNs: () -> Long = { 0L },
+    private val userAvOffsetNs: DelaySource = DelaySource { 0L },
     /**
      * For watching the phone's audio inputs come and go (a USB mic plugged in or out) and for [inputChoice]. Without
      * it the pipeline still notices its own recording being rerouted, but can't pick a device.
@@ -564,7 +564,7 @@ class AudioPipeline(
         )
         if (stage.usingCamera != wasCamera) Log.i(TAG, if (stage.usingCamera) "audio: camera" else "audio: phone mic")
         mix?.write(pcm, chunkFrames)
-        avDelay.push(pcm, stage.outPtsNs(ptsNs), videoDelayNs() + userAvOffsetNs(), toEncoder)
+        avDelay.push(pcm, stage.outPtsNs(ptsNs), videoDelayNs.ns() + userAvOffsetNs.ns(), toEncoder)
         avDelayNs = avDelay.appliedNs
         return level
     }

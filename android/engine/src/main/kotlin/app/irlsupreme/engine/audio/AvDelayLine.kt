@@ -1,5 +1,8 @@
 package app.irlsupreme.engine.audio
 
+/** A delay in ns, read once per audio chunk. A plain interface, not a Kotlin lambda, so reading it never boxes. */
+fun interface DelaySource { fun ns(): Long }
+
 /**
  * Delays the stream's audio against its picture, for lip sync (pure, unit-tested). The picture is stamped when it's
  * drawn, the audio when it's captured; a camera that takes ~100 ms to deliver a frame puts the sound that much ahead
