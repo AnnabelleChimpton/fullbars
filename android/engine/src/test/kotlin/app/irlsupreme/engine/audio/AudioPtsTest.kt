@@ -61,15 +61,82 @@ class AudioPtsTest {
         assertTrue("tracking error $worstErr ns", worstErr < 1_000_000)
     }
 
-    @Test fun aClockThatJumpsBackRebasesInsteadOfCrawling() {
+    @Test fun aClockThatJumpsBackEasesBackInsteadOfCrawlingOrStayingLate() {
         val p = AudioPts(chunk)
         var t = 2_000_000_000L
         var prev = p.next(t)
-        for (n in 1 until 200) {
+        for (n in 1 until 600) {
             t += chunk
             if (n == 100) t -= 100_000_000L // the timestamps re-anchor 100 ms earlier
             val out = p.next(t)
-            assertTrue("chunk $n spaced ${out - prev}", out - prev >= chunk - 500_000)
+            // No run of 1 µs steps: every chunk at most 0.5 ms closer than one chunk, never further apart.
+            assertTrue("chunk $n spaced ${out - prev}", out - prev >= chunk - 500_000 && out - prev <= chunk + 500_000)
+            prev = out
+        }
+        // ~4 s later the PTS are back on the capture clock, not 100 ms late for the rest of the source.
+        assertTrue("left ${prev - t} ns late", kotlin.math.abs(prev - t) < 1_000_000)
+    }
+
+    @Test fun lonelySpikesLeaveNoLastingShift() {
+        val p = AudioPts(chunk)
+        val t0 = 4_000_000_000L
+        val start = p.next(t0) - t0
+        var prev = t0 + start
+        var fills = 0
+        for (n in 1 until 1000) {
+            var raw = t0 + n * chunk
+            if (n == 300) raw += 6_000_000L // one chunk's timestamp 6 ms late...
+            if (n == 600) raw -= 6_000_000L // ...and one 6 ms early, each back on time the chunk after
+            val out = p.next(raw)
+            fills += p.fillChunks
+            assertTrue("chunk $n spaced ${out - prev}", kotlin.math.abs(out - prev - chunk) <= 500_000)
+            prev = out
+        }
+        assertEquals(0, fills)
+        val end = prev - (t0 + 999 * chunk)
+        assertTrue("shifted ${end - start} ns", kotlin.math.abs(end - start) < 1_000_000)
+    }
+
+    @Test fun aSpikeOfAWholeChunkThatReturnsIsEasedBack() {
+        val p = AudioPts(chunk)
+        val t0 = 4_000_000_000L
+        var prev = p.next(t0)
+        for (n in 1 until 400) {
+            var raw = t0 + n * chunk
+            if (n == 100) raw += 25_000_000L // looks like an overrun for one chunk only
+            val out = p.next(raw)
+            assertTrue(out > prev)
+            if (n > 101) assertTrue("chunk $n spaced ${out - prev}", out - prev >= chunk - 500_000)
+            prev = out
+        }
+        assertTrue("left ${prev - (t0 + 399 * chunk)} ns off", kotlin.math.abs(prev - (t0 + 399 * chunk)) < 1_000_000)
+    }
+
+    @Test fun aShortGapIsBelievedOnceTheNextChunkConfirmsIt() {
+        val p = AudioPts(chunk)
+        val t0 = 4_000_000_000L
+        var raw = t0
+        var prev = p.next(raw)
+        for (n in 1 until 200) {
+            raw += chunk
+            if (n == 100) raw += 10_000_000L // 10 ms really lost: every later timestamp is 10 ms on
+            val out = p.next(raw)
+            if (n == 100) assertTrue("held on the first chunk", out - prev < chunk + 500_000)
+            if (n == 101) assertTrue("taken on the second", out - prev > chunk + 9_000_000)
+            prev = out
+        }
+        assertTrue("left ${prev - raw} ns off", kotlin.math.abs(prev - raw) < 1_000_000)
+    }
+
+    @Test fun aClockResetBackRebasesAtOnce() {
+        val p = AudioPts(chunk)
+        var t = 9_000_000_000L
+        var prev = p.next(t)
+        for (n in 1 until 20) {
+            t += chunk
+            if (n == 10) t -= 3_000_000_000L // 3 s back: easing that out would take minutes
+            val out = p.next(t)
+            assertEquals(prev + chunk, out)
             prev = out
         }
     }
@@ -111,5 +178,10 @@ class AudioPtsTest {
         assertEquals(3, p.fillChunks)
         assertEquals(last + chunk, p.fillFromNs)
         assertTrue(back >= p.fillFromNs + 3 * chunk)
+    }
+
+    @Test fun theEncoderQueueHasRoomForTheLongestFill() {
+        // A fill encodes MAX_FILL_CHUNKS of silence and the real chunk at once, on top of whatever was waiting.
+        assertTrue(AudioPipeline.MAX_QUEUED_CHUNKS >= AudioPts.MAX_FILL_CHUNKS + 1 + 12)
     }
 }

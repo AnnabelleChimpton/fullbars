@@ -579,7 +579,7 @@ class AudioPipeline(
      * Never waits for the encoder. It used to wait up to 20 ms for an input buffer and then drop the chunk: a chunk is
      * 21 ms, so a busy encoder both cut a hole in the audio and held this thread off the mic long enough to overrun
      * it. Now a chunk with no buffer free waits in a short queue and goes in with the next one; only a queue that
-     * stays full for [MAX_QUEUED_CHUNKS] chunks drops its oldest.
+     * stays over [MAX_QUEUED_CHUNKS] chunks drops its oldest.
      */
     private fun encode(pcm: ByteArray, ptsNs: Long) {
         if (codecFailed) {
@@ -660,8 +660,13 @@ class AudioPipeline(
         private const val CODEC_RETRY_MIN_MS = 500L
         private const val CODEC_RETRY_MAX_MS = 5_000L
         private const val GOOD_CHUNKS_TO_RESET = 47
-        /** ~250 ms of chunks may wait for the encoder before the oldest is dropped. */
-        private const val MAX_QUEUED_CHUNKS = 12
+        /**
+         * Chunks that may wait for the encoder before the oldest is dropped: ~250 ms of normal backlog, plus room for
+         * the longest gap fill, which encodes up to [AudioPts.MAX_FILL_CHUNKS] chunks of silence and the real chunk
+         * in one go. Without that room an encoder with few input buffers would drop the start of the very fill that
+         * was meant to close the hole.
+         */
+        internal const val MAX_QUEUED_CHUNKS = 12 + AudioPts.MAX_FILL_CHUNKS + 1
         /** More gain reduction than this in a chunk counts as the limiter working hard (level set too hot). */
         private const val HEAVY_LIMIT_DB = 6f
         private val directExecutor = Executor { it.run() }
@@ -756,16 +761,26 @@ internal class ChunkClock(private val sampleRate: Int, private val chunkNs: Long
  *
  * Within a source each chunk is expected one chunk after the last. A timestamp within [TOLERANCE_NS] of that is
  * jitter: the PTS moves only 1/64 of the way towards it, which smooths the jitter out but still follows the real
- * clock (no long-run drift). A chunk [TOLERANCE_NS] or more late is a real gap (an overrun lost audio, or a mic came
- * back late): it keeps its time, and [fillChunks] says how many whole chunks of silence to encode before it, from
- * [fillFromNs], so the AAC timeline has no hole (the server would otherwise splice across it or a player would
- * stutter). A chunk [TOLERANCE_NS] or more early means the clock re-anchored backwards: the timeline rebases there
- * instead of pinning a run of chunks 1 µs apart.
+ * clock (no long-run drift).
+ *
+ * A chunk a whole chunk or more late is a real gap (an overrun lost audio, or a mic came back late): it keeps its
+ * time, and [fillChunks] says how many whole chunks of silence to encode before it, from [fillFromNs], so the AAC
+ * timeline has no hole (the server would otherwise splice across it or a player would stutter). A chunk late by less
+ * than that is only believed when the next one is late by the same amount: phones' timestamps spike now and then,
+ * and taking a lone spike as a gap would leave a hole and, once the next chunk came back, a backwards step.
+ *
+ * A chunk [TOLERANCE_NS] or more early (the clock re-anchored backwards, or a forward spike just ended) is eased
+ * towards, at most [EASE_STEP_NS] per chunk, rather than pinned a run of chunks 1 µs apart or rebased for good. Easing
+ * keeps the PTS on the capture clock: a rebase that stays would leave every later chunk late by the jump (a lasting
+ * lip-sync error), and a spike would add its size to that each time. Only a jump back of more than [MAX_EASE_NS]
+ * (a clock reset, not jitter) rebases at once.
  */
 internal class AudioPts(private val chunkNs: Long, private val maxFillChunks: Int = MAX_FILL_CHUNKS) {
     private var last = Long.MIN_VALUE
     private var offset = 0L
     private var rebase = true
+    /** A sub-chunk forward jump seen on the last chunk and not yet confirmed (0: none). */
+    private var pendingNs = 0L
 
     /** Whole chunks of silence to encode just before the chunk [next] last stamped (0: none), the first at [fillFromNs]. */
     var fillChunks = 0
@@ -785,23 +800,34 @@ internal class AudioPts(private val chunkNs: Long, private val maxFillChunks: In
         if (last == Long.MIN_VALUE) {
             rebase = false
             offset = 0L
+            pendingNs = 0L
             last = rawNs
             return rawNs
         }
         if (rebase) {
             rebase = false
+            pendingNs = 0L
             offset = if (rawNs < last + chunkNs) last + chunkNs - rawNs else 0L
         }
         val p = rawNs + offset
         val expected = last + chunkNs
         val err = p - expected
+        val wasPending = pendingNs
+        pendingNs = 0L
         val out = when {
-            err >= TOLERANCE_NS -> {
+            err >= chunkNs -> {
                 val n = err / chunkNs
-                if (n in 1..maxFillChunks.toLong()) { fillChunks = n.toInt(); fillFromNs = expected }
+                if (n <= maxFillChunks) { fillChunks = n.toInt(); fillFromNs = expected }
                 p // what's left (under a chunk) stays a short gap
             }
-            err <= -TOLERANCE_NS -> { offset -= err; expected }
+            err >= TOLERANCE_NS -> {
+                // Late by part of a chunk: a gap only if the last chunk was late by about as much.
+                val d = err - wasPending
+                if (wasPending != 0L && d > -TOLERANCE_NS && d < TOLERANCE_NS) p
+                else { pendingNs = err; expected + TOLERANCE_NS / 64 }
+            }
+            err <= -MAX_EASE_NS -> { offset -= err; expected }
+            err <= -TOLERANCE_NS -> expected - EASE_STEP_NS
             else -> expected + err / 64
         }
         val a = if (err < 0) -err else err
@@ -812,7 +838,11 @@ internal class AudioPts(private val chunkNs: Long, private val maxFillChunks: In
 
     companion object {
         const val TOLERANCE_NS = 5_000_000L
-        /** Gaps up to ~213 ms are filled; longer ones are left for the server (the encoder queue holds ~250 ms). */
+        /** Easing back moves the PTS at most this much per chunk: frames overlap by at most 0.5 ms meanwhile. */
+        const val EASE_STEP_NS = 500_000L
+        /** A step back bigger than this is a clock reset, not something to ease out over minutes: rebase. */
+        const val MAX_EASE_NS = 500_000_000L
+        /** Gaps up to ~213 ms are filled; longer ones are left for the server. */
         const val MAX_FILL_CHUNKS = 10
         const val JITTER_BUCKETS = 5
     }
