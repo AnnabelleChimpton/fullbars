@@ -51,7 +51,9 @@ Each run writes `result.json`. The headline numbers per scenario:
 - **unrecoverable packets** (`srt_dropped_unrecoverable`): what the SRT receiver gave up on; each one is a visible
   glitch. Target: 0 outside the tunnel scenario.
 - **time to divert** (`time_to_divert_s`): from a link dying to it carrying almost nothing, from per-second counts.
-- **utilisation**: the bitrate the controller settles on, over the shaped capacity.
+- **utilisation**: the bitrate the controller settles on, over the shaped capacity. With `SOURCE=synth`, `run.sh`
+  sets the controller's ceiling above each scenario's capacity, so the links, not the ceiling, limit it;
+  `abr_seconds_at_ceiling` in `result.json` shows when that didn't hold.
 - **resend excess** (`retransmit_excess_ratio`): resends beyond the real losses; high means reordering is mistaken for
   loss.
 
@@ -80,10 +82,14 @@ of real motion (a walk, not the clip; `analyze.py` counts repeats on any recordi
 
 ## Numbers so far
 
+The dead-link rows are from the fake-clock simulation (three links, 40/60/80 ms one way, 3 Mbps, the last-added
+link dies), not from a real network; FailoverTest prints them on every run. The test's limits are in brackets.
+
 | Measure | Result | How |
 |---|---|---|
-| Dead link: traffic off it after | at most one base RTT + 150 ms (about 270 ms on a 160 ms link) | FailoverTest, simulated |
-| Dead link: packets lost into it | at most its in-flight cap + 5 | FailoverTest, simulated |
+| Dead link: last packet sent to it after the cut | 267 ms on a 160 ms RTT link, uplink-only or both ways (limit: RTT + 150 ms) | FailoverTest, simulated |
+| Dead link: packets lost into it before traffic moves | 19, with an in-flight cap of 42 (limit: cap + 5) | FailoverTest, simulated |
+| Dead link: declared down after the cut | 5.1 s, uplink-only ("uplink dead") or both ways ("timeout"); 48 packets into it in all (limit: 5 s timeout + RTT + 50 ms tick) | FailoverTest, simulated |
 | Encoder (OnePlus 12) | not measured yet | EncoderCadenceTest log line |
 | Max IDR interval at 30 / 20 / 15 fps in | not measured yet | EncoderCadenceTest |
 | Bitrate 3-6 s after a change | not measured yet | EncoderCadenceTest |

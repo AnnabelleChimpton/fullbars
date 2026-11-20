@@ -35,6 +35,10 @@ class FailoverTest {
     @Test
     fun `dead last link is declared down within connTimeoutMs`() = declaredDown(dead = 2, uplinkOnly = true)
 
+    // Both ways dead: no keepalive echoes either, so this is the plain timeout path rather than "uplink dead".
+    @Test
+    fun `last link dead both ways is declared down within connTimeoutMs`() = declaredDown(dead = 2, uplinkOnly = false)
+
     // These fail today: when an SRTLA ACK arrives, SrtlaCore credits it to the first link (in the order links were
     // added) whose logs hold that sequence number, not to the link the ACK arrived on. A packet lost on a dead link
     // is NAKed, resent on a live one and acknowledged there; if the dead link was added earlier, the ACK clears the
@@ -96,6 +100,8 @@ class FailoverTest {
         assertTrue(burst.size <= k.cap + MARGIN_PACKETS, "${burst.size} packets into the dead link (cap ${k.cap})")
         // The sender can't know before the dead link's ACKs are overdue: one base RTT plus the overdue margin.
         val divertMs = (burst.maxOrNull() ?: k.killAt) - k.killAt
+        // The measured numbers, for docs/BENCHMARKS.md (the asserts below are limits, not the values).
+        println("failover divert: dead=$dead uplinkOnly=$uplinkOnly rtt=${k.rtt}ms cap=${k.cap} packetsIntoDead=${burst.size} divertMs=$divertMs")
         assertTrue(divertMs <= k.rtt + DIVERT_SLACK_MS, "traffic left the dead link after $divertMs ms (base RTT ${k.rtt} ms)")
 
         // The other two had room all along, so nothing was forced over a cap and nothing was dropped.
@@ -116,6 +122,7 @@ class FailoverTest {
         assertEquals(dead, down.linkId)
         assertEquals(if (uplinkOnly) "uplink dead" else "timeout", down.reason)
         val downAt = sim.eventTimes[sim.events.indexOf(down)]
+        println("failover down: dead=$dead reason=${down.reason} rtt=${k.rtt}ms afterKillMs=${downAt - k.killAt} packetsIntoDead=${k.dataToDead.size}")
         // Proof can still arrive for one RTT after the kill (ACKs and keepalive echoes already on their way back).
         assertTrue(downAt - k.killAt <= config.connTimeoutMs + k.rtt + Sim.TICK_MS, "LinkDown ${downAt - k.killAt} ms after the kill")
         // At most one more cap's worth after the delay log ages out, until LinkDown.
@@ -275,7 +282,8 @@ class FailoverTest {
         const val MARGIN_PACKETS = 5
         /**
          * How long past one base RTT the last packet may go to a dead link: LinkState's 100 ms overdue margin plus a
-         * tick. With ten-packet ACK batches this is ~250 ms on a 160 ms link; bigger batches stretch it past this.
+         * tick. With ten-packet ACK batches the simulated value is well inside this (see docs/BENCHMARKS.md); bigger
+         * batches stretch it past the limit.
          */
         const val DIVERT_SLACK_MS = 150L
         /** LinkState's SENT_LOG_MAX_AGE_MS, after which a lost packet stops counting against a link's cap. */
