@@ -27,6 +27,7 @@ class RtmpIngestServerTest {
         }
         override fun onAudioConfig(session: Int, asc: ByteArray) { this@RtmpIngestServerTest.asc = asc }
         override fun onAudio(session: Int, aac: ByteArray, ptsMs: Long) { events += "audio $ptsMs ${aac.size}" }
+        override fun onUnsupportedVideo(session: Int, fourcc: String) { events += "unsupported $session $fourcc" }
         override fun onEnd(session: Int, reason: String) { events += "end $session $reason"; ended.countDown() }
     }
     private var server: RtmpIngestServer? = null
@@ -126,6 +127,74 @@ class RtmpIngestServerTest {
         assertEquals(0x1000005L, video[2].second)
         assertTrue(events.contains("audio 41 300"))
         assertTrue(events.last().startsWith("end 1 camera stopped"))
+    }
+
+    /** An Enhanced RTMP video tag: IsExHeader, [frameType], [packetType], optional ModEx prefix, FourCC, body. */
+    private fun exTag(frameType: Int, packetType: Int, fourcc: String, body: ByteArray, modEx: ByteArray? = null): ByteArray =
+        ByteArrayOutputStream().apply {
+            if (modEx != null) {
+                write(0x80 or (frameType shl 4) or 7) // ModEx first...
+                write(modEx.size - 1); write(modEx)
+                write((0 shl 4) or packetType) // ...then the real packet type (mod-ex type 0: timestamp offset)
+            } else {
+                write(0x80 or (frameType shl 4) or packetType)
+            }
+            write(fourcc.toByteArray(Charsets.US_ASCII))
+            write(body)
+        }.toByteArray()
+
+    private fun streamOne(vararg tags: ByteArray) {
+        server = RtmpIngestServer(0, listener).start()
+        val c = Client(server!!.localPort)
+        c.publish("live", "cam")
+        var ts = 0L
+        for (t in tags) { c.writer.write(6, RtmpType.VIDEO, 1, ts, t); ts += 33 }
+        c.command("FCUnpublish", 6.0, null, "cam")
+        assertTrue(ended.await(5, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `an Enhanced RTMP HEVC camera is reported once and never decoded as H264`() {
+        val hevcFrame = byteArrayOf(0, 0, 0) + u32(5) + byteArrayOf(0x26, 1, 2, 3, 4)
+        streamOne(
+            exTag(1, 0, "hvc1", ByteArray(23)), // HEVCDecoderConfigurationRecord (contents don't matter here)
+            exTag(1, 1, "hvc1", hevcFrame),
+            exTag(2, 3, "hvc1", u32(5) + byteArrayOf(2, 1, 2, 3, 4)),
+        )
+        assertEquals(listOf("unsupported 1 hvc1"), events.filter { it.startsWith("unsupported") })
+        assertEquals(null, sps)
+        assertTrue(video.isEmpty())
+    }
+
+    @Test
+    fun `a ModEx packet is not misparsed as AVC`() {
+        // ModEx's packet type is 7, the legacy AVC codec id: read as legacy FLV it would be "AVC".
+        streamOne(exTag(1, 1, "hvc1", byteArrayOf(0, 0, 0) + u32(3) + byteArrayOf(0x26, 1, 2), modEx = byteArrayOf(0, 0, 1)))
+        assertTrue(video.isEmpty())
+        assertEquals(listOf("unsupported 1 hvc1"), events.filter { it.startsWith("unsupported") })
+    }
+
+    @Test
+    fun `Enhanced RTMP H264 is decoded like the legacy form, ModEx prefix and all`() {
+        val cfg = avcSeqHeader().copyOfRange(5, avcSeqHeader().size)
+        streamOne(
+            exTag(1, 0, "avc1", cfg),
+            exTag(1, 1, "avc1", byteArrayOf(0, 0, 66) + avcFrame(true, 0, listOf(20)).copyOfRange(5, 5 + 24)),
+            exTag(2, 3, "avc1", avcFrame(false, 0, listOf(10)).copyOfRange(5, 5 + 14), modEx = byteArrayOf(0, 0, 1)),
+        )
+        assertArrayEquals(byteArrayOf(0, 0, 0, 1) + spsBytes, sps)
+        assertEquals(2, video.size)
+        assertEquals(33L + 66, video[0].second) // dts 33 + composition time 66
+        assertTrue(video[0].third)
+        assertEquals(66L, video[1].second) // CodedFramesX: no composition time
+        assertTrue(events.none { it.startsWith("unsupported") })
+    }
+
+    @Test
+    fun `a legacy non-AVC codec id is reported once`() {
+        streamOne(byteArrayOf(0x1C, 0, 0, 0, 0, 1), byteArrayOf(0x2C, 1, 0, 0, 0, 1)) // id 12: the unofficial HEVC
+        assertEquals(listOf("unsupported 1 hvc1"), events.filter { it.startsWith("unsupported") })
+        assertTrue(video.isEmpty())
     }
 
     @Test

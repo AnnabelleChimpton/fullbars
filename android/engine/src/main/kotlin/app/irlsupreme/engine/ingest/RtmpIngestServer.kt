@@ -24,6 +24,11 @@ interface IngestListener {
     fun onAudioConfig(session: Int, asc: ByteArray) {}
     /** One raw AAC frame. */
     fun onAudio(session: Int, aac: ByteArray, ptsMs: Long) {}
+    /**
+     * The camera sends video this server can't decode ([fourcc]: "hvc1" for HEVC, "av01", "vp09", or the legacy FLV
+     * codec's name), so nothing will show. Once per session, so the status can say what to change on the camera.
+     */
+    fun onUnsupportedVideo(session: Int, fourcc: String) {}
     fun onEnd(session: Int, reason: String) {}
 }
 
@@ -31,7 +36,8 @@ interface IngestListener {
  * A minimal publish-only RTMP server for cameras on the local network (the Pocket 3 streams to
  * `rtmp://<phone>:1935/live/<name>`; any RTMP encoder works the same way). One publisher at a time: a new one
  * replaces the old, as a camera that reconnected after a Wi-Fi blip should. H.264 + AAC (the Pocket 3 sends
- * "classic" FLV; Enhanced RTMP isn't needed for it).
+ * "classic" FLV). Enhanced RTMP H.264 ("avc1") is read too; other Enhanced RTMP codecs (HEVC, AV1, VP9) are reported
+ * through [IngestListener.onUnsupportedVideo] rather than shown as a camera that's connected but black.
  *
  * Plain RTMP has no authentication; the server listens on the phone's local networks (its hotspot, Wi-Fi), and the
  * stream [path] works as a shared secret against other devices on a public Wi-Fi.
@@ -86,7 +92,7 @@ class RtmpIngestServer(
             var appName = ""
             var acked = 0L
             var window = DEFAULT_WINDOW
-            var avcLengthSize = 4
+            val video = VideoState()
             while (true) {
                 val m = reader.readMessage()
                 if (counting.count - acked >= window) { // keep peers that wait for acknowledgements going
@@ -142,9 +148,7 @@ class RtmpIngestServer(
                             "FCUnpublish", "deleteStream", "closeStream" -> { reason = "camera stopped"; return }
                         }
                     }
-                    RtmpType.VIDEO -> if (session != 0) {
-                        avcLengthSize = video(session, m, avcLengthSize)
-                    }
+                    RtmpType.VIDEO -> if (session != 0) video(session, m, video)
                     RtmpType.AUDIO -> if (session != 0) audio(session, m)
                 }
             }
@@ -159,26 +163,92 @@ class RtmpIngestServer(
         }
     }
 
-    /** FLV video tag: frame type + codec, AVC packet type, composition time, then AVCC data. */
-    private fun video(session: Int, m: RtmpMessage, lengthSize: Int): Int {
+    /** Per-session video parsing state. */
+    private class VideoState {
+        var lengthSize = 4
+        var reportedUnsupported = false
+        /** H.264 has arrived: an odd tag after that isn't worth telling the user their camera is unsupported. */
+        var sawAvc = false
+    }
+
+    /**
+     * FLV video tag. Legacy: frame type + codec id, AVC packet type, composition time, then AVCC data. Enhanced RTMP
+     * (the IsExHeader bit): frame type + packet type, then a FourCC, so the low nibble is *not* a codec id there (a
+     * ModEx packet's type, 7, would otherwise read as AVC).
+     */
+    private fun video(session: Int, m: RtmpMessage, st: VideoState) {
         val p = m.payload
-        if (p.size < 5 || (p[0].toInt() and 0x0F) != 7) return lengthSize // AVC only
-        val keyframe = ((p[0].toInt() and 0xFF) ushr 4) == 1
-        val cts = ((p[2].toInt() shl 16) or ((p[3].toInt() and 0xFF) shl 8) or (p[4].toInt() and 0xFF)).let {
-            if (it and 0x800000 != 0) it or -0x1000000 else it // signed 24-bit
-        }
+        if (p.isEmpty()) return
+        val b0 = p[0].toInt() and 0xFF
+        if (b0 and 0x80 != 0) { exVideo(session, m, st); return }
+        if ((b0 ushr 4) == 5) return // a video info/command frame: no picture, whatever the codec
+        val codecId = b0 and 0x0F
+        if (codecId != 7) { unsupported(session, st, legacyCodecName(codecId)); return }
+        if (p.size < 5) return
+        val keyframe = (b0 ushr 4) == 1
+        val cts = si24(p, 2)
         when (p[1].toInt()) {
-            0 -> { // AVCDecoderConfigurationRecord
-                val cfg = parseAvcConfig(p, 5) ?: return lengthSize
-                listener.onVideoConfig(session, cfg.sps, cfg.pps)
-                return cfg.lengthSize
-            }
-            1 -> {
-                val annexB = avccToAnnexB(p, 5, lengthSize) ?: return lengthSize
-                listener.onVideo(session, annexB, m.timestamp, m.timestamp + cts, keyframe)
-            }
+            0 -> avcConfig(session, p, 5, st)
+            1 -> avcFrame(session, p, 5, m.timestamp, cts, keyframe, st)
         }
-        return lengthSize
+    }
+
+    /** Enhanced RTMP video: skips any ModEx prefixes, reads the FourCC, and handles "avc1"; anything else is reported. */
+    private fun exVideo(session: Int, m: RtmpMessage, st: VideoState) {
+        val p = m.payload
+        val b0 = p[0].toInt() and 0xFF
+        val frameType = (b0 ushr 4) and 0x07
+        var type = b0 and 0x0F
+        if (frameType == 5 && type != EX_METADATA) return // a video command (seek markers): no payload to decode
+        var i = 1
+        while (type == EX_MOD_EX) { // [size-1][data][modExType << 4 | next packet type]
+            if (i >= p.size) return
+            var size = (p[i++].toInt() and 0xFF) + 1
+            if (size == 256) {
+                if (i + 2 > p.size) return
+                size = (((p[i].toInt() and 0xFF) shl 8) or (p[i + 1].toInt() and 0xFF)) + 1
+                i += 2
+            }
+            i += size
+            if (i >= p.size) return
+            type = p[i++].toInt() and 0x0F
+        }
+        if (type == EX_MULTITRACK) {
+            if (i >= p.size) return
+            val trackMode = (p[i++].toInt() and 0xFF) ushr 4
+            val fourcc = if (trackMode != 2 && i + 4 <= p.size) fourcc(p, i) else "multitrack"
+            unsupported(session, st, fourcc)
+            return
+        }
+        if (i + 4 > p.size) return
+        val fourcc = fourcc(p, i)
+        i += 4
+        if (fourcc != "avc1") { unsupported(session, st, fourcc); return }
+        val keyframe = frameType == 1
+        when (type) {
+            EX_SEQUENCE_START -> avcConfig(session, p, i, st)
+            EX_CODED_FRAMES -> if (i + 3 <= p.size) avcFrame(session, p, i + 3, m.timestamp, si24(p, i), keyframe, st)
+            EX_CODED_FRAMES_X -> avcFrame(session, p, i, m.timestamp, 0, keyframe, st)
+        }
+    }
+
+    private fun avcConfig(session: Int, p: ByteArray, off: Int, st: VideoState) {
+        val cfg = parseAvcConfig(p, off) ?: return
+        listener.onVideoConfig(session, cfg.sps, cfg.pps)
+        st.lengthSize = cfg.lengthSize
+        st.sawAvc = true
+    }
+
+    private fun avcFrame(session: Int, p: ByteArray, off: Int, dtsMs: Long, cts: Int, keyframe: Boolean, st: VideoState) {
+        val annexB = avccToAnnexB(p, off, st.lengthSize) ?: return
+        st.sawAvc = true
+        listener.onVideo(session, annexB, dtsMs, dtsMs + cts, keyframe)
+    }
+
+    private fun unsupported(session: Int, st: VideoState, fourcc: String) {
+        if (st.reportedUnsupported || st.sawAvc) return
+        st.reportedUnsupported = true
+        listener.onUnsupportedVideo(session, fourcc)
     }
 
     /** FLV audio tag: format (10 = AAC) + rate/size/channels, AAC packet type, then data. */
@@ -214,6 +284,31 @@ class RtmpIngestServer(
         private const val READ_TIMEOUT_MS = 10_000
         private val random = SecureRandom()
         private val START = byteArrayOf(0, 0, 0, 1)
+        // Enhanced RTMP video packet types.
+        private const val EX_SEQUENCE_START = 0
+        private const val EX_CODED_FRAMES = 1
+        private const val EX_CODED_FRAMES_X = 3
+        private const val EX_METADATA = 4
+        private const val EX_MULTITRACK = 6
+        private const val EX_MOD_EX = 7
+
+        private fun si24(b: ByteArray, off: Int): Int =
+            ((b[off].toInt() shl 16) or ((b[off + 1].toInt() and 0xFF) shl 8) or (b[off + 2].toInt() and 0xFF)).let {
+                if (it and 0x800000 != 0) it or -0x1000000 else it // signed 24-bit
+            }
+
+        private fun fourcc(b: ByteArray, off: Int): String =
+            String(CharArray(4) { k -> (b[off + k].toInt() and 0xFF).toChar() })
+
+        /** Legacy FLV video codec ids by name; 12 is the unofficial HEVC id some encoders use. */
+        private fun legacyCodecName(id: Int): String = when (id) {
+            2 -> "h263"
+            3, 6 -> "screen video"
+            4, 5 -> "vp6"
+            12 -> "hvc1"
+            13 -> "av01"
+            else -> "codec $id"
+        }
 
         /** Parses an AVCDecoderConfigurationRecord at [off]: first SPS and PPS (with start codes) and NAL length size. */
         fun parseAvcConfig(b: ByteArray, off: Int): AvcConfig? = runCatching {
