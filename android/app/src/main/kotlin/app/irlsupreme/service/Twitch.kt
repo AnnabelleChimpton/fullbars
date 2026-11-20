@@ -41,7 +41,12 @@ data class ChatLine(
     val atMs: Long = System.currentTimeMillis(),
     /** [text] in pieces with Twitch emotes marked (empty: no emotes, just [text]). */
     val fragments: List<app.irlsupreme.twitch.ChatFragment> = emptyList(),
+    /** A Twitch notice in words that follow the name ("watched 12 streams in a row"); [text] is then optional. */
+    val notice: String? = null,
 )
+
+/** Where a [ChatLine]'s notice ends and its message starts, when it has both. */
+const val CHAT_NOTICE_SEPARATOR = " · "
 
 /** Recent chat, published by [StreamService] while live and read by the live screen. */
 object ChatFeed {
@@ -60,7 +65,7 @@ object ChatFeed {
 
     fun add(m: ChatMessage, isCommand: Boolean) {
         m.fragments.forEach { if (it is app.irlsupreme.twitch.ChatFragment.Emote) EmoteCache.request(it.id) }
-        _lines.value = (_lines.value + ChatLine(m.messageId, m.chatterDisplayName, m.color, m.text, isCommand, fragments = m.fragments)).takeLast(KEEP)
+        _lines.value = (_lines.value + ChatLine(m.messageId, m.chatterDisplayName, m.color, m.text, isCommand, fragments = m.fragments, notice = m.notice)).takeLast(KEEP)
     }
 
     fun setStatus(s: String?) { _status.value = s }

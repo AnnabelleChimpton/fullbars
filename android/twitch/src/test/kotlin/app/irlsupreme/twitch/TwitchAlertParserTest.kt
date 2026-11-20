@@ -64,6 +64,34 @@ class TwitchAlertParserTest {
         assertNull(EventSubParser.parseChatNotification("x", notification("announcement", """"announcement":{"color":"BLUE"}""")))
     }
 
+    @Test fun `a shared watch streak is a chat notice, not an alert`() {
+        val streak = notification("watch_streak", """"watch_streak":{"streak_count":5,"channel_points_awarded":350}""")
+        assertNull(EventSubParser.parseChatNotification("x", streak))
+        val m = EventSubParser.parseChatNotice("x", streak)!!
+        assertEquals("watched 5 streams in a row", m.notice)
+        assertEquals("KitIRL", m.chatterDisplayName)
+        assertEquals("kitirl", m.chatterLogin)
+        assertEquals("#FF0000", m.color)
+        assertEquals("m1", m.messageId)
+        assertEquals("", m.text)
+        // Without a count it still shows; other notices aren't chat lines.
+        assertEquals("shared a watch streak", EventSubParser.parseChatNotice("x", notification("watch_streak", """"watch_streak":null"""))!!.notice)
+        assertNull(EventSubParser.parseChatNotice("x", notification("sub", """"sub":{"sub_tier":"1000","is_prime":false}""")))
+        assertNull(EventSubParser.parseChatNotice("x", notification("announcement", """"announcement":{"color":"BLUE"}""")))
+    }
+
+    @Test fun `a mod's words on their watch streak are never a command`() {
+        val shared = EventSubParser.parseChatNotice(
+            "x",
+            obj(
+                """{"broadcaster_user_id":"1","chatter_user_id":"2","chatter_user_name":"KitIRL","chatter_user_login":"kitirl",
+                "badges":[{"set_id":"moderator","id":"1","info":""}],"message_id":"m2","message":{"text":"!end now","fragments":[]},
+                "notice_type":"watch_streak","watch_streak":{"streak_count":3,"channel_points_awarded":0}}""",
+            ),
+        )!!
+        assertEquals(CommandResult.NotACommand, ChatCommandParser.parse(shared))
+    }
+
     @Test fun `cheers come with chat messages, follows on their own`() {
         val chat = EventSubParser.parseChatMessage(
             obj(

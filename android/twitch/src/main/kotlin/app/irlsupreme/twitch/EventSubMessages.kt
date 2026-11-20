@@ -46,6 +46,11 @@ data class ChatMessage(
     val bits: Int? = null,
     /** [text] in pieces, with Twitch emotes marked, so they can be drawn as images. Empty: just [text]. */
     val fragments: List<ChatFragment> = emptyList(),
+    /**
+     * Non-null for a Twitch notice shown in chat rather than something typed, in words that follow the name, e.g.
+     * "watched 12 streams in a row" for a shared watch streak. [text] is then the viewer's own message, often empty.
+     */
+    val notice: String? = null,
 ) {
     val isBroadcaster: Boolean get() = chatterUserId == broadcasterUserId || badges.any { it.setId == "broadcaster" }
     val isModerator: Boolean get() = badges.any { it.setId == "moderator" }
@@ -154,6 +159,35 @@ internal object EventSubParser {
         }
     }
 
+    /**
+     * A `channel.chat.notification` that Twitch shows in chat as a line of its own and Fullbars has no alert for, as a
+     * chat message with [ChatMessage.notice] set: so far a viewer sharing their watch streak. Null for everything else.
+     */
+    fun parseChatNotice(messageId: String, event: JsonObject): ChatMessage? {
+        val e = decodeOrThrow("channel.chat.notification event") { TwitchJson.decodeFromJsonElement(ChatNotificationDto.serializer(), event) }
+        val notice = when (e.noticeType) {
+            "watch_streak" -> e.watchStreak?.streakCount?.takeIf { it > 0 }?.let { "watched $it streams in a row" } ?: "shared a watch streak"
+            else -> return null
+        }
+        val login = e.chatterUserLogin ?: return null
+        val text = e.message?.text.orEmpty()
+        return ChatMessage(
+            messageId = e.messageId ?: messageId,
+            broadcasterUserId = e.broadcasterUserId.orEmpty(),
+            chatterUserId = e.chatterUserId.orEmpty(),
+            chatterLogin = login,
+            chatterDisplayName = e.chatterUserName ?: login,
+            color = e.color?.takeIf { it.isNotBlank() },
+            text = text,
+            badges = e.badges.orEmpty().map { ChatBadge(it.setId, it.id, it.info?.takeIf { i -> i.isNotBlank() }) },
+            messageType = e.noticeType,
+            replyParentMessageId = null,
+            sourceBroadcasterUserId = e.sourceBroadcasterUserId,
+            fragments = chatFragments(e.message?.fragments).takeIf { f -> f.any { it is ChatFragment.Emote } }.orEmpty(),
+            notice = notice,
+        )
+    }
+
     fun parseFollow(messageId: String, event: JsonObject): TwitchAlert.Follow {
         val e = decodeOrThrow("channel.follow event") { TwitchJson.decodeFromJsonElement(FollowDto.serializer(), event) }
         return TwitchAlert.Follow(messageId, e.userName)
@@ -219,8 +253,17 @@ internal data class CheerDto(val bits: Int = 0)
 @Serializable
 internal data class ChatNotificationDto(
     @SerialName("notice_type") val noticeType: String,
+    @SerialName("broadcaster_user_id") val broadcasterUserId: String? = null,
+    @SerialName("chatter_user_id") val chatterUserId: String? = null,
+    @SerialName("chatter_user_login") val chatterUserLogin: String? = null,
     @SerialName("chatter_user_name") val chatterUserName: String? = null,
     @SerialName("chatter_is_anonymous") val chatterIsAnonymous: Boolean? = null,
+    @SerialName("message_id") val messageId: String? = null,
+    val color: String? = null,
+    val badges: List<BadgeDto>? = null,
+    val message: ChatTextDto? = null,
+    @SerialName("source_broadcaster_user_id") val sourceBroadcasterUserId: String? = null,
+    @SerialName("watch_streak") val watchStreak: WatchStreakDto? = null,
     val sub: SubDto? = null,
     val resub: ResubDto? = null,
     @SerialName("sub_gift") val subGift: SubGiftDto? = null,
@@ -246,6 +289,12 @@ internal data class CommunitySubGiftDto(val total: Int? = null, @SerialName("sub
 
 @Serializable
 internal data class RaidDto(@SerialName("user_name") val userName: String? = null, @SerialName("viewer_count") val viewerCount: Int? = null)
+
+@Serializable
+internal data class WatchStreakDto(
+    @SerialName("streak_count") val streakCount: Int? = null,
+    @SerialName("channel_points_awarded") val channelPointsAwarded: Int? = null,
+)
 
 @Serializable
 internal data class FollowDto(@SerialName("user_name") val userName: String)

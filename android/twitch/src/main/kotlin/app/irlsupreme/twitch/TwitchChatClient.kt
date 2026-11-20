@@ -274,7 +274,11 @@ class TwitchChatClient(
                             chat.bits?.let { _alerts.tryEmit(TwitchAlert.Cheer(chat.messageId, chat.chatterDisplayName, it)) }
                             send(chat)
                         }
-                        CHAT_NOTIFICATION_TYPE -> EventSubParser.parseChatNotification(msg.messageId, msg.event)?.let { _alerts.tryEmit(it) }
+                        CHAT_NOTIFICATION_TYPE -> {
+                            EventSubParser.parseChatNotification(msg.messageId, msg.event)?.let { _alerts.tryEmit(it) }
+                            // Watch streaks: a line in chat, as on Twitch, not an alert.
+                            EventSubParser.parseChatNotice(msg.messageId, msg.event)?.let { send(it) }
+                        }
                         FOLLOW_TYPE -> _alerts.tryEmit(EventSubParser.parseFollow(msg.messageId, msg.event))
                     }
                 } catch (_: TwitchException.Protocol) {

@@ -35,4 +35,11 @@ class ChatSpeechTextTest {
         assertTrue(long.length <= "Sam says ".length + ChatSpeechText.MAX + 1)
         assertTrue(long.endsWith("…"))
     }
+
+    @Test fun `a watch streak is said, with what they wrote if anything`() {
+        val streak = msg("").copy(notice = "watched 12 streams in a row", messageType = "watch_streak")
+        assertEquals("Sam watched 12 streams in a row", ChatSpeechText.utterance(streak))
+        assertEquals("Sam watched 12 streams in a row, and says lets go", ChatSpeechText.utterance(streak.copy(text = "lets go")))
+        assertTrue(ChatSpeechText.shouldRead(streak, ReadAloud.EVERYONE, false))
+    }
 }

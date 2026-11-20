@@ -18,6 +18,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.em
 import androidx.compose.foundation.layout.fillMaxSize
+import app.irlsupreme.service.CHAT_NOTICE_SEPARATOR
 import app.irlsupreme.service.ChatLine
 import app.irlsupreme.service.EmoteCache
 import app.irlsupreme.twitch.ChatFragment
@@ -43,6 +44,10 @@ internal fun chatText(l: ChatLine, nameStyle: SpanStyle): ChatText {
     val text = buildAnnotatedString {
         withStyle(nameStyle) { append(l.name) }
         append(" ")
+        l.notice?.let { n ->
+            withStyle(nameStyle) { append(n) }
+            if (l.text.isNotBlank()) append(CHAT_NOTICE_SEPARATOR) else return@buildAnnotatedString
+        }
         if (l.fragments.isEmpty()) { append(l.text); return@buildAnnotatedString }
         for (f in l.fragments) {
             val bmp = (f as? ChatFragment.Emote)?.let { EmoteCache.get(it.id) }

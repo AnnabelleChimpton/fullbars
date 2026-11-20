@@ -68,7 +68,8 @@ object ChatCommandParser {
         CommandHelp("!end ${policy.endConfirmationWord}", "Ends the stream."),
     )
 
-    fun parse(message: ChatMessage, policy: CommandPolicy = CommandPolicy()): CommandResult = parse(
+    /** A notice's message (a watch streak's shared words) is never a command, whatever it says. */
+    fun parse(message: ChatMessage, policy: CommandPolicy = CommandPolicy()): CommandResult = if (message.notice != null) CommandResult.NotACommand else parse(
         text = message.text,
         sender = CommandSender(
             login = message.chatterLogin,

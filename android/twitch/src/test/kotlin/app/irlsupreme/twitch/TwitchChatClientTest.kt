@@ -130,6 +130,13 @@ class TwitchChatClientTest {
             ws1.send(chatNotification("n-2", "second"))
             assertEquals("second", received.receive().text)
 
+            // A viewer shares their watch streak: it comes as a chat notification and shows in chat as a notice.
+            ws1.send(watchStreakNotification("n-ws", 12, "lets go"))
+            val streak = received.receive()
+            assertEquals("watched 12 streams in a row", streak.notice)
+            assertEquals("lets go", streak.text)
+            assertEquals("Kit_IRL", streak.chatterDisplayName)
+
             // session_reconnect → new socket, old one closed after new welcome, no resubscribe
             val reconnectUrl = server.url("/ws-reconnect").toString().replaceFirst("http://", "ws://") + "?token=opaque"
             ws1.send(reconnect("r-1", reconnectUrl))
@@ -237,6 +244,22 @@ class TwitchChatClientTest {
         fun revocation(id: String, status: String) = """
             {"metadata":{"message_id":"$id","message_type":"revocation","message_timestamp":"2022-11-16T10:11:12.464757833Z","subscription_type":"channel.chat.message","subscription_version":"1"},
              "payload":{"subscription":{"id":"sub-1","status":"$status","type":"channel.chat.message","version":"1","cost":0,"condition":{"broadcaster_user_id":"1001","user_id":"1001"},"transport":{"method":"websocket","session_id":"session-1"},"created_at":"2022-11-16T10:11:12.464757833Z"}}}
+        """.trimIndent()
+
+        /** A channel.chat.notification with notice_type watch_streak, shaped like the EventSub reference's events. */
+        fun watchStreakNotification(id: String, count: Int, text: String) = """
+            {"metadata":{"message_id":"$id","message_type":"notification","message_timestamp":"2026-11-19T22:11:12.464757833Z","subscription_type":"channel.chat.notification","subscription_version":"1"},
+             "payload":{
+               "subscription":{"id":"sub-2","status":"enabled","type":"channel.chat.notification","version":"1","condition":{"broadcaster_user_id":"1001","user_id":"1001"},"transport":{"method":"websocket","session_id":"session-1"},"created_at":"2026-11-19T22:11:12.464757833Z","cost":0},
+               "event":{
+                 "broadcaster_user_id":"1001","broadcaster_user_login":"streamer","broadcaster_user_name":"Streamer",
+                 "chatter_user_id":"3003","chatter_user_login":"kit_irl","chatter_user_name":"Kit_IRL","chatter_is_anonymous":false,
+                 "color":"#FF4500","badges":[],"system_message":"Kit_IRL watched $count consecutive streams and sparked a watch streak!",
+                 "message_id":"ws-$id","message":{"text":"$text","fragments":[{"type":"text","text":"$text","cheermote":null,"emote":null,"mention":null}]},
+                 "notice_type":"watch_streak","watch_streak":{"streak_count":$count,"channel_points_awarded":450},
+                 "sub":null,"resub":null,"sub_gift":null,"community_sub_gift":null,"raid":null,"announcement":null,
+                 "source_broadcaster_user_id":null,"source_broadcaster_user_login":null,"source_broadcaster_user_name":null,"source_message_id":null,"source_badges":null
+               }}}
         """.trimIndent()
 
         /** Shape follows the channel.chat.message example in the EventSub reference. */

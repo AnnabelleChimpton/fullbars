@@ -29,12 +29,19 @@ object ChatSpeechText {
         else -> m.isModerator || m.isVip || m.isSubscriber
     }
 
-    /** "Sam says this view is unreal", links as "a link", runs of one character shortened, at most [MAX] characters. */
+    /**
+     * "Sam says this view is unreal", links as "a link", runs of one character shortened, at most [MAX] characters. A
+     * notice is said too: "Sam watched 12 streams in a row", then "and says ..." if they wrote something.
+     */
     fun utterance(m: ChatMessage): String? {
         val text = repeats.replace(url.replace(m.text, "a link")) { it.value.take(3) }.trim()
-        if (text.isEmpty()) return null
         val clipped = if (text.length <= MAX) text else text.take(MAX).substringBeforeLast(' ') + "…"
-        return "${m.chatterDisplayName} says $clipped"
+        return when {
+            m.notice != null && text.isEmpty() -> "${m.chatterDisplayName} ${m.notice}"
+            m.notice != null -> "${m.chatterDisplayName} ${m.notice}, and says $clipped"
+            text.isEmpty() -> null
+            else -> "${m.chatterDisplayName} says $clipped"
+        }
     }
 
     const val MAX = 160

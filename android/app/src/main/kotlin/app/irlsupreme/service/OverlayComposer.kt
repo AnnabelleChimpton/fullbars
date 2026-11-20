@@ -290,7 +290,15 @@ object OverlayComposer {
                 setSpan(TypefaceSpan(BrandType.sc600), 0, l.name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 setSpan(ForegroundColorSpan(StreamPalette.BONE), 0, l.name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 append(" ")
-                appendMessage(this, l, p.textSize)
+                // A notice (a watch streak) reads as part of the name, in the same weight, then the viewer's words.
+                l.notice?.let { n ->
+                    val start = length
+                    append(n)
+                    setSpan(TypefaceSpan(BrandType.sc600), start, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    setSpan(ForegroundColorSpan(StreamPalette.BONE), start, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    if (l.text.isNotBlank()) append(CHAT_NOTICE_SEPARATOR)
+                }
+                if (l.notice == null || l.text.isNotBlank()) appendMessage(this, l, p.textSize)
             }
             val lay = StaticLayout.Builder.obtain(sb, 0, sb.length, p, textMax)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
