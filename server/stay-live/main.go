@@ -80,9 +80,11 @@ func main() {
 	fps := flag.Float64("fps", 30, "output frame rate")
 	stall := flag.Duration("stall", 1500*time.Millisecond, "switch to slate after this long without live data")
 	hold := flag.Duration("hold", 10*time.Minute, "end the output after this long on slate (0 = never)")
-	latency := flag.Duration("latency", 2*time.Second, "SRT receiver latency")
+	// SRT uses the larger of both sides' latencies, so the server asks for the smallest the app offers and the phone's
+	// own setting decides (2 s today).
+	latency := flag.Duration("latency", time.Second, "SRT receiver latency (the phone's, if larger, wins)")
 	idle := flag.Duration("peer-idle", 30*time.Second, "SRT peer idle timeout (tunnels!)")
-	reorder := flag.Uint("reorder", 64, "SRT reorder tolerance (SRTO_LOSSMAXTTL) in packets: how many newer packets may overtake a missing one before a resend is asked for; 0 = ask at once")
+	reorder := flag.Uint("reorder", 64, "SRT reorder tolerance (SRTO_LOSSMAXTTL) in packets: how many newer packets may overtake a missing one before a resend is asked for, at least; it grows with the receive rate so a gap waits latency/8 (20-250 ms). 0 = ask at once")
 	eventsPath := flag.String("events", "", "append JSON lines of state changes to this file")
 	waitLive := flag.Bool("wait-live", false, "write nothing until the first live keyframe; exit after -hold on slate")
 	pullListen := flag.String("pull-listen", ":5001", "with -data: SRT address home OBS pulls from in \"My OBS\" mode")
@@ -203,7 +205,8 @@ func main() {
 	cfg.PeerIdleTimeout = *idle
 	// Bonding sends packets over links with different delays, so they arrive out of order all the time. Without a
 	// reorder tolerance every overtaken packet is asked for again (a quarter of all packets in the first real stream)
-	// and the phone's bitrate control reads those resends as congestion.
+	// and the phone's bitrate control reads those resends as congestion. The vendored gosrt raises this floor with
+	// the receive rate, so the time a gap waits is the same at every bitrate (third_party/gosrt/PATCHES.md).
 	cfg.LossMaxTTL = uint32(*reorder)
 	ln, err := srt.Listen("srt", *listen, cfg)
 	if err != nil {
@@ -425,7 +428,8 @@ func publishStats(conn srt.Conn, session int, newest *atomic.Int64, dir string, 
 			kbps := int64(float64(st.Accumulated.ByteRecv-lastBytes) * 8 / 1000 / now.Sub(last).Seconds())
 			lastBytes, last = st.Accumulated.ByteRecv, now
 			if newest.Load() == int64(session) {
-				writeStats(dir, &publisherStats{Bitrate: kbps, RTT: st.Instantaneous.MsRTT, DroppedPkts: int64(st.Accumulated.PktRecvLost)})
+				writeStats(dir, &publisherStats{Bitrate: kbps, RTT: st.Instantaneous.MsRTT, DroppedPkts: int64(st.Accumulated.PktRecvLost),
+					ReadQueueDrops: int64(readQueueDrops(conn))})
 			}
 		}
 	}
@@ -435,8 +439,17 @@ func statsLine(conn srt.Conn) string {
 	var st srt.Statistics
 	conn.Stats(&st)
 	a := st.Accumulated
-	return fmt.Sprintf("received %d (unique %d), reordered but in time %d, resent %d, asked for again %d, lost %d, dropped %d, NAKs sent %d",
-		a.PktRecv, a.PktRecvUnique, a.PktRecvLate, a.PktRecvRetrans, a.PktRecvLoss, a.PktRecvLost, a.PktRecvDrop, a.PktSentNAK)
+	return fmt.Sprintf("received %d (unique %d), reordered but in time %d, resent %d, asked for again %d, lost %d, dropped %d, NAKs sent %d, read queue overflow %d",
+		a.PktRecv, a.PktRecvUnique, a.PktRecvLate, a.PktRecvRetrans, a.PktRecvLoss, a.PktRecvLost, a.PktRecvDrop, a.PktSentNAK, readQueueDrops(conn))
+}
+
+// readQueueDrops is how many received packets the vendored gosrt dropped because the keeper didn't read them fast
+// enough (third_party/gosrt/PATCHES.md). SRT doesn't count those as lost: they were acknowledged.
+func readQueueDrops(conn srt.Conn) uint64 {
+	if c, ok := conn.(interface{ ReadQueueDrops() uint64 }); ok {
+		return c.ReadQueueDrops()
+	}
+	return 0
 }
 
 func envOr(name, def string) string {

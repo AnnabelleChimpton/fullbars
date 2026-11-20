@@ -2,8 +2,10 @@
 package main
 
 import (
+	"math/rand"
 	"net"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/datarhei/gosrt/circular"
@@ -171,5 +173,137 @@ func TestPeriodicNAKLeavesOutGapsWithinTolerance(t *testing.T) {
 	}
 	if len(n.naks) == 0 {
 		t.Fatal("the real loss was not repeated by the periodic NAK")
+	}
+}
+
+// bondSim runs a receiver against a simulated bonded sender: 1316-byte packets at mbps, sent alternately over two
+// links with these one-way delays (µs) and a little jitter, each packet lost on the way with probability loss. The
+// receiver's NAKs are answered with a resend over the faster link one round trip later (resends can be lost too).
+// TSBPD is 2 s, as on the server.
+type bondResult struct {
+	naks      int    // NAK packets the receiver sent
+	nakedSeqs int    // sequence numbers in them
+	spurious  int    // distinct sequence numbers asked for that were never lost (only reordered)
+	sent      int    // original packets sent
+	lostOnWay int    // originals lost on the links
+	delivered int    // packets handed to the reader by the end
+	lost      uint64 // the receiver's count of packets it gave up on (PktLost)
+	tolerance uint32 // the packet tolerance in use at the end of sending
+}
+
+func bondSim(t *testing.T, delays [2]uint64, mbps, loss float64, ttl uint32, maxWait uint64, secs int) bondResult {
+	t.Helper()
+	const latency = 2_000_000
+	type arrival struct {
+		at      uint64
+		seq     uint32
+		retrans bool
+	}
+	var pending []arrival
+	add := func(a arrival) { pending = append(pending, a) }
+	rng := rand.New(rand.NewSource(7))
+	jitter := func() uint64 { return uint64(rng.Intn(6000)) } // 0-6 ms
+	sendAt := map[uint32]uint64{}
+	lostSet, asked := map[uint32]bool{}, map[uint32]bool{}
+	var res bondResult
+	var now uint64
+	fast := min(delays[0], delays[1])
+	var recv congestion.Receiver
+	recv = live.NewReceiver(live.ReceiveConfig{
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   10_000,
+		PeriodicNAKInterval:   20_000,
+		OnSendNAK: func(list []circular.Number) {
+			res.naks++
+			for i := 0; i+1 < len(list); i += 2 {
+				for s := list[i].Val(); s <= list[i+1].Val(); s++ {
+					res.nakedSeqs++
+					if !asked[s] && !lostSet[s] {
+						res.spurious++
+					}
+					asked[s] = true
+					if rng.Float64() >= loss { // the resend can be lost too; the periodic NAK asks again
+						add(arrival{at: now + fast + fast + jitter(), seq: s, retrans: true})
+					}
+				}
+			}
+		},
+		OnDeliver:   func(packet.Packet) { res.delivered++ },
+		LossMaxTTL:  ttl,
+		LossMaxWait: maxWait,
+	})
+	interval := uint64(1316 * 8 / mbps) // µs between packets
+	end := uint64(secs) * 1_000_000
+	var seq uint32
+	for next := uint64(0); now <= end+latency+500_000; now += 1000 {
+		for ; next <= now && next <= end; next += interval {
+			sendAt[seq] = next
+			res.sent++
+			if rng.Float64() < loss {
+				res.lostOnWay++
+				lostSet[seq] = true
+			} else {
+				add(arrival{at: next + delays[seq%2] + jitter(), seq: seq})
+			}
+			seq++
+		}
+		kept := pending[:0]
+		var due []arrival
+		for _, a := range pending {
+			if a.at <= now {
+				due = append(due, a)
+			} else {
+				kept = append(kept, a)
+			}
+		}
+		pending = kept
+		sort.Slice(due, func(i, j int) bool { return due[i].at < due[j].at })
+		for _, a := range due {
+			p := packet.NewPacket(testAddr)
+			p.Header().PacketSequenceNumber = circular.New(a.seq, packet.MAX_SEQUENCENUMBER)
+			p.Header().PktTsbpdTime = sendAt[a.seq] + latency
+			p.Header().RetransmittedPacketFlag = a.retrans
+			recv.Push(p)
+		}
+		if now%10_000 == 0 {
+			recv.Tick(now)
+		}
+		if lt, ok := recv.(interface{ LossTolerance() uint32 }); ok && now == end {
+			res.tolerance = lt.LossTolerance() // while the stream still runs
+		}
+	}
+	res.lost = recv.Stats().PktLost
+	return res
+}
+
+// Two links whose one-way delays differ by 180 ms at 8 Mbps: about 140 packets overtake every packet on the slow
+// link. With the tolerance following the receive rate nothing is asked for again; a fixed 64-packet tolerance (no
+// time cap) asks for most of the slow link's packets.
+func TestTwoLinkDelaySpreadSendsNoNAKs(t *testing.T) {
+	r := bondSim(t, [2]uint64{40_000, 220_000}, 8, 0, 64, 250_000, 10)
+	if r.naks != 0 || r.spurious != 0 || r.lost != 0 || r.delivered != r.sent {
+		t.Fatalf("no loss: %d NAKs for %d packets, %d lost, %d of %d delivered", r.naks, r.nakedSeqs, r.lost, r.delivered, r.sent)
+	}
+	if r.tolerance < 200 {
+		t.Fatalf("tolerance at 8 Mbps is %d packets; expected the 250 ms cap to set it (~235)", r.tolerance)
+	}
+	fixed := bondSim(t, [2]uint64{40_000, 220_000}, 8, 0, 64, 0, 10)
+	if fixed.nakedSeqs < fixed.sent/4 {
+		t.Fatalf("the fixed tolerance should ask for the slow link's packets: %d of %d", fixed.nakedSeqs, fixed.sent)
+	}
+}
+
+// The same links with 1% real loss: every lost packet is asked for and arrives before its TSBPD time.
+func TestTwoLinkRealLossIsRecoveredInTime(t *testing.T) {
+	r := bondSim(t, [2]uint64{40_000, 220_000}, 8, 0.01, 64, 250_000, 10)
+	if r.lostOnWay < 40 {
+		t.Fatalf("the simulation lost only %d packets", r.lostOnWay)
+	}
+	if r.lost != 0 || r.delivered != r.sent {
+		t.Fatalf("%d of %d packets lost for good, %d delivered", r.lost, r.sent, r.delivered)
+	}
+	// Only lost packets are asked for: the reorder between the links causes no resends on top.
+	if r.spurious != 0 {
+		t.Fatalf("%d packets that were only reordered were asked for again (%d lost)", r.spurious, r.lostOnWay)
 	}
 }

@@ -235,15 +235,18 @@ type publisherStats struct {
 	Bitrate     int64   `json:"bitrate"`      // kbps
 	RTT         float64 `json:"rtt"`          // ms
 	DroppedPkts int64   `json:"dropped_pkts"` // packets actually lost (not gosrt's "dropped", which counts duplicate resends)
+	// ReadQueueDrops: packets received but dropped because the keeper fell behind reading them; NOALBS ignores it.
+	ReadQueueDrops int64 `json:"read_queue_drops,omitempty"`
 }
 
-// writeStats publishes the phone's current ingest stats (nil = no publisher: NOALBS treats it as offline).
+// writeStats publishes the phone's current ingest stats (nil = no publisher: NOALBS treats it as offline), and next
+// to them, under "server", the keeper's and the output's counters (NOALBS reads only "publishers").
 func writeStats(dir string, st *publisherStats) {
 	pubs := map[string]publisherStats{}
 	if st != nil {
 		pubs[publisher] = *st
 	}
-	b, _ := json.Marshal(map[string]any{"publishers": pubs})
+	b, _ := json.Marshal(map[string]any{"publishers": pubs, "server": liveCounters.Load().snapshot()})
 	_ = writeFileAtomic(filepath.Join(dir, statsFile), b, 0o644)
 }
 

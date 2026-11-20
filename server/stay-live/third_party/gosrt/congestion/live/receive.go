@@ -3,6 +3,7 @@ package live
 import (
 	"container/list"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -30,6 +31,13 @@ type ReceiveConfig struct {
 	// LossMaxWait caps how long (microseconds) a gap waits for a reordered packet before it is reported, however
 	// few packets followed it: at a low bitrate LossMaxTTL packets can take a long time to arrive, and a real loss
 	// should still be asked for early. 0 = no cap. Only used with LossMaxTTL. [fullbars patch]
+	//
+	// With a cap set, LossMaxTTL is only the floor of the packet tolerance: the receiver raises it to the packets
+	// that arrive in 1.25 x LossMaxWait at the measured receive rate (recomputed every second, and unlimited until
+	// the first measurement), so the time cap is the tolerance that actually applies at every bitrate. A fixed
+	// packet count meant a much shorter wait at high bitrates: 64 packets are about 80 ms at 8 Mbps, less than the
+	// delay difference between a 5G and a congested LTE link, and every packet on the slower link was asked for
+	// again. [fullbars patch]
 	LossMaxWait uint64
 }
 
@@ -86,6 +94,7 @@ type receiver struct {
 	// Reorder tolerance [fullbars patch]
 	lossMaxTTL  uint32
 	lossMaxWait uint64
+	effTTL      uint32      // the packet tolerance in use: lossMaxTTL, raised from the receive rate (see LossMaxWait)
 	fresh       []freshLoss // gaps not reported yet, in sequence order, never overlapping
 	now         uint64      // time of the last Tick, the receiver's clock for fresh gaps
 }
@@ -109,6 +118,10 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 
 		lossMaxTTL:  config.LossMaxTTL,
 		lossMaxWait: config.LossMaxWait,
+		effTTL:      config.LossMaxTTL,
+	}
+	if r.lossMaxTTL > 0 && r.lossMaxWait > 0 {
+		r.effTTL = math.MaxUint32 // no rate measured yet: the time cap alone
 	}
 
 	if r.sendACK == nil {
@@ -342,7 +355,7 @@ func (r *receiver) expireFresh(now uint64) []circular.Number {
 			waited = 0
 		}
 
-		if r.maxSeenSequenceNumber.Distance(f.to) < r.lossMaxTTL && (r.lossMaxWait == 0 || waited < r.lossMaxWait) {
+		if r.maxSeenSequenceNumber.Distance(f.to) < r.effTTL && (r.lossMaxWait == 0 || waited < r.lossMaxWait) {
 			kept = append(kept, f)
 			continue
 		}
@@ -553,8 +566,21 @@ func (r *receiver) Tick(now uint64) {
 		r.rate.bytesRetrans = 0
 
 		r.rate.last = now
+
+		// [fullbars patch] The packet tolerance follows the receive rate, so LossMaxWait is what applies.
+		if r.lossMaxTTL > 0 && r.lossMaxWait > 0 {
+			r.effTTL = max(r.lossMaxTTL, uint32(min(r.rate.packetsPerSecond*float64(r.lossMaxWait)/1e6*1.25, math.MaxUint32/2)))
+		}
 	}
 	r.lock.Unlock()
+}
+
+// LossTolerance returns the reorder tolerance in packets in use now. [fullbars patch]
+func (r *receiver) LossTolerance() uint32 {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	return r.effTTL
 }
 
 func (r *receiver) SetNAKInterval(nakInterval uint64) {

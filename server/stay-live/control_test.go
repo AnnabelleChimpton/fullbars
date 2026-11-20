@@ -188,8 +188,66 @@ func TestObsModeAndStats(t *testing.T) {
 		t.Fatalf("stats: %s", readStats(dir))
 	}
 	writeStats(dir, nil)
-	if string(readStats(dir)) != `{"publishers":{}}` {
+	var off struct {
+		Publishers map[string]publisherStats `json:"publishers"`
+		Server     *keeperStats              `json:"server"`
+	}
+	if err := json.Unmarshal(readStats(dir), &off); err != nil || len(off.Publishers) != 0 || off.Server == nil {
 		t.Fatalf("offline: %s", readStats(dir))
+	}
+}
+
+// The keeper's status reaches state.json and /v1/status: the keyframe request, the slate check and a refused upload.
+func TestAirTrackerCarriesKeeperStatus(t *testing.T) {
+	var a airTracker
+	a.add("SLATE: feed stalled > 1.5s")
+	if !a.setKeeper(keeperStatus{NeedKeyframe: true, SlateMatch: "mismatch", SlateSource: "saved", SlateSize: "1920x1080", LiveSize: "1080x1920"}) {
+		t.Fatal("a new keeper status is a change")
+	}
+	st := a.state()
+	if !st.NeedKeyframe || st.SlateMatch != "mismatch" || st.LiveSize != "1080x1920" {
+		t.Fatalf("state: %+v", st)
+	}
+	if a.setKeeper(a.keeper) {
+		t.Fatal("the same status again is no change")
+	}
+	a.add("OUTPUT ERROR: Broken pipe; reconnecting in 1s")
+	if a.state().NeedKeyframe {
+		t.Fatal("no keyframe requests while the output is down")
+	}
+	a.add("output: reconnected to rtmps://ingest.example")
+	if !a.add("slate upload rejected (1000 bytes, 1 video + 0 audio AUs): no audio (upload cut short?); keeping the current slate") {
+		t.Fatal("a refused upload is a change")
+	}
+	if r := a.state().SlateRejected; !strings.Contains(r, "no audio") {
+		t.Fatalf("rejection reason: %q", r)
+	}
+	a.add("slate received from the phone (812 KB)")
+	if a.state().SlateRejected != "" {
+		t.Fatal("an accepted upload clears the rejection")
+	}
+}
+
+func TestStatusReportsKeeperStatus(t *testing.T) {
+	dir := t.TempDir()
+	c := &control{dir: dir, events: filepath.Join(dir, "events.jsonl")}
+	b, _ := json.Marshal(airState{State: "slate", NeedKeyframe: true, SlateMatch: "match", SlateSource: "phone", SlateSize: "1080x1920", LiveSize: "1080x1920"})
+	_ = os.WriteFile(filepath.Join(dir, stateFile), b, 0o644)
+	rr := httptest.NewRecorder()
+	c.status(rr, httptest.NewRequest("GET", "/v1/status", nil))
+	var st statusReply
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.NeedKeyframe || st.SlateMatches == nil || !*st.SlateMatches || st.SlateSource != "phone" || st.LiveSize != "1080x1920" {
+		t.Fatalf("status: %s", rr.Body.String())
+	}
+	b, _ = json.Marshal(airState{State: "live", SlateMatch: "unknown"})
+	_ = os.WriteFile(filepath.Join(dir, stateFile), b, 0o644)
+	rr = httptest.NewRecorder()
+	c.status(rr, httptest.NewRequest("GET", "/v1/status", nil))
+	if strings.Contains(rr.Body.String(), "slateMatches") || !strings.Contains(rr.Body.String(), `"needKeyframe":false`) {
+		t.Fatalf("unknown match must be left out, needKeyframe always present: %s", rr.Body.String())
 	}
 }
 

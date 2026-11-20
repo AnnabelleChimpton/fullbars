@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/datarhei/gosrt/circular"
@@ -209,6 +210,10 @@ type srtConn struct {
 	// Queue for packets that will be read locally with ReadPacket()
 	readQueue  chan packet.Packet
 	readBuffer bytes.Buffer
+
+	// readQueueDrops counts packets dropped because the reader fell behind and readQueue was full: they were
+	// received and acknowledged, so SRT never resends them. [fullbars patch, see PATCHES.md]
+	readQueueDrops atomic.Uint64
 
 	onSend     func(p packet.Packet)
 	onShutdown func(*srtConn)
@@ -674,8 +679,16 @@ func (c *srtConn) deliver(p packet.Packet) {
 	case <-c.ctx.Done():
 	case c.readQueue <- p:
 	default:
+		c.readQueueDrops.Add(1) // [fullbars patch]
 		c.log("connection:error", func() string { return "readQueue was blocking, dropping packet" })
 	}
+}
+
+// ReadQueueDrops returns how many received packets were dropped because the reader didn't keep up (the read queue
+// was full). Those packets were acknowledged, so they are lost for good without SRT counting them as lost.
+// [fullbars patch, see PATCHES.md]
+func (c *srtConn) ReadQueueDrops() uint64 {
+	return c.readQueueDrops.Load()
 }
 
 // handlePacket checks the packet header. If it is a control packet it will forwarded to the
