@@ -94,4 +94,85 @@ class CameraLatencyEstimatorTest {
         assertNull(e.medianNs)
         assertNull(e.p95Ns)
     }
+
+    // --- Which clock an "unknown" camera is on, from its frames ---
+
+    private val asleep = 3_600_000_000_000L // an hour asleep since boot: the clocks are far apart
+
+    /** Feeds [n] frames captured [latency] before each tick, stamped on [boot] (else monotonic) time. */
+    private fun TimeBaseVote.feed(n: Int, latency: Long, boot: Boolean, offset: Long = asleep): CaptureTimeBase? {
+        var r: CaptureTimeBase? = null
+        repeat(n) {
+            val now = 100_000_000_000L + it * frame
+            val captureMono = now - latency
+            r = observe(if (boot) captureMono + offset else captureMono, now, offset)
+        }
+        return r
+    }
+
+    @Test fun unknownCameraOnTheMonotonicClockIsWorkedOut() {
+        val v = TimeBaseVote(needed = 10)
+        v.reset(CaptureTimeBase.UNKNOWN)
+        assertNull("not before enough frames agree", v.feed(9, 50 * ms, boot = false))
+        assertEquals(CaptureTimeBase.MONOTONIC, v.feed(1, 50 * ms, boot = false))
+    }
+
+    @Test fun unknownCameraOnTheBootClockIsWorkedOut() {
+        val v = TimeBaseVote(needed = 10)
+        v.reset(CaptureTimeBase.UNKNOWN)
+        assertEquals(CaptureTimeBase.REALTIME, v.feed(10, 50 * ms, boot = true))
+    }
+
+    @Test fun reportedRealtimeIsBelievedUntilTheFramesSayOtherwise() {
+        val v = TimeBaseVote(needed = 10)
+        v.reset(CaptureTimeBase.REALTIME)
+        assertEquals(CaptureTimeBase.REALTIME, v.feed(1, 50 * ms, boot = true))
+        // A HAL that mislabels its clock: its frames are really monotonic.
+        assertEquals(CaptureTimeBase.REALTIME, v.feed(9, 50 * ms, boot = false))
+        assertEquals(CaptureTimeBase.MONOTONIC, v.feed(1, 50 * ms, boot = false))
+    }
+
+    @Test fun oneOddFrameDoesNotFlipTheAnswer() {
+        val v = TimeBaseVote(needed = 10)
+        v.reset(CaptureTimeBase.UNKNOWN)
+        v.feed(10, 50 * ms, boot = false)
+        repeat(5) {
+            v.feed(9, 50 * ms, boot = true) // a run that falls one short...
+            assertEquals(CaptureTimeBase.MONOTONIC, v.feed(1, 50 * ms, boot = false)) // ...is broken
+        }
+    }
+
+    @Test fun framesThatFitNeitherClockDoNotVote() {
+        val v = TimeBaseVote(needed = 3)
+        v.reset(CaptureTimeBase.UNKNOWN)
+        assertNull(v.feed(20, 400 * ms, boot = false))
+        assertNull(v.feed(20, -5 * ms, boot = false))
+    }
+
+    @Test fun clocksThatAgreeCountAsMonotonicButCloseDisagreeingOnesDoNotVote() {
+        val v = TimeBaseVote(needed = 3)
+        v.reset(CaptureTimeBase.UNKNOWN)
+        // Never slept since boot: the two readings are the same, either is right.
+        assertEquals(CaptureTimeBase.MONOTONIC, v.feed(3, 50 * ms, boot = true, offset = 1 * ms))
+        // 80 ms asleep: both readings are plausible latencies but differ, so the frame says nothing.
+        v.reset(CaptureTimeBase.UNKNOWN)
+        assertNull(v.feed(30, 150 * ms, boot = false, offset = 80 * ms))
+    }
+
+    @Test fun resetForgetsTheLastCamerasAnswer() {
+        val v = TimeBaseVote(needed = 3)
+        v.reset(CaptureTimeBase.UNKNOWN)
+        v.feed(3, 50 * ms, boot = true)
+        v.reset(CaptureTimeBase.UNKNOWN)
+        assertNull(v.base)
+    }
+
+    @Test fun hasValueTracksThePublishedMedian() {
+        val e = CameraLatencyEstimator()
+        assertFalse(e.hasValue)
+        repeat(40) { e.record(it * frame, 40 * ms) }
+        assertTrue(e.hasValue)
+        e.clear()
+        assertFalse(e.hasValue)
+    }
 }

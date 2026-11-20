@@ -3,13 +3,70 @@ package app.irlsupreme.engine.video
 /**
  * The clock a camera's frame timestamps are on, so they can be compared with System.nanoTime (CLOCK_MONOTONIC).
  *
- *  - [MONOTONIC]: already on it. Android 13+ gets this by asking for it (OutputConfiguration.TIMESTAMP_BASE_MONOTONIC).
- *  - [REALTIME]: CLOCK_BOOTTIME (SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME on Android 12), which runs ahead of the
- *    monotonic clock by the time the phone has spent asleep; converted with a back-to-back sample of both clocks.
- *  - [UNKNOWN]: SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN on Android 12. It's usually monotonic, but nothing promises it,
- *    so no latency is claimed from it.
+ *  - [MONOTONIC]: already on it.
+ *  - [REALTIME]: CLOCK_BOOTTIME (SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME), which runs ahead of the monotonic clock by
+ *    the time the phone has spent asleep; converted with a back-to-back sample of both clocks.
+ *  - [UNKNOWN]: SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN. It's usually monotonic, but nothing promises it, so it's worked
+ *    out from the frames themselves ([TimeBaseVote]) before any latency is claimed.
+ *
+ * Android 13+ could ask for monotonic timestamps outright (OutputConfiguration.TIMESTAMP_BASE_MONOTONIC), but for a
+ * SurfaceTexture output only the default base lets the camera framework re-space frame delivery to cut jitter, and a
+ * smooth picture matters more than a tidy clock. So the default base stays, and the clock is read as above.
  */
 enum class CaptureTimeBase { MONOTONIC, REALTIME, UNKNOWN }
+
+/**
+ * Works out which clock a camera's timestamps are really on, from the frames. Each latched frame's timestamp is read
+ * on both clocks, and the one that puts its capture 0..[CameraLatencyEstimator.MAX_LATENCY_NS] in the past gets a
+ * vote. The answer changes only after [needed] votes in a row for the other clock, so one odd frame can't flip it.
+ *
+ * Seeded with what the camera reports ([reset]): REALTIME is believed until the frames say otherwise (a HAL that
+ * mislabels its clock would otherwise show no latency at all); UNKNOWN starts with no answer. When the two clocks
+ * agree to within [agreeNs] (a phone that hasn't slept since boot) either reading is right, and it votes monotonic;
+ * when both fit but disagree, the frame tells us nothing and doesn't vote.
+ *
+ * Allocation-free; one thread (the render thread).
+ */
+class TimeBaseVote(private val needed: Int = 10, private val agreeNs: Long = 2_000_000L) {
+    /** The clock in use, or null while it isn't known yet. */
+    var base: CaptureTimeBase? = null
+        private set
+    private var challenger: CaptureTimeBase? = null
+    private var streak = 0
+
+    /** Starts over for a (re)opened camera that reports [reported]. */
+    fun reset(reported: CaptureTimeBase) {
+        base = if (reported == CaptureTimeBase.UNKNOWN) null else reported
+        challenger = null
+        streak = 0
+    }
+
+    /**
+     * One latched frame: its timestamp [sensorTsNs], the tick it was latched on [nowMonoNs] (System.nanoTime clock),
+     * and elapsedRealtimeNanos - nanoTime [bootMinusMonoNs]. Returns the clock to read it on, or null.
+     */
+    fun observe(sensorTsNs: Long, nowMonoNs: Long, bootMinusMonoNs: Long): CaptureTimeBase? {
+        val max = CameraLatencyEstimator.MAX_LATENCY_NS
+        val asMono = nowMonoNs - sensorTsNs
+        val asBoot = asMono + bootMinusMonoNs
+        val monoFits = asMono in 0..max
+        val bootFits = asBoot in 0..max
+        val vote = when {
+            monoFits && bootFits -> if (kotlin.math.abs(bootMinusMonoNs) <= agreeNs) CaptureTimeBase.MONOTONIC else null
+            monoFits -> CaptureTimeBase.MONOTONIC
+            bootFits -> CaptureTimeBase.REALTIME
+            else -> null
+        }
+        if (vote == null) return base // tells us nothing
+        if (vote == base) {
+            streak = 0 // the run for the other clock is broken
+        } else {
+            if (vote == challenger) streak++ else { challenger = vote; streak = 1 }
+            if (streak >= needed) { base = vote; challenger = null; streak = 0 }
+        }
+        return base
+    }
+}
 
 object CaptureClock {
     /**
@@ -69,11 +126,15 @@ class CameraLatencyEstimator(
     private var sinceReset = 0
     private var sincePublish = 0
 
+    // Published as plain longs (-1: none) so the render thread never boxes; a reader gets a Long? when it asks.
+    @Volatile private var median = NONE
+    @Volatile private var p95 = NONE
+
     /** Median latency (ns), or null before the first full window or while the camera's clock is unknown. */
-    @Volatile var medianNs: Long? = null
-        private set
-    @Volatile var p95Ns: Long? = null
-        private set
+    val medianNs: Long? get() = median.takeIf { it != NONE }
+    val p95Ns: Long? get() = p95.takeIf { it != NONE }
+    /** A value is published (the same as medianNs != null, without boxing). */
+    val hasValue: Boolean get() = median != NONE
     /** Samples refused for being out of range (diagnostics). */
     @Volatile var rejected = 0L
         private set
@@ -106,8 +167,8 @@ class CameraLatencyEstimator(
     /** The camera's clock can't be trusted (or the camera is gone for good): no latency is claimed. */
     fun clear() {
         reset()
-        medianNs = null
-        p95Ns = null
+        median = NONE
+        p95 = NONE
     }
 
     private fun publish(nowNs: Long) {
@@ -119,12 +180,13 @@ class CameraLatencyEstimator(
         }
         if (n == 0) return
         java.util.Arrays.sort(scratch, 0, n)
-        medianNs = if (n % 2 == 1) scratch[n / 2] else (scratch[n / 2 - 1] + scratch[n / 2]) / 2
-        p95Ns = scratch[(kotlin.math.ceil(0.95 * n).toInt() - 1).coerceIn(0, n - 1)]
+        median = if (n % 2 == 1) scratch[n / 2] else (scratch[n / 2 - 1] + scratch[n / 2]) / 2
+        p95 = scratch[(kotlin.math.ceil(0.95 * n).toInt() - 1).coerceIn(0, n - 1)]
     }
 
     companion object {
         /** Past this a "latency" is a clock mismatch (or a stuck frame), not the camera pipeline. */
         const val MAX_LATENCY_NS = 300_000_000L
+        private const val NONE = -1L
     }
 }

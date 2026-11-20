@@ -87,9 +87,12 @@ class CameraSource(
     val cadence = CadenceMeter(1_000_000_000L / fps)
     /** Capture-to-tick latency of latched frames. Written on the render thread. */
     private val latency = CameraLatencyEstimator()
-    /** The clock this camera's timestamps are on: set at each open (camera thread), read on the render thread. */
+    /** The clock this camera says its timestamps are on: set at each open (camera thread), read on the render thread. */
     @Volatile private var timeBase = CaptureTimeBase.UNKNOWN
-    /** Render thread: elapsedRealtimeNanos - nanoTime, for [CaptureTimeBase.REALTIME], and when it was sampled. */
+    /** Render thread: which clock the timestamps are really on, checked against the frames ([TimeBaseVote]). */
+    private val timeVote = TimeBaseVote()
+    private var unresolvedFrames = 0
+    /** Render thread: elapsedRealtimeNanos - nanoTime, for reading boot-clock timestamps, and when it was sampled. */
     private var bootMinusMonoNs = 0L
     private var bootSampledAtNs = 0L
     /** Set when the camera pipeline changed (open, flip, stabilisation): the render thread starts measuring afresh. */
@@ -227,6 +230,8 @@ class CameraSource(
         if (measureAfresh) {
             measureAfresh = false
             latency.reset()
+            timeVote.reset(timeBase)
+            unresolvedFrames = 0
             cadence.restartRun()
         }
         if (!frameAvailable.getAndSet(false)) return false
@@ -248,18 +253,23 @@ class CameraSource(
         return true
     }
 
-    /** Render thread: one latched frame's capture-to-tick latency, if this camera's clock can be read. */
+    /** Render thread: one latched frame's capture-to-tick latency, once this camera's clock is known. */
     private fun recordLatency(nowNs: Long, sensorTs: Long) {
-        val base = timeBase
-        if (base == CaptureTimeBase.UNKNOWN) {
-            if (latency.medianNs != null) latency.clear()
-            return
-        }
-        if (base == CaptureTimeBase.REALTIME && (bootSampledAtNs == 0L || nowNs - bootSampledAtNs > BOOT_RESAMPLE_NS)) {
+        if (bootSampledAtNs == 0L || nowNs - bootSampledAtNs > BOOT_RESAMPLE_NS) {
             bootMinusMonoNs = CaptureClock.bootMinusMono(mono = { System.nanoTime() }, boot = { SystemClock.elapsedRealtimeNanos() })
             bootSampledAtNs = nowNs
         }
-        val captureNs = CaptureClock.toMonotonicNs(sensorTs, base, bootMinusMonoNs) ?: return
+        // Plain longs here (not CaptureClock.toMonotonicNs's Long?), so a latched frame allocates nothing.
+        val captureNs = when (timeVote.observe(sensorTs, nowNs, bootMinusMonoNs)) {
+            CaptureTimeBase.MONOTONIC -> sensorTs
+            CaptureTimeBase.REALTIME -> sensorTs - bootMinusMonoNs
+            else -> {
+                // Not known (yet). A camera whose frames never settle it doesn't keep the last camera's value for good.
+                if (++unresolvedFrames > UNRESOLVED_CLEAR_FRAMES && latency.hasValue) latency.clear()
+                return
+            }
+        }
+        unresolvedFrames = 0
         latency.record(nowNs, nowNs - captureNs)
     }
 
@@ -407,10 +417,9 @@ class CameraSource(
             oisListed = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
                 ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
             aeRangeIsSessionKey = chars.availableSessionKeys?.contains(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE) == true
-            // Android 13+ can put timestamps on the monotonic clock outright (see startSession). On 12 the camera says
-            // which clock it uses; "unknown" means no latency is claimed.
+            // The camera says which clock its timestamps use; "unknown" is worked out from the frames (TimeBaseVote).
+            // The output keeps the default timestamp base on purpose: see CaptureTimeBase.
             timeBase = when {
-                Build.VERSION.SDK_INT >= 33 -> CaptureTimeBase.MONOTONIC
                 chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) == CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME ->
                     CaptureTimeBase.REALTIME
                 else -> CaptureTimeBase.UNKNOWN
@@ -450,7 +459,6 @@ class CameraSource(
 
     private fun startSession(d: CameraDevice, gen: Int) {
         val output = OutputConfiguration(surface)
-        if (Build.VERSION.SDK_INT >= 33) output.timestampBase = OutputConfiguration.TIMESTAMP_BASE_MONOTONIC
         val cfg = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR, listOf(output), executor,
             object : CameraCaptureSession.StateCallback() {
@@ -584,6 +592,8 @@ class CameraSource(
         const val CAPTURE_SAMPLE_NS = 1_000_000_000L
         /** The boot-minus-monotonic offset is re-read this often (it grows whenever the phone sleeps). */
         const val BOOT_RESAMPLE_NS = 5_000_000_000L
+        /** Latched frames (about 4 s) with the camera's clock still unknown before a held latency is withdrawn. */
+        const val UNRESOLVED_CLEAR_FRAMES = 120
     }
 }
 
