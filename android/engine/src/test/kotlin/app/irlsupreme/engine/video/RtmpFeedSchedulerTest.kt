@@ -18,7 +18,7 @@ class RtmpFeedSchedulerTest {
 
     private class Frame(val display: Int, val dtsMs: Long, val ptsMs: Long)
 
-    /** IPBB...: decode order I0 P3 B1 B2 P6 B4 B5 ..., PTS = DTS + composition offset (> 0 on the P frames). */
+    /** IPBB...: in decode order I, P, B, B, P, B, B shown as 0, 3, 1, 2, 6, 4, 5; PTS = DTS + composition offset (> 0 on P). */
     private fun ipbb(gops: Int): List<Frame> {
         val order = ArrayList<Int>()
         order += 0

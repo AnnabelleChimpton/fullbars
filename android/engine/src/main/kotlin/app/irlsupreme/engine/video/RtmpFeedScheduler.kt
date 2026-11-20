@@ -5,8 +5,8 @@ package app.irlsupreme.engine.video
  * be tested.
  *
  * Input, by decode order: frames arrive in decode (DTS) order, and with B-frames their presentation times (PTS) jump
- * about: I0 P3 B1 B2... Feeding each one a fixed lead before its PTS is due made a P frame (due later) block the B
- * frames queued behind it, which are due sooner. [feedDueNs] subtracts each frame's composition offset (PTS - DTS),
+ * about (shown 0, 3, 1, 2 for I, P, B, B). Feeding each one a fixed lead before its PTS is due made a P frame (due
+ * later) block the B frames queued behind it, which are due sooner. [feedDueNs] subtracts each frame's composition offset (PTS - DTS),
  * which puts it on its DTS on the same clock mapping: rising in queue order, so the head never holds up a frame due
  * earlier. Without B-frames the offset is 0 and nothing changes.
  *
