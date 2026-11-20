@@ -125,6 +125,18 @@ class AudioPipeline(
      */
     @Volatile var rawMicGainDb = 20f
 
+    /** The phone mic's low cut. [LowCut.AUTO] (the default): 80 Hz on the raw mic, off with the phone's auto level. */
+    @Volatile var lowCut = LowCut.AUTO
+
+    /**
+     * The voice leveler on the raw mic (the "Voice" preset; off is "Flat", the level stays where the fader puts it).
+     * Off by default, as streams have always sounded; it only acts while the mic is open raw.
+     */
+    @Volatile var voiceLeveler = false
+
+    /** Fold the phone mic to mono ((L+R)/2 on both channels). Off by default; the stream stays stereo either way. */
+    @Volatile var monoVoice = false
+
     /** The user's mic level, -20..+30 dB; applies from the next chunk, gliding so it doesn't click. */
     var micGainDb: Float
         get() = dsp.gainDb
@@ -340,6 +352,10 @@ class AudioPipeline(
                 val cam = camera
                 val covered = cam != null && cam.fill(ptsNs, chunkFrames, camScratch)
                 val wasCamera = stage.usingCamera
+                val rawOpen = record != null && openedRaw
+                stage.lowCutHz = lowCutHz(lowCut, rawOpen)
+                stage.leveler = voiceLeveler && rawOpen
+                stage.monoVoice = monoVoice
                 val level = stage.process(
                     pcm, chunkFrames, ptsNs, if (cam != null) camScratch else null, covered,
                     micGainDb = if (record != null && openedRaw) rawMicGainDb else null,

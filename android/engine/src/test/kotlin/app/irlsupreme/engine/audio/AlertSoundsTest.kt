@@ -19,7 +19,9 @@ class AlertSoundsTest {
         }
     }
 
-    @Test fun `mixing adds to the mic with clipping and says where it got to`() {
+    @Test fun `the 16-bit mix saturates instead of wrapping round, as a last-resort guard, and says where it got to`() {
+        // The stream doesn't rely on this: it adds chimes before its limiter (addInto), where nothing reaches full
+        // scale (MixStageTest). This only guards against a wrap (a full-scale crack) if anything ever mixes this way.
         val pcm = byteArrayOf(0x10, 0x00, 0xF0.toByte(), 0x7F, 0x00, 0x80.toByte(), 0, 0) // 16, 32752, -32768, 0
         val next = AlertSounds.mixInto(pcm, shortArrayOf(100, 100, -100, 5, 7), 0)
         assertEquals(4, next)
@@ -28,6 +30,17 @@ class AlertSoundsTest {
         val pcm2 = ByteArray(8)
         assertEquals(5, AlertSounds.mixInto(pcm2, shortArrayOf(100, 100, -100, 5, 7), 4))
         assertEquals(7, ((pcm2[0].toInt() and 0xff) or (pcm2[1].toInt() shl 8)))
+    }
+
+    @Test fun `adding into the float mix sums at the chime's own level, from part-way into a chunk`() {
+        val dst = FloatArray(6) { 0.5f }
+        val next = AlertSounds.addInto(dst, 6, shortArrayOf(16384, -16384, 8192), 0, dstFrom = 4)
+        assertEquals(2, next) // ran out of room: the rest goes into the next chunk
+        assertEquals(listOf(0.5f, 0.5f, 0.5f, 0.5f, 1.0f, 0.0f), dst.toList())
+        val dst2 = FloatArray(4)
+        assertEquals(3, AlertSounds.addInto(dst2, 4, shortArrayOf(16384, -16384, 8192), 2))
+        assertEquals(0.25f, dst2[0], 0f)
+        assertEquals(0f, dst2[1], 0f)
     }
 
     @Test fun `mixing can start part-way into a chunk`() {

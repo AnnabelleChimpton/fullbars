@@ -22,6 +22,10 @@ class MicCheck(private val context: Context, private val sampleRate: Int = 48_00
     @Volatile var gainDb = 0f
     @Volatile var raw = false
     @Volatile var rawGainDb = 20f
+    /** The same low cut, leveler and mono fold as a stream (see [AudioPipeline]), so the check sounds like one. */
+    @Volatile var lowCut = LowCut.AUTO
+    @Volatile var voiceLeveler = false
+    @Volatile var monoVoice = false
     @Volatile private var running = false
     private var thread: Thread? = null
 
@@ -65,6 +69,7 @@ class MicCheck(private val context: Context, private val sampleRate: Int = 48_00
                     mic = openMic(sampleRate, stereo, pcm.size, micRaw, unprocessed)
                     _unavailable.value = mic == null
                     if (mic == null) { _level.value = MicLevel.SILENT; Thread.sleep(1_000); continue }
+                    dsp.micReopened()
                 }
                 var off = 0
                 var empty = 0
@@ -77,7 +82,7 @@ class MicCheck(private val context: Context, private val sampleRate: Int = 48_00
                 if (off < 0) { mic.close(); mic = null; continue }
                 if (!running) break
                 dsp.gainDb = if (micRaw) rawGainDb else gainDb
-                _level.value = dsp.process(pcm, frames)
+                _level.value = dsp.process(pcm, frames, lowCutHz = lowCutHz(lowCut, micRaw), leveler = voiceLeveler && micRaw, mono = monoVoice)
                 heard.write(pcm, frames)
             }
         } catch (_: InterruptedException) {

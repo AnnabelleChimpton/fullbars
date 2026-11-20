@@ -66,8 +66,26 @@ object AlertSounds {
     }
 
     /**
-     * Mixes [effect] (from [from]) into [pcm] (16-bit little-endian, same channel layout) with clipping, starting at
-     * byte [pcmFrom] of [pcm], and returns where the effect got to; >= effect.size means it's finished.
+     * Adds [effect] (from sample [from]) into [dst] (float, 1.0 = full scale, same channel layout) starting at sample
+     * [dstFrom], and returns where the effect got to; >= effect.size means it's finished. This is how the stream mixes
+     * chimes: into the voice before the limiter, so a chime over a loud voice is turned down with it, never clipped.
+     */
+    fun addInto(dst: FloatArray, dstSamples: Int, effect: ShortArray, from: Int, dstFrom: Int = 0): Int {
+        var i = from
+        var d = dstFrom.coerceAtLeast(0)
+        while (d < dstSamples && i < effect.size) {
+            dst[d] += effect[i] / 32768f
+            d++
+            i++
+        }
+        return i
+    }
+
+    /**
+     * Mixes [effect] (from [from]) into [pcm] (16-bit little-endian, same channel layout), starting at byte [pcmFrom]
+     * of [pcm], and returns where the effect got to; >= effect.size means it's finished. The sum saturates at full
+     * scale instead of wrapping round (a wrap is a full-scale crack). That's a last-resort guard: the stream adds
+     * chimes before its limiter ([addInto]), where nothing clips.
      */
     fun mixInto(pcm: ByteArray, effect: ShortArray, from: Int, pcmFrom: Int = 0): Int {
         var i = from
