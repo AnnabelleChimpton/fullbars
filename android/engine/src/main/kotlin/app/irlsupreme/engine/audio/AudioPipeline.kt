@@ -43,8 +43,6 @@ class AudioPipeline(
     private val mix: PcmRing? = null,
 ) {
     @Volatile var muted = false
-    /** Where the mute ramp is: 1 = heard, 0 = muted (capture thread). */
-    private var muteGain = 1f
 
     /**
      * The phone's own auto level off: the raw mic, levelled only by [micGainDb] and the limiter ([micSources]). Changing
@@ -52,30 +50,20 @@ class AudioPipeline(
      */
     @Volatile var rawMic = false
 
-    /** Sounds mixed into the stream (alert chimes), one after another; never played on the phone. */
-    private class Effect(val samples: ShortArray, val startAtNs: Long)
-    private val effects = java.util.concurrent.ConcurrentLinkedQueue<Effect>()
-    private var effect: ShortArray? = null
-    private var effectPos = 0
-
     /**
      * Queues [samples] (16-bit PCM in the stream's channel layout) to be mixed into the stream, starting no earlier
      * than [startAtNs] on the System.nanoTime clock (0: as soon as it's its turn). Audio and video timestamps share
      * that clock, so a chime started at the moment an alert finishes its wipe lands on that frame for viewers.
      */
-    fun playEffect(samples: ShortArray, startAtNs: Long = 0L) {
-        if (effects.size < 8) effects.add(Effect(samples, startAtNs))
-    }
+    fun playEffect(samples: ShortArray, startAtNs: Long = 0L) = stage.playEffect(samples, startAtNs)
+
     /**
      * An RTMP camera's audio (Pocket 3 / DJI Mic). When set, each mic chunk is replaced by the camera's samples for
      * the same moment whenever the camera has them; the mic stays the clock and the fallback.
      */
     @Volatile var camera: CameraAudio? = null
     /** Whether the last chunk came from the camera. */
-    @Volatile var usingCamera = false
-        private set
-    private var camHits = 0
-    private var camMisses = 0
+    val usingCamera: Boolean get() = stage.usingCamera
     private val camScratch by lazy { ByteArray(chunkFrames * bytesPerFrame) }
     @Volatile private var running = false
     private var capture: Thread? = null
@@ -129,6 +117,7 @@ class AudioPipeline(
 
     private val channels = if (stereo) 2 else 1
     private val dsp = MicDsp(sampleRate, channels)
+    private val stage = MixStage(sampleRate, channels, dsp)
 
     /**
      * The level for the raw mic. Picked per chunk by the source actually open, so switching modes changes source and
@@ -255,7 +244,7 @@ class AudioPipeline(
         // Before anything that can fail: the output connects only once it knows the audio format.
         sink.onAudioConfig(sampleRate, stereo)
         startCodec()
-        muteGain = if (muted) 0f else 1f // a stream that starts muted mustn't leak its first few ms
+        stage.start(muted)
         val pcm = ByteArray(chunkFrames * bytesPerFrame)
         val ts = AudioTimestamp()
         val pts = AudioPts(chunkNs)
@@ -264,12 +253,9 @@ class AudioPipeline(
         var recordFrames = 0L
         val clock = ChunkClock(sampleRate, chunkNs)
         val overruns = OverrunDetector(chunkNs)
-        // The limiter's lookahead: each chunk comes out of the level stage this much later than it went in.
-        val dspLatencyNs = dsp.latencyFrames * 1_000_000_000L / sampleRate
         var openAtNs = 0L
         var openBackoffMs = OPEN_RETRY_MIN_MS
         var goodChunks = 0
-        var micFadeIn = false
         var silenceNextNs = 0L
         try {
             while (running) {
@@ -291,7 +277,7 @@ class AudioPipeline(
                         recordFrames = 0
                         clock.reset()
                         overruns.reset()
-                        micFadeIn = true
+                        stage.micOpened()
                         silenceNextNs = 0
                         goodChunks = 0
                         pts.sourceChanged()
@@ -317,8 +303,6 @@ class AudioPipeline(
                         continue
                     }
                     if (!running) break
-                    // A mic that just (re)opened starts mid-sound after silence or another source: fade it in.
-                    if (micFadeIn) { crossfade(null, pcm, pcm, chunkFrames, channels, SWITCH_FADE_FRAMES); micFadeIn = false }
                     val chunkStartFrame = recordFrames
                     recordFrames += chunkFrames
                     // ~1 s of good reads: this record works, so a later failure starts the backoff from the bottom.
@@ -352,50 +336,20 @@ class AudioPipeline(
                     silenceNextNs = due
                 }
 
-                // Hysteresis: switching microphones is audible (different room sound), so only switch on a clear
-                // change. On the camera, a momentary miss is a short faded silence (the camera's playout fades it)
-                // instead of the phone mic. The camera is pulled every chunk, used or not, so its playout keeps time.
+                // The camera is pulled every chunk, used or not, so its playout keeps time.
                 val cam = camera
-                val wasCamera = usingCamera
-                if (cam != null) {
-                    val covered = cam.fill(ptsNs, chunkFrames, camScratch)
-                    if (covered) { camHits++; camMisses = 0 } else { camMisses++; camHits = 0 }
-                    if (!usingCamera && camHits >= CAM_SWITCH_ON) { usingCamera = true; Log.i(TAG, "audio: camera") }
-                    else if (usingCamera && camMisses >= CAM_SWITCH_OFF) { usingCamera = false; Log.i(TAG, "audio: phone mic") }
-                } else usingCamera = false
-                // A switch crossfades over a few ms: cutting from one source to the other mid-wave is a click.
-                when {
-                    usingCamera && wasCamera -> camScratch.copyInto(pcm)
-                    usingCamera -> crossfade(pcm, camScratch, pcm, chunkFrames, channels, SWITCH_FADE_FRAMES)
-                    wasCamera -> crossfade(if (cam != null) camScratch else null, pcm, pcm, chunkFrames, channels, SWITCH_FADE_FRAMES)
-                }
-                // Level and limiter on whatever the voice is (phone mic or camera), metered before the mute so the
-                // mic sheet still shows the mic working while viewers hear nothing. The user's gain is set for the
-                // phone mic (up to +30 dB for the quiet raw source); a camera's audio already arrives at a normal
-                // level, so it gets 0 dB (limiter and meter still run). The DSP's glide smooths the switch.
-                val level = dsp.process(pcm, chunkFrames, when { usingCamera -> 0f; record != null && openedRaw -> rawMicGainDb; else -> null })
+                val covered = cam != null && cam.fill(ptsNs, chunkFrames, camScratch)
+                val wasCamera = stage.usingCamera
+                val level = stage.process(
+                    pcm, chunkFrames, ptsNs, if (cam != null) camScratch else null, covered,
+                    micGainDb = if (record != null && openedRaw) rawMicGainDb else null,
+                    muted = muted, micPresent = r != null,
+                )
+                if (stage.usingCamera != wasCamera) Log.i(TAG, if (stage.usingCamera) "audio: camera" else "audio: phone mic")
                 chunks++
                 if (level.reductionDb > HEAVY_LIMIT_DB) heavyLimitChunks++
                 onLevel(level)
-                // What comes out of the level stage started its lookahead earlier than what went in.
-                val outPtsNs = ptsNs - dspLatencyNs
-                // Alert sounds go into the stream, but not while the mic is off. Chimes that come up while muted are
-                // dropped, not held: their alert cards have already played (plain Mute doesn't hold alerts; Privacy
-                // holds them before any chime is queued), so holding them would play a string of chimes on unmute.
-                // One still playing as the mute starts fades out with the voice rather than stopping dead.
-                if (muted && muteGain == 0f) { effects.clear(); effect = null }
-                // A scheduled one starts at its own sample inside the chunk that contains its start time.
-                var pcmFrom = 0
-                if (effect == null && !muted) effects.peek()?.let { next ->
-                    val frame = AlertSounds.startFrame(outPtsNs, chunkFrames, sampleRate, next.startAtNs)
-                    if (frame >= 0) { effects.poll(); effect = next.samples; effectPos = 0; pcmFrom = frame * bytesPerFrame }
-                }
-                effect?.let { e ->
-                    effectPos = AlertSounds.mixInto(pcm, e, effectPos, pcmFrom)
-                    if (effectPos >= e.size) effect = null
-                }
-                // Mute and unmute ramp over ~10 ms: a hard cut mid-word clicks.
-                muteGain = applyRamp(pcm, chunkFrames, channels, muteGain, if (muted) 0f else 1f, MUTE_RAMP_FRAMES)
+                val outPtsNs = stage.outPtsNs(ptsNs)
 
                 mix?.write(pcm, chunkFrames)
                 encode(pcm, outPtsNs)
@@ -491,18 +445,11 @@ class AudioPipeline(
 
     companion object {
         private const val TAG = "Engine"
-        /** Consecutive chunks (~21 ms each) before switching to / away from the camera's audio. */
-        private const val CAM_SWITCH_ON = 94 // ~2 s: the Pocket's stream settles for 2-3 s after it starts
-        private const val CAM_SWITCH_OFF = 10
         private const val OPEN_RETRY_MIN_MS = 200L
         private const val OPEN_RETRY_MAX_MS = 2_000L
         private const val CODEC_RETRY_MIN_MS = 500L
         private const val CODEC_RETRY_MAX_MS = 5_000L
         private const val GOOD_CHUNKS_TO_RESET = 47
-        /** ~5 ms crossfade between the camera's audio and the phone mic. */
-        private const val SWITCH_FADE_FRAMES = 240
-        /** ~10 ms mute/unmute ramp. */
-        private const val MUTE_RAMP_FRAMES = 480
         /** ~250 ms of chunks may wait for the encoder before the oldest is dropped. */
         private const val MAX_QUEUED_CHUNKS = 12
         /** More gain reduction than this in a chunk counts as the limiter working hard (level set too hot). */
