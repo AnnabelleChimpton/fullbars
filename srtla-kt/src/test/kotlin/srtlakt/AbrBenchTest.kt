@@ -91,6 +91,16 @@ class AbrBenchTest {
         return if (reached < 0) 10_000.0 else reached.toDouble()
     }
 
+    /** The steady bond seeded with a stale 6 Mbps measurement: ms until the target is back under the cliff's knee. */
+    private fun staleSeed(seed: Long): Double {
+        val sim = steadyBond(seed)
+        sim.controller.seed(6_000_000)
+        val knee = sim.kneeMediaBps()
+        var reached = -1L
+        sim.run(20_000) { if (reached < 0 && it.controller.targetBps <= knee) reached = it.nowMs }
+        return if (reached < 0) 20_000.0 else reached.toDouble()
+    }
+
     private data class Tunnel(val downsDuring: Double, val recoveredShare: Double)
 
     /** Two links, both blackholed for 4 s (they stay connected): cuts during it, and target 3 s after vs before. */
@@ -118,6 +128,7 @@ class AbrBenchTest {
         record("stepDown.msToSafe", seeds.map { stepDown(it) })
         record("stepUp.msTo85PctKnee", seeds.map { stepUp(it) })
         record("linkLoss.msToSafe", seeds.map { linkLoss(it) })
+        record("staleSeed.msUnderKnee", seeds.map { staleSeed(it) })
         val tu = seeds.map { tunnel(it) }
         record("tunnel.downsDuringBlackout", tu.map { it.downsDuring })
         record("tunnel.targetAfter3sOverBefore", tu.map { it.recoveredShare })
@@ -135,6 +146,9 @@ class AbrBenchTest {
         check(v("steady.cutsPerMin", "p50") <= 2.0, "steady: at most 2 cuts/min")
         check(v("stepDown.msToSafe", "p90") <= 1_500.0, "step 6 -> 2.5: safe within 1.5 s")
         check(v("stepUp.msTo85PctKnee", "p90") <= 60_000.0, "step 2.5 -> 6: 85% of the knee within 60 s")
+        check(v("linkLoss.msToSafe", "p90") <= 1_500.0, "link loss: under the survivor's knee within 1.5 s")
+        // The model's encoder lag (0.3-0.5 s) and 1 s rate window come before the controller sees anything.
+        check(v("staleSeed.msUnderKnee", "p90") <= 2_500.0, "stale seed: under the cliff within 2.5 s")
         check(v("tunnel.downsDuringBlackout", "p90") == 0.0, "tunnel: no cuts while all links are silent")
         check(v("tunnel.targetAfter3sOverBefore", "p10") >= 0.85, "tunnel: >= 85% of the pre-tunnel target 3 s after")
         // No regression against the committed baseline on the low tail of the steady state.
