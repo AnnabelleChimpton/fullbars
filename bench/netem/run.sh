@@ -20,7 +20,12 @@
 #   SENDER=ours|belabox|irl-classic|irl-enhanced   whose sender (the reference senders are for baselines only)
 #   SOURCE=x264|synth     fixed-bitrate ffmpeg source, or the CLI's encoder-shaped source (use with ABR=...)
 #   ABR=fast|balanced|rock   bitrate control for SOURCE=synth
-#   BITRATE=4M  SYNTH_BPS=3000000  SEED=1  SINK=srt|keeper  REORDER=64 (staylive's -reorder)
+#   BITRATE=4M            x264 source bitrate (9M for skew)
+#   SYNTH_BPS             SOURCE=synth: with ABR, the controller's ceiling, set above each scenario's shaped capacity
+#                         so the controller (not the ceiling) finds the limit: 12000000 for skew, 8000000 for
+#                         aggregate and stepdown, else 6000000 (the app's default ceiling). Without ABR, a fixed
+#                         rate: 9000000 for skew, else 3000000.
+#   SEED=1  SINK=srt|keeper  REORDER=64 (staylive's -reorder)
 #   SKIP_BUILD=1          reuse the images already built (nothing is fetched)
 #   GRADLE=./gradlew      how to build the sender CLI from srtla-kt/
 #
@@ -38,6 +43,17 @@ SCENARIO=${2:-clean}
 DURATION=${3:-60}
 SEED=${SEED:-1}
 case "$SCENARIO" in skew) BITRATE=${BITRATE:-9M} ;; *) BITRATE=${BITRATE:-4M} ;; esac
+if [ -n "${ABR:-}" ]; then
+  case "$SCENARIO" in skew) SYNTH_BPS=${SYNTH_BPS:-12000000} ;; aggregate|stepdown) SYNTH_BPS=${SYNTH_BPS:-8000000} ;; *) SYNTH_BPS=${SYNTH_BPS:-6000000} ;; esac
+else
+  case "$SCENARIO" in skew) SYNTH_BPS=${SYNTH_BPS:-9000000} ;; *) SYNTH_BPS=${SYNTH_BPS:-3000000} ;; esac
+fi
+# The scenarios with a fixed timeline need it to fit, plus 10 s after the last change to see the recovery.
+case "$SCENARIO" in kill-one|uplink-dead) MIN_S=50 ;; tunnel) MIN_S=45 ;; stepdown) MIN_S=30 ;; handover) MIN_S=15 ;; *) MIN_S=1 ;; esac
+if ! [ "$DURATION" -ge "$MIN_S" ] 2>/dev/null; then
+  echo "$SCENARIO needs at least $MIN_S seconds (got '$DURATION')" >&2
+  exit 2
+fi
 HERE=$(pwd)
 REPO=$(cd ../.. && pwd)
 SENDER=${SENDER:-ours}
@@ -118,7 +134,7 @@ if [ "$SENDER" = ours ]; then
     --link up2=10.31.2.20@10.31.2.10:5000 \
     --link up3=10.31.3.20@10.31.3.10:5000 \
     --stats /out/sender-stats.jsonl ${SENDER_ARGS:-} \
-    $( [ "$SOURCE" = synth ] && echo "--synth 10.31.0.30:1234 --bitrate ${SYNTH_BPS:-3000000} ${ABR:+--abr $ABR}" ) >/dev/null
+    $( [ "$SOURCE" = synth ] && echo "--synth 10.31.0.30:1234 --bitrate $SYNTH_BPS ${ABR:+--abr $ABR}" ) >/dev/null
 else
   # Reference senders take one receiver address and a list of source IPs. A per-source DNAT sends each uplink to
   # the receiver's address on that uplink's own network, so netem on that interface applies.
@@ -169,9 +185,10 @@ COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
 git -C "$REPO" diff --quiet HEAD 2>/dev/null || COMMIT="$COMMIT-dirty"
 cat > "$OUT/meta.json" <<JSON
 {"run":"$RUN_ID","commit":"$COMMIT","receiver":"$RECEIVER","scenario":"$SCENARIO","seed":$SEED,"duration_s":$DURATION,
- "bitrate":"$BITRATE","sender":"$SENDER","source":"$SOURCE","abr":"${ABR:-}","sink":"$SINK","capacity_kbps":$CAPACITY_KBPS}
+ "bitrate":"$BITRATE","sender":"$SENDER","source":"$SOURCE","abr":"${ABR:-}","sink":"$SINK","capacity_kbps":$CAPACITY_KBPS,
+ "synth_bps":$( [ "$SOURCE" = synth ] && echo "$SYNTH_BPS" || echo null ),"synth_bps_is_ceiling":$( [ -n "${ABR:-}" ] && echo true || echo false )}
 JSON
-log "commit=$COMMIT source=$SOURCE${ABR:+ abr=$ABR} receiver=$RECEIVER scenario=$SCENARIO seed=$SEED duration=${DURATION}s bitrate=$BITRATE ifaces=$UP1/$UP2/$UP3"
+log "commit=$COMMIT source=$SOURCE${ABR:+ abr=$ABR} receiver=$RECEIVER scenario=$SCENARIO seed=$SEED duration=${DURATION}s bitrate=$BITRATE$( [ "$SOURCE" = synth ] && echo " synth_bps=$SYNTH_BPS" ) ifaces=$UP1/$UP2/$UP3"
 
 # --- scenario ----------------------------------------------------------------------------------
 # A seeded schedule for the scenarios that move things around, so a seed replays the same timeline (netem's own

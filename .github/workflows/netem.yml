@@ -15,7 +15,7 @@ on:
         description: "Receivers, space-separated (belabox staylive irlserver openirl)"
         default: "belabox staylive"
       duration:
-        description: "Seconds per run"
+        description: "Seconds per run (at least 50; run.sh refuses less for the timed scenarios)"
         default: "60"
 
 permissions:
@@ -50,11 +50,17 @@ jobs:
       - name: Run
         run: |
           for rx in $RECEIVERS; do
+            # Build the CLI and this receiver's images on its first finished run only; later seeds reuse them.
+            skip=""
             for seed in $(seq 1 "$SEEDS"); do
               # The CLI's encoder-shaped source with the bitrate controller on: the closed loop the app runs.
-              SEED=$seed SOURCE=synth ABR=balanced GRADLE="./gradlew --no-daemon" \
-                bench/netem/run.sh "$rx" "${{ matrix.scenario }}" "$DURATION" \
-                || echo "::warning::$rx ${{ matrix.scenario }} seed $seed did not finish"
+              # run.sh sets the controller's ceiling above each scenario's shaped capacity.
+              if SKIP_BUILD=$skip SEED=$seed SOURCE=synth ABR=balanced GRADLE="./gradlew --no-daemon" \
+                bench/netem/run.sh "$rx" "${{ matrix.scenario }}" "$DURATION"; then
+                skip=1
+              else
+                echo "::warning::$rx ${{ matrix.scenario }} seed $seed did not finish"
+              fi
             done
           done
       - name: Keep the small files

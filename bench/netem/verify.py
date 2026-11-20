@@ -14,7 +14,11 @@ Every number is about what a viewer gets or what the bond wastes:
   video_gaps                 holes over 0.5 s in the received video's timestamps
   time_to_divert_s           per link-down event: seconds until the dead link carries (almost) nothing
   time_to_recover_s          per link-up event: seconds until it carries a real share again
-  utilisation                ABR target (or delivered rate) over the scenario's shaped capacity, after warm-up
+  utilisation                ABR target (or delivered rate) over the scenario's shaped capacity, after warm-up; read
+                             it against synth_bps in meta.json (the controller's ceiling), which run.sh keeps above
+                             the capacity so the ceiling never caps it
+  reports_below_0_5mbps      srt-live-transmit stats reports (one per 1000 packets) with the receive rate under
+                             0.5 Mbps: stalls, counted in reports rather than seconds
 """
 import json
 import pathlib
@@ -111,20 +115,26 @@ def srt_live_transmit_stats(path):
     return lost, dropped, retrans, rates
 
 
-STAYLIVE = re.compile(r"SRT session (\d+) stats: received \d+ \(unique \d+\), reordered but in time \d+, resent (\d+), "
-                      r"asked for again \d+, lost (\d+), dropped (\d+)")
+# Stay-live writes the same cumulative counters in its 30 s report ("SRT session N stats: received ...") and once
+# more when the session ends ("SRT session N ended (why); skipped damaged K; received ..."), which has the final totals.
+STAYLIVE = re.compile(r"SRT session (\d+)(?: stats:| ended \(.*?\); skipped damaged \d+;) received (\d+) \(unique \d+\), "
+                      r"reordered but in time \d+, resent (\d+), asked for again \d+, lost (\d+), dropped (\d+)")
 
 
 def staylive_stats(out):
-    """Last stats line per SRT session (Stay-live logs them every 30 s), summed over sessions."""
+    """Final counters per SRT session, summed over sessions: the session-end line, or the last 30 s report for a
+    session still open when the run stopped. The counters only grow, so the line with the most packets received is
+    the latest whichever file it came from."""
     last = {}
     for src in (out / "keeper-events.jsonl", out / "sink.log"):
         if src.exists():
             for m in STAYLIVE.finditer(src.read_text(errors="replace")):
-                last[m.group(1)] = (int(m.group(3)), int(m.group(4)), int(m.group(2)))
+                v = (int(m.group(2)), int(m.group(4)), int(m.group(5)), int(m.group(3)))  # received, lost, dropped, resent
+                if m.group(1) not in last or v[0] >= last[m.group(1)][0]:
+                    last[m.group(1)] = v
     if not last:
         return None
-    return tuple(sum(v[i] for v in last.values()) for i in range(3))
+    return tuple(sum(v[i] for v in last.values()) for i in (1, 2, 3))
 
 
 def main(out):
@@ -138,13 +148,15 @@ def main(out):
     if st is not None:
         lost, dropped, retrans = st
         rates = []
-        res["srt_stats_source"] = "stay-live (last 30 s report per session)"
+        res["srt_stats_source"] = "stay-live (session-end totals, or the last 30 s report for an open session)"
     else:
         lost, dropped, retrans, rates = srt_live_transmit_stats(out / "sink-srt-stats.jsonl")
         res["srt_stats_source"] = "srt-live-transmit"
     res.update(srt_lost=lost, srt_dropped_unrecoverable=dropped, srt_retransmitted=retrans,
                retransmit_excess_ratio=round(max(0, retrans - lost) / retrans, 3) if retrans else 0.0,
-               seconds_below_0_5mbps=sum(1 for x in rates[1:-1] if x < 0.5) if rates else None)
+               # srt-live-transmit reports every 1000 packets (-s counts packets, not ms): about every 3.5 s at
+               # 3 Mbps, so this counts reports, not seconds.
+               reports_below_0_5mbps=sum(1 for x in rates[1:-1] if x < 0.5) if rates else None)
 
     # What reached the end: video holes and decode errors.
     pts_file = out / "video-pts.txt"
@@ -189,6 +201,11 @@ def main(out):
             res["abr_target_min_kbps"] = min(tk) if tk else None
             res["abr_target_max_kbps"] = max(tk) if tk else None
             res["abr_queue_p95_ms"] = percentile([r.get("queueMs", 0) for r in steady], 95)
+            ceiling = meta.get("synth_bps") if meta.get("synth_bps_is_ceiling") else None
+            if ceiling:
+                # Seconds the controller sat at its ceiling: if this is high, the ceiling (not the links) set the
+                # bitrate and utilisation says nothing about the bond.
+                res["abr_seconds_at_ceiling"] = sum(1 for r in steady if r["targetKbps"] >= ceiling // 1000 - 1)
             used = [r["targetKbps"] for r in tail]
         else:
             used = [r.get("deliveredKbps", 0) for r in tail]
