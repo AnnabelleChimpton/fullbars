@@ -362,3 +362,60 @@ func TestAudioHoleNotFilledAcrossFormats(t *testing.T) {
 		t.Fatalf("got %d audio AUs, %d filled; want 3 and none", len(r.a), k.counters.audioFilled.Load())
 	}
 }
+
+// The Weak signal slate ends at the next live keyframe once the signal is clean again. While it waits for one the
+// app is asked for it, as after a dropout; never while the Weak signal slate is held on purpose.
+func TestWeakSignalRecoveryAsksForAKeyframe(t *testing.T) {
+	s := newPhoneSim(t)
+	s.k.installWeak(testSlate())
+	s.run(3 * time.Second)
+	s.gop = 1 << 30 // no natural keyframe from here on
+	s.k.onQuality(qualityEvent{session: 1, weak: true, lost: 40}, s.now)
+	s.run(500 * time.Millisecond)
+	if s.k.st != stateSlate || !s.k.onWeak || s.status.NeedKeyframe {
+		t.Fatalf("expected the Weak signal slate held, no keyframe request (st=%v weak=%v need=%v)", s.k.st, s.k.onWeak, s.status.NeedKeyframe)
+	}
+	s.k.onQuality(qualityEvent{session: 1, weak: false}, s.now)
+	s.run(100 * time.Millisecond)
+	if s.k.st != stateSlate || !s.status.NeedKeyframe {
+		t.Fatalf("signal clean, P frames arriving: expected a keyframe request (st=%v need=%v)", s.k.st, s.status.NeedKeyframe)
+	}
+	s.forceKF = true
+	s.run(40 * time.Millisecond)
+	if s.k.st != stateLive || s.status.NeedKeyframe {
+		t.Fatalf("expected live on the keyframe and the request cleared (st=%v need=%v)", s.k.st, s.status.NeedKeyframe)
+	}
+}
+
+func TestTickDurIsExactAndDoesNotOverflow(t *testing.T) {
+	for _, ticks := range []int64{0, 90000, 9_300_000_000, 1e10, 1e13} {
+		if got, want := tickDur(ticks+90000)-tickDur(ticks), time.Second; got != want {
+			t.Fatalf("one second at %d ticks is %v", ticks, got)
+		}
+		if got := tickDur(ticks); got < 0 || got/time.Second != time.Duration(ticks/90000) {
+			t.Fatalf("tickDur(%d) = %v", ticks, got)
+		}
+	}
+}
+
+// Dropouts more than a day into a stream: the output position passes the point (about 28.5 hours of ticks) where a
+// tick-to-time conversion through nanoseconds once overflowed, and every stall's slate must still start on time.
+func TestDropoutsAfterADayStayOnWallClock(t *testing.T) {
+	s := newPhoneSim(t)
+	s.k.lastV = 9_223_372_036 - 4*90000 // 4 s of output before the overflow point
+	s.k.lastA = s.k.lastV
+	for i := 0; i < 6; i++ {
+		s.sendV, s.sendA = true, true
+		s.run(3 * time.Second)
+		s.sendV, s.sendA = false, false
+		s.run(2 * time.Second)
+	}
+	s.sendV, s.sendA = true, true
+	s.run(3 * time.Second)
+	if last := s.r.v[len(s.r.v)-1]; last < 9_223_372_036+20*90000 {
+		t.Fatalf("the output only reached %d ticks", last)
+	}
+	if s.worst > 0.1 {
+		t.Fatalf("output drifted %.3f s from the wall clock", s.worst)
+	}
+}

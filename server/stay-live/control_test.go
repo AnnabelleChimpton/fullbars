@@ -228,6 +228,19 @@ func TestAirTrackerCarriesKeeperStatus(t *testing.T) {
 	}
 }
 
+// After a Weak signal episode the signal recovers, but the state stays "weak" until a live keyframe goes on air:
+// the keyframe request must get through then too.
+func TestNeedKeyframeAfterWeakSignalRecovers(t *testing.T) {
+	var a airTracker
+	a.add("LIVE (session 1)")
+	a.add("WEAK SIGNAL slate: weak signal (40 packets lost in one second)")
+	a.add("signal clean again: back to live at the next keyframe")
+	a.setKeeper(keeperStatus{NeedKeyframe: true})
+	if st := a.state(); st.State != "weak" || !st.NeedKeyframe {
+		t.Fatalf("after the signal recovered: %+v", st)
+	}
+}
+
 func TestStatusReportsKeeperStatus(t *testing.T) {
 	dir := t.TempDir()
 	c := &control{dir: dir, events: filepath.Join(dir, "events.jsonl")}

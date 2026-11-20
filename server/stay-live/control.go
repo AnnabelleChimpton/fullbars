@@ -318,8 +318,10 @@ func (t *airTracker) state() airState {
 	case t.air == "":
 		st.State, st.Detail = "unknown", ""
 	}
-	// A keyframe only helps while the keeper can splice one in and viewers can see it.
-	st.NeedKeyframe = t.keeper.NeedKeyframe && (st.State == "slate" || st.State == "live")
+	// A keyframe only helps while the keeper can splice one in and viewers can see it. "weak" stays the state after
+	// the signal recovers, until the keeper splices live back in at a keyframe, so it counts too. The keeper itself
+	// says false while the Weak signal slate is held on purpose.
+	st.NeedKeyframe = t.keeper.NeedKeyframe && (st.State == "slate" || st.State == "live" || st.State == "weak")
 	return st
 }
 

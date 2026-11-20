@@ -68,7 +68,7 @@ const (
 const (
 	// audioSlack: a live audio AU up to this much early against the live AU before it is moved to where that one
 	// ends rather than dropped: a few ms of phone timestamp jitter must not cost a whole frame. Half a frame: more
-	// than that is a real overlap. At a splice (the AU before was the slate's) only rounding (1 ms) is moved: live
+	// than that is a real overlap. Up to 1 ms early it is written at its own timestamp, as it always was. At a splice (the AU before was the slate's) only rounding (1 ms) is moved: live
 	// audio then starts at its first AU at or after the slate's end, keeping its own offset against the live video,
 	// and leaving a hole of less than one frame.
 	audioSlack = 960
@@ -396,8 +396,15 @@ func fpsOf(frameDur int64) string {
 
 // useSavedSlate marks the slate the keeper started with as the phone's, saved from an earlier stream, and keeps the
 // default one in reserve: the phone may be streaming in another orientation or resolution now.
+//
+// A default slate that can't loop (a truncated or hand-made slate.ts that doesn't start with an IDR) is not kept:
+// switching to it would leave nothing to put on air at the next dropout. The saved slate then stays in use.
 func (k *keeper) useSavedSlate(def []*au) {
 	k.slateSource = "saved"
+	if _, _, _, err := prepareSlate(def, k.frameDur); err != nil {
+		k.events("default slate unusable (" + err.Error() + "); keeping the phone's saved slate whatever its size")
+		return
+	}
 	k.fallback = def
 }
 
@@ -462,20 +469,29 @@ func (k *keeper) onQuality(q qualityEvent, now time.Time) {
 }
 
 func (k *keeper) installSlate(slate []*au) {
-	k.setSlate(slate, "phone")
+	if err := k.setSlate(slate, "phone"); err != nil { // replaceSlate checked it already; never expected
+		k.events("slate from the phone rejected: " + err.Error())
+		return
+	}
 	k.fallback = nil
 	k.events(fmt.Sprintf("slate from the phone installed: video %.3fs (%s, %s), audio %.3fs", float64(k.vSlate.dur)/90000,
 		orUnknown(k.slateSize), fpsOf(k.vSlate.frameDur), float64(k.aSlate.dur)/90000))
 }
 
-func (k *keeper) setSlate(slate []*au, source string) {
-	v, a, params, _ := prepareSlate(slate, k.frameDur)
+// setSlate puts a slate in place for the next time a slate goes on air. On an error nothing changes: the slate in
+// use stays, since a track with no frames can't be looped.
+func (k *keeper) setSlate(slate []*au, source string) error {
+	v, a, params, err := prepareSlate(slate, k.frameDur)
+	if err != nil {
+		return err
+	}
 	k.vSlate, k.aSlate, k.slateParams = v, a, params
 	k.slateSize = paramSize(params)
 	k.silent = silentFrame(a)
 	k.slateSource = source
 	k.checkedLive = 0
 	k.slateMatch = ""
+	return nil
 }
 
 // checkParams compares the live video's SPS/PPS with the slate's once per session. They must be identical for the
@@ -503,11 +519,15 @@ func (k *keeper) checkParams(a *au) {
 		k.slateMatch = "mismatch"
 		slate := k.slateSize
 		if k.slateSource == "saved" && k.fallback != nil && k.liveSize != "" && slate != k.liveSize {
-			k.events(fmt.Sprintf("the phone's saved slate is %s but the live video is %s: using the default slate until the phone sends this stream's", slate, k.liveSize))
-			k.setSlate(k.fallback, "default")
+			def := k.fallback
 			k.fallback = nil
-			k.checkParams(a)
-			return
+			err := k.setSlate(def, "default")
+			if err == nil {
+				k.events(fmt.Sprintf("the phone's saved slate is %s but the live video is %s: using the default slate until the phone sends this stream's", slate, k.liveSize))
+				k.checkParams(a)
+				return
+			}
+			k.events("the default slate is unusable (" + err.Error() + "); keeping the phone's saved slate")
 		}
 		k.events(fmt.Sprintf("WARNING: slate's SPS/PPS differ from the live video (slate %s, live %s); splices may glitch until the phone sends its slate", orUnknown(slate), orUnknown(k.liveSize)))
 	}
@@ -979,8 +999,9 @@ func (k *keeper) enterSlateAt(now time.Time, why string, weak, backfill bool) {
 	}
 }
 
-// tickDur converts a 90 kHz duration to wall time.
-func tickDur(t int64) time.Duration { return time.Duration(t) * time.Second / 90000 }
+// tickDur converts a 90 kHz duration to wall time. Exact (1 tick = 100000/9 ns), and it doesn't overflow for about
+// 32 years of ticks: multiplying by time.Second first overflowed after about 28 hours of output.
+func tickDur(t int64) time.Duration { return time.Duration(t) * 100000 / 9 }
 
 func (k *keeper) pumpSlate(now time.Time) error {
 	target := k.slateTSStart + int64(now.Sub(k.slateWallStart).Seconds()*90000)
@@ -1038,7 +1059,14 @@ func (k *keeper) emit(a *au, pts, dts int64, now time.Time, live bool) (ok bool,
 				k.counters.audioBackwards.Add(1)
 				return false, nil
 			}
-			if over := k.lastA + k.lastADur - pts; over > 0 {
+			over := k.lastA + k.lastADur - pts
+			if over > 0 && over <= 90 && live && k.lastALive {
+				// A sub-millisecond overlap between live AUs is written where it is. Moving it would carry into the
+				// next AU's overlap: audio whose clock runs slightly fast against its 1024-sample frames would fall
+				// further behind its video with every frame, until a frame is dropped and the cycle starts again.
+				over = 0
+			}
+			if over > 0 {
 				slack := int64(90) // rounding
 				if live && k.lastALive {
 					slack = audioSlack

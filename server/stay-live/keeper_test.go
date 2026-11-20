@@ -819,3 +819,86 @@ func TestSavedSlateOfAnotherSizeIsNotUsed(t *testing.T) {
 		t.Fatalf("the phone's own slate: %+v", st)
 	}
 }
+
+// A default slate.ts that can't loop (here: it doesn't start with an IDR) must never replace a working saved slate:
+// the next dropout would have nothing to put on air.
+func TestUnusableDefaultSlateKeepsTheSavedOne(t *testing.T) {
+	landscape, portrait := testSPS(1920, 1080, true), testSPS(1080, 1920, true)
+	saved := testSlate()
+	saved[0].data = idrWithSPS(landscape, 0xee)
+	var bad []*au
+	for _, a := range testSlate() {
+		if a.kind == kindAudio || !a.key {
+			bad = append(bad, a) // no IDR left
+		}
+	}
+	var evs []string
+	newK := func() *keeper {
+		k, err := newKeeper(&rec{}, saved, 3000, 1500*time.Millisecond, 0, func(e string) { evs = append(evs, e) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		k.st = stateWaiting
+		return k
+	}
+	k := newK()
+	k.useSavedSlate(bad)
+	if k.fallback != nil || !strings.Contains(strings.Join(evs, "\n"), "default slate unusable") {
+		t.Fatalf("an unusable default slate was kept in reserve (events %q)", evs)
+	}
+
+	// And if one gets there anyway, the size check keeps the saved slate and a dropout still shows it.
+	k = newK()
+	k.slateSource, k.fallback = "saved", bad
+	now := time.Unix(500, 0)
+	if err := k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: 1000, dts: 1000, key: true, data: idrWithSPS(portrait, 0xee)}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if k.slateSource != "saved" || len(k.vSlate.aus) == 0 {
+		t.Fatalf("the saved slate was replaced by an unusable one (source %q, %d frames)", k.slateSource, len(k.vSlate.aus))
+	}
+	for i := 0; i < 400; i++ { // 2 s with no live data: a stall
+		now = now.Add(5 * time.Millisecond)
+		if _, err := k.tick(now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if k.st != stateSlate {
+		t.Fatalf("expected the saved slate on air after the stall, state %v", k.st)
+	}
+}
+
+// Phone audio whose timestamps step 1919 ticks for 1920-tick frames (its clock a little fast against its sample
+// rate) for two minutes: every frame is written, each at its own timestamp, so audio never drifts against video.
+func TestSlightlyFastAudioClockDoesNotDrift(t *testing.T) {
+	r := &rec{}
+	k, _ := newKeeper(r, testSlate(), 3000, 1500*time.Millisecond, 0, func(string) {})
+	k.st = stateWaiting
+	now := time.Unix(0, 0)
+	_ = k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: 1000, dts: 1000, key: true, data: idr(0x64, 0xee)}}, now)
+	n := 2 * 60 * 48000 / 1024
+	var in []int64
+	for i := 0; i < n; i++ {
+		d := adts(1)
+		pts := 1000 + int64(i)*1919
+		in = append(in, pts)
+		if err := k.onLive(liveEvent{session: 1, a: &au{kind: kindAudio, pts: pts, dts: pts, data: d, dur: adtsDuration(d)}}, now); err != nil {
+			t.Fatal(err)
+		}
+		if i%15 == 0 && i > 0 {
+			v := 1000 + int64(i)*1919
+			_ = k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: v, dts: v, data: pFrame(10)}}, now)
+		}
+	}
+	c := k.counters.snapshot()
+	if len(r.a) != n || c.AudioOverlap != 0 {
+		t.Fatalf("%d of %d audio AUs written, %d dropped as overlaps", len(r.a), n, c.AudioOverlap)
+	}
+	// The offset between where each AU was written and where the phone put it is the same for all of them.
+	off := r.a[0] - in[0]
+	for i := range r.a {
+		if d := r.a[i] - in[i] - off; d != 0 {
+			t.Fatalf("audio AU %d moved %d ticks against the first", i, d)
+		}
+	}
+}
