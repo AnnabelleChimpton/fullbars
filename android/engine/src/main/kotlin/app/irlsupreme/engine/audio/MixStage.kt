@@ -84,6 +84,9 @@ internal class MixStage(private val sampleRate: Int, private val channels: Int, 
         dsp.micReopened()
     }
 
+    /** The next mic chunk follows a gap in the timeline (filled with silence): fade it in, without forgetting the filter. */
+    fun micFadeInNext() { micFadeIn = true }
+
     /**
      * Mixes one chunk in place. [pcm] holds the phone mic's chunk (silence while there's no mic: [micPresent] false),
      * [ptsNs] is its time on the System.nanoTime clock. [cam] is the camera's chunk for the same moment and
