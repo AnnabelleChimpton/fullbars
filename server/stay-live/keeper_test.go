@@ -120,9 +120,9 @@ func TestSlateLoopsAndSplicesWithoutHoles(t *testing.T) {
 		vEnds[i] = v + 3000
 	}
 	checkContinuous(t, "video", r.v, vEnds, 1)
-	// audio: the slate follows on from live audio exactly, and live audio that overlaps the slate is dropped or
-	// moved to follow on, so no hole or overlap over 1 ms at either splice
-	checkContinuous(t, "audio", r.a, r.aEnd, 90)
+	// audio: the slate follows on from live audio exactly; back to live, live audio starts at its first AU at or
+	// after the slate's end (keeping its offset against the live video), so the hole there is under one frame
+	checkContinuous(t, "audio", r.a, r.aEnd, 1919)
 	if len(r.v) < 250 || len(r.a) < 40 {
 		t.Fatalf("too little output: %d video, %d audio", len(r.v), len(r.a))
 	}

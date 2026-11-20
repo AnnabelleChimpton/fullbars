@@ -66,9 +66,11 @@ const (
 
 // Audio timing, in 90 kHz ticks. An AAC frame (1024 samples at 48 kHz) is 1920.
 const (
-	// audioSlack: an audio AU up to this much early is moved to where the previous one ends rather than dropped (a
-	// few ms of phone timestamp jitter must not cost a whole frame), and a hole up to this long is left alone. Half a
-	// frame: anything bigger is a real overlap or a real hole.
+	// audioSlack: a live audio AU up to this much early against the live AU before it is moved to where that one
+	// ends rather than dropped: a few ms of phone timestamp jitter must not cost a whole frame. Half a frame: more
+	// than that is a real overlap. At a splice (the AU before was the slate's) only rounding (1 ms) is moved: live
+	// audio then starts at its first AU at or after the slate's end, keeping its own offset against the live video,
+	// and leaving a hole of less than one frame.
 	audioSlack = 960
 	// maxAudioFill: holes in live audio up to this long are filled with the slate's silence. Longer than that it's
 	// not a hole, the audio has stopped.
@@ -163,6 +165,7 @@ type keeper struct {
 	lastLiveAt     time.Time // when the live session last sent anything (onEnded tells a close from a timeout by it)
 	lastV, lastA   int64
 	lastADur       int64
+	lastALive      bool // the last audio written was live (not the slate's or a filled silence)
 	slateWallStart time.Time
 	slateTSStart   int64
 	slateSince     time.Time
@@ -787,7 +790,7 @@ func (k *keeper) onLive(ev liveEvent, now time.Time) error {
 	} else if err := k.fillAudio(a, pts+k.liveOffset, now); err != nil {
 		return err
 	}
-	ok, err := k.emit(a, pts+k.liveOffset, dts+k.liveOffset, now)
+	ok, err := k.emit(a, pts+k.liveOffset, dts+k.liveOffset, now, true)
 	if err != nil {
 		return err
 	}
@@ -874,19 +877,20 @@ func (k *keeper) nextVideoTS() int64 {
 
 // fillAudio fills a hole in live audio (a mic overrun, an encoder restart, packets lost on the way, a splice) with
 // the slate's silent AAC frames, so the output's audio has no gaps. Only when the formats match (the frames are
-// copied, not re-encoded) and the hole is shorter than maxAudioFill. It stops within half a frame of the live AU:
-// emit moves a live AU that ends up slightly early to follow on.
+// copied, not re-encoded) and the hole is shorter than maxAudioFill. Whole frames only: what is left is less than one
+// frame (nothing, when the live audio carries on its own frame grid), since moving the live audio to close it would
+// shift it against its video.
 func (k *keeper) fillAudio(a *au, pts int64, now time.Time) error {
 	if k.silent == nil || k.written == 0 || k.lastADur <= 0 {
 		return nil
 	}
 	end := k.lastA + k.lastADur
-	if gap := pts - end; gap <= audioSlack || gap > maxAudioFill || !sameAAC(k.silent.data, a.data) {
+	if gap := pts - end; gap < k.silent.dur || gap > maxAudioFill || !sameAAC(k.silent.data, a.data) {
 		return nil
 	}
 	n := int64(0)
-	for pts-end > audioSlack {
-		ok, err := k.emit(k.silent, end, end, now)
+	for pts-end >= k.silent.dur {
+		ok, err := k.emit(k.silent, end, end, now, false)
 		if err != nil {
 			return err
 		}
@@ -989,7 +993,7 @@ func (k *keeper) pumpSlate(now time.Time) error {
 			if vts > target {
 				return nil
 			}
-			ok, err := k.emit(v, k.curV.loopBase+v.pts, vts, now)
+			ok, err := k.emit(v, k.curV.loopBase+v.pts, vts, now, false)
 			if err != nil {
 				return err
 			}
@@ -1001,7 +1005,7 @@ func (k *keeper) pumpSlate(now time.Time) error {
 			if ats > target {
 				return nil
 			}
-			if _, err := k.emit(k.curA.next(), ats, ats, now); err != nil {
+			if _, err := k.emit(k.curA.next(), ats, ats, now, false); err != nil {
 				return err
 			}
 			k.curA.advance()
@@ -1009,10 +1013,10 @@ func (k *keeper) pumpSlate(now time.Time) error {
 	}
 }
 
-// emit writes with strictly increasing timestamps per stream. Video that would go backwards is dropped; audio that
-// overlaps what was sent by less than audioSlack is moved to follow on (AAC can't be trimmed without re-encoding,
-// and a few ms of timestamp jitter must not cost a frame), more than that is dropped. ok: it was written.
-func (k *keeper) emit(a *au, pts, dts int64, now time.Time) (ok bool, err error) {
+// emit writes with strictly increasing timestamps per stream. Video that would go backwards is dropped. AAC can't be
+// trimmed without re-encoding, so audio that overlaps what was sent is moved to follow on when the overlap is small
+// (see audioSlack) and dropped otherwise. live: a live AU (not the slate's). ok: it was written.
+func (k *keeper) emit(a *au, pts, dts int64, now time.Time, live bool) (ok bool, err error) {
 	switch a.kind {
 	case kindVideo:
 		if dts <= k.lastV && k.written > 0 {
@@ -1032,7 +1036,11 @@ func (k *keeper) emit(a *au, pts, dts int64, now time.Time) (ok bool, err error)
 				return false, nil
 			}
 			if over := k.lastA + k.lastADur - pts; over > 0 {
-				if over >= audioSlack {
+				slack := int64(90) // rounding
+				if live && k.lastALive {
+					slack = audioSlack
+				}
+				if over >= slack {
 					k.counters.audioOverlap.Add(1)
 					return false, nil
 				}
@@ -1045,6 +1053,7 @@ func (k *keeper) emit(a *au, pts, dts int64, now time.Time) (ok bool, err error)
 		}
 		k.lastA = pts
 		k.lastADur = a.dur
+		k.lastALive = live
 	}
 	k.written++
 	if err := k.out.write(a, pts, dts); err != nil {

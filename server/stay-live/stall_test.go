@@ -151,7 +151,7 @@ func TestStallBackfillsTheDetectionTime(t *testing.T) {
 }
 
 // Fifty dropouts in a row: the output stays within 100 ms of the wall clock, video stays frame-exact and audio
-// has no hole over half a frame. Also with a phone clock that runs 500 ppm fast or slow against the server's.
+// has no hole of a frame or more. Also with a phone clock that runs 500 ppm fast or slow against the server's.
 func TestDropoutSoakStaysOnWallClock(t *testing.T) {
 	for _, ppm := range []float64{0, 500, -500} {
 		s := newPhoneSim(t)
@@ -175,9 +175,9 @@ func TestDropoutSoakStaysOnWallClock(t *testing.T) {
 			vEnds[i] = v + 3000
 		}
 		checkContinuous(t, "video", s.r.v, vEnds, 0)
-		// At a splice back to live a hole under half a frame can stay: closing it would shift live audio against
-		// its video. Bigger holes are filled.
-		checkContinuous(t, "audio", s.r.a, s.r.aEnd, audioSlack)
+		// At a splice back to live a hole of less than one frame can stay: closing it would shift live audio
+		// against its video. Whole frames of it are filled.
+		checkContinuous(t, "audio", s.r.a, s.r.aEnd, 1919)
 		if lag := s.k.counters.lagMs.Load(); lag > 100 || lag < -100 {
 			t.Fatalf("%+.0f ppm: output lag counter says %d ms", ppm, lag)
 		}
