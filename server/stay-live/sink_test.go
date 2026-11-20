@@ -17,12 +17,15 @@ import (
 // the queue holds about 45 entries a second, not one per 188-byte packet.
 func TestOutputQueueAbsorbsAFourSecondStall(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "out.ts")
+	path, gate := filepath.Join(dir, "out.ts"), filepath.Join(dir, "go")
 	l := &evLog{}
 	o := &ffmpegOut{
 		url: "rtmps://ingest.example/app/k", events: l.add,
-		// ffmpeg that doesn't read for a while, then takes everything.
-		newCmd:     func(string) *exec.Cmd { return exec.Command("sh", "-c", fmt.Sprintf("sleep 1; exec cat > '%s'", path)) },
+		// ffmpeg that doesn't read until the test has written everything, then takes it all. Waiting on a file the
+		// test creates, not on a timer, so a slow machine can't let it start reading early.
+		newCmd: func(string) *exec.Cmd {
+			return exec.Command("sh", "-c", fmt.Sprintf("while [ ! -e '%s' ]; do sleep 0.01; done; exec cat > '%s'", gate, path))
+		},
 		minBackoff: time.Millisecond, maxBackoff: time.Millisecond, healthy: time.Hour,
 		settled: time.Hour, stallKill: time.Minute,
 	}
@@ -61,6 +64,9 @@ func TestOutputQueueAbsorbsAFourSecondStall(t *testing.T) {
 	}
 	if n := o.chunks.Load(); n != int64(aus) {
 		t.Fatalf("queue entries: %d for %d access units (%.0f a second); want one per AU", n, aus, float64(n)/secs)
+	}
+	if err := os.WriteFile(gate, nil, 0o644); err != nil { // ffmpeg may read now
+		t.Fatal(err)
 	}
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
