@@ -1,7 +1,11 @@
 package app.irlsupreme.engine.audio
 
+import android.content.Context
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRouting
 import android.media.AudioRecordingConfiguration
 import android.media.AudioTimestamp
 import android.media.MediaCodec
@@ -50,6 +54,16 @@ class AudioPipeline(
     private val videoDelayNs: () -> Long = { 0L },
     /** The user's own A/V offset, ns (+: audio later). See [videoDelayNs]. */
     private val userAvOffsetNs: () -> Long = { 0L },
+    /**
+     * For watching the phone's audio inputs come and go (a USB mic plugged in or out) and for [inputChoice]. Without
+     * it the pipeline still notices its own recording being rerouted, but can't pick a device.
+     */
+    private val context: Context? = null,
+    /**
+     * The mic in use changed ([activeInput]); with a message for the streamer when it changed kind ("External mic
+     * disconnected", "Using <name>"), else null. On the capture thread: hand it off, don't block.
+     */
+    private val onInputChange: (ActiveInput, String?) -> Unit = { _, _ -> },
 ) {
     @Volatile var muted = false
 
@@ -165,6 +179,23 @@ class AudioPipeline(
     /** Fold the phone mic to mono ((L+R)/2 on both channels). Off by default; the stream stays stereo either way. */
     @Volatile var monoVoice = false
 
+    /**
+     * Which mic to record from. Changing it reopens the mic between two chunks (the old one fades out). Needs
+     * [context]; without one, Android picks as it always has.
+     */
+    @Volatile var inputChoice = InputChoice.AUTO
+
+    /**
+     * The level for a USB or wired mic, dB, used while one is the mic in use ([activeInput]). Null (the default): the
+     * same level as the phone's own mic, as before. An external mic arrives at its own level, so it should get its own
+     * (0 dB to start with, never the raw phone mic's +20).
+     */
+    @Volatile var externalGainDb: Float? = null
+
+    /** The mic the recording is really using (null before one opens). */
+    @Volatile var activeInput: ActiveInput? = null
+        private set
+
     /** The user's mic level, -20..+30 dB; applies from the next chunk, gliding so it doesn't click. */
     var micGainDb: Float
         get() = dsp.gainDb
@@ -179,6 +210,7 @@ class AudioPipeline(
 
     fun start() {
         running = true
+        watchInputs()
         capture = Thread(::captureLoop, "engine-audio-capture").apply { start() }
     }
 
@@ -186,6 +218,38 @@ class AudioPipeline(
         running = false
         capture?.join(2_000)
         stopCodec()
+        unwatchInputs()
+    }
+
+    /** Set when the route may have changed (a callback, on any thread); the capture thread re-reads it. */
+    @Volatile private var routingDirty = false
+    /** Set when the mic should reopen to pick a device again (one plugged in or out while a choice is set). */
+    @Volatile private var reopenWanted = false
+    private var deviceCallback: AudioDeviceCallback? = null
+    @Volatile private var externalIds: Set<Int>? = null
+
+    private fun watchInputs() {
+        val am = context?.getSystemService(AudioManager::class.java) ?: return
+        val cb = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = changed()
+            override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = changed()
+            private fun changed() {
+                routingDirty = true
+                val ids = runCatching { am.getDevices(AudioManager.GET_DEVICES_INPUTS) }.getOrNull()
+                    ?.filter { inputClassOf(it.type) == InputClass.EXTERNAL }?.map { it.id }?.toSet() ?: return
+                val before = externalIds
+                externalIds = ids
+                // The first call lists what's there already; after that, a change with a choice set means pick again.
+                if (before != null && before != ids && inputChoice != InputChoice.AUTO) reopenWanted = true
+            }
+        }
+        if (runCatching { am.registerAudioDeviceCallback(cb, null) }.isSuccess) deviceCallback = cb
+    }
+
+    private fun unwatchInputs() {
+        val cb = deviceCallback ?: return
+        deviceCallback = null
+        runCatching { context?.getSystemService(AudioManager::class.java)?.unregisterAudioDeviceCallback(cb) }
     }
 
     /** Capture thread. False (with [codecError] set) if the encoder couldn't start; the caller retries later. */
@@ -195,6 +259,8 @@ class AudioPipeline(
             c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
             configureAac(c, sampleRate, stereo, bitrate)
             c.start()
+            if (encoderName != c.name) Log.i(TAG, "audio encoder ${c.name}")
+            encoderName = c.name
             codecFailed = false
             codec = c
             drain = Thread({ drainLoop(c) }, "engine-aenc-drain").apply { start() }
@@ -222,14 +288,22 @@ class AudioPipeline(
     /** The open mic and whether it was opened raw, so a change of [rawMic] can reopen it. */
     private var mic: OpenMic? = null
     private var openedRaw = false
+    private var openedChoice = InputChoice.AUTO
+    private val routingListener = AudioRouting.OnRoutingChangedListener { routingDirty = true }
 
     /** Opens the mic ([micSources]) and watches whether the system silences it. Null if no source will record. */
     private fun openRecord(): AudioRecord? {
         val raw = rawMic
-        val m = openMic(sampleRate, stereo, chunkFrames * bytesPerFrame, raw, unprocessedOk) ?: return null
+        val choice = inputChoice
+        reopenWanted = false
+        val preferred = context?.let { runCatching { preferredInput(it, choice) }.getOrNull() }
+        val m = openMic(sampleRate, stereo, chunkFrames * bytesPerFrame, raw, unprocessedOk, preferred) ?: return null
         mic = m
         openedRaw = raw
+        openedChoice = choice
         val r = m.record
+        runCatching { r.addOnRoutingChangedListener(routingListener, null) }
+        routingDirty = true
         // Another app (a call, the system) can silence this client while it keeps "recording" zeros.
         val cb = recordingCallback(r)
         if (runCatching { r.registerAudioRecordingCallback(directExecutor, cb) }.isSuccess) recordCallback = cb
@@ -250,6 +324,7 @@ class AudioPipeline(
     private var recordCallback: AudioManager.AudioRecordingCallback? = null
 
     private fun closeRecord(r: AudioRecord) {
+        runCatching { r.removeOnRoutingChangedListener(routingListener) }
         recordCallback?.let { cb -> runCatching { r.unregisterAudioRecordingCallback(cb) } }
         recordCallback = null
         val m = mic
@@ -306,9 +381,9 @@ class AudioPipeline(
                 // The user switched the phone's auto level: reopen with the other source, at once (the last chunk of
                 // the old one has faded out).
                 record?.let { cur ->
-                    if (closeAfter || openedRaw != rawMic) {
+                    if (closeAfter || wantsReopen()) {
                         closeAfter = false
-                        Log.i(TAG, "mic: phone auto level ${if (rawMic) "off" else "on"}, reopening")
+                        Log.i(TAG, "mic: phone auto level ${if (rawMic) "off" else "on"}, input ${inputChoice.name.lowercase()}, reopening")
                         closeRecord(cur)
                         record = null
                         openAtNs = 0L
@@ -368,7 +443,10 @@ class AudioPipeline(
                     }
                     ptsNs = pts.next(raw)
                     // About to switch source: fade this chunk out, so the cut doesn't click.
-                    closeAfter = openedRaw != rawMic
+                    closeAfter = wantsReopen()
+                    // A USB mic plugged in or out, or Android moved the recording: see what it uses now.
+                    if (routingDirty) checkRoute(r)
+                    if (stereo) stereoProbe.add(pcm, chunkFrames)
                 } else {
                     // No mic: one chunk of silence per chunk of real time, on the same clock as the video.
                     if (silenceNextNs == 0L) { silenceNextNs = System.nanoTime(); pts.sourceChanged() }
@@ -390,7 +468,7 @@ class AudioPipeline(
                 // chunks of silence first, through the whole mix (a chime or the camera carries on through them),
                 // then fade the real chunk in. The cut at the start of the gap can't be faded: it's already encoded.
                 val rawOpen = record != null && openedRaw
-                val gainDb = if (rawOpen) rawMicGainDb else null
+                val gainDb = micGainFor(activeInput, rawOpen)
                 if (pts.fillChunks > 0) {
                     for (k in 0 until pts.fillChunks) {
                         silent.fill(0)
@@ -413,6 +491,59 @@ class AudioPipeline(
             record?.let { closeRecord(it) }
         }
     }
+
+    private fun wantsReopen() = openedRaw != rawMic || openedChoice != inputChoice || reopenWanted
+
+    /** Probes the phone mic's channels over the first 10 s of the stream (stereo only). */
+    private val stereoProbe = StereoProbe(sampleRate)
+
+    /** The level for the mic in use: an external mic's own (once one is set), the raw mic's, or the user's. */
+    private fun micGainFor(input: ActiveInput?, rawOpen: Boolean): Float? {
+        val ext = externalGainDb
+        return when {
+            ext != null && input?.inputClass == InputClass.EXTERNAL -> ext
+            rawOpen -> rawMicGainDb
+            else -> null
+        }
+    }
+
+    /** Re-reads the device [r] records from; on a change, tells [onInputChange]. The level follows within a glide. */
+    private fun checkRoute(r: AudioRecord) {
+        routingDirty = false
+        val d = runCatching { r.routedDevice }.getOrNull() ?: return
+        val now = activeInputOf(d)
+        val before = activeInput
+        if (now == before) return
+        activeInput = now
+        val msg = inputChangeMessage(before, now)
+        Log.i(TAG, "mic input: ${describe(d)}${msg?.let { " ($it)" } ?: ""}")
+        runCatching { onInputChange(now, msg) }
+    }
+
+    /** Everything finer than [counters], for the session log. */
+    fun diagnostics(): AudioDiagnostics = AudioDiagnostics(
+        inputClipChunks = inputClipChunks,
+        inputClips = inputClips,
+        postMixClips = postMixClips,
+        gapFillChunks = gapFillChunks,
+        fallbackChunks = fallbackChunks,
+        ptsJitter = ptsJitter().toList(),
+        levelerDb = levelerDb,
+        avDelayNs = avDelayNs,
+        stereo = if (stereo) stereoProbe.stats() else null,
+        encoderName = encoderName,
+        encoderFormat = encoderFormat,
+        encoderDelayFrames = encoderDelayFrames,
+        activeInput = activeInput,
+    )
+
+    /** The AAC encoder in use, its output format, and its priming delay (frames; -1 if it didn't say). */
+    @Volatile var encoderName: String? = null
+        private set
+    @Volatile var encoderFormat: String? = null
+        private set
+    @Volatile var encoderDelayFrames = -1
+        private set
 
     /**
      * Mixes one chunk ([MixStage]) and sends it on: to the playback ring, then through the lip-sync delay to the
@@ -499,7 +630,12 @@ class AudioPipeline(
         try {
             while (codec === c) {
                 val idx = c.dequeueOutputBuffer(info, 10_000)
-                if (idx >= 0) {
+                if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val f = c.outputFormat
+                    encoderFormat = f.toString()
+                    encoderDelayFrames = if (f.containsKey(MediaFormat.KEY_ENCODER_DELAY)) f.getInteger(MediaFormat.KEY_ENCODER_DELAY) else -1
+                    Log.i(TAG, "audio encoder output: $f")
+                } else if (idx >= 0) {
                     val buf = c.getOutputBuffer(idx)
                     val config = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
                     if (buf != null && !config && info.size > 0) {
