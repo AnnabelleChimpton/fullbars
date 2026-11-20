@@ -83,16 +83,22 @@ class RtmpRateControllerTest {
         assertEquals("no flushes on a mere bottleneck", 0, link.flushes)
     }
 
+    /**
+     * A backlog that drains steadily at the link's spare rate. Just under [RtmpRateController.FLUSH_MS] it is left to
+     * drain; just over, it is past saving by the policy's own rule and goes in one flush. Either way at most two cuts.
+     */
     @Test
-    fun `a linearly draining 3 s backlog cuts at most twice`() {
-        val c = RtmpRateController(minBps = 1_000_000, maxBps = 6_000_000)
-        val link = Link(c, 8_000_000)
-        link.run(5_000)
-        link.queueBits = 2.9 * 8_000_000 // ~2.9 s to drain at 8 Mbps, emptying steadily
-        link.run(20_000)
-        assertTrue("cuts: ${link.cuts(5_000)}", link.cuts(5_000) <= 2)
-        assertEquals(0, link.flushes)
-        assertTrue(c.targetBps >= 4_000_000)
+    fun `a linearly draining backlog around 3 s cuts at most twice, and flushes only past 3 s`() {
+        for ((seconds, flushes) in listOf(2.9 to 0, 3.2 to 1)) {
+            val c = RtmpRateController(minBps = 1_000_000, maxBps = 6_000_000)
+            val link = Link(c, 8_000_000)
+            link.run(5_000)
+            link.queueBits = seconds * 8_000_000 // this many seconds to drain at 8 Mbps, emptying steadily
+            link.run(20_000)
+            assertTrue("$seconds s: cuts ${link.cuts(5_000)}", link.cuts(5_000) <= 2)
+            assertEquals("$seconds s: flushes", flushes, link.flushes)
+            assertTrue("$seconds s: ${c.targetBps}", c.targetBps >= 4_000_000)
+        }
     }
 
     @Test
@@ -149,6 +155,48 @@ class RtmpRateControllerTest {
         assertEquals(4_000_000, c.targetBps)
         repeat(100) { c.update(50_500L + 500L * it, 0, 4_000_000, ceilingBps = 100) }
         assertEquals("never under the floor", 1_000_000, c.targetBps)
+    }
+
+    @Test
+    fun `a link just under the ceiling is not re-probed every few seconds`() {
+        // Video at the ceiling plus audio needs 3% more than the link carries.
+        val c = RtmpRateController(minBps = 1_000_000, maxBps = 6_000_000)
+        val link = Link(c, ((6_000_000 + AUDIO_BPS) * 0.97).toLong())
+        link.run(30_000)
+        val from = link.actions.size
+        link.run(120_000)
+        val acts = link.actions.drop(from)
+        val stepBacks = acts.count { it.contains("step back") }
+        val downs = acts.count { it.contains(" down") }
+        assertTrue("step-backs in 2 minutes: $stepBacks\n${acts.filter { !it.contains("hold") }.joinToString("\n")}", stepBacks <= 5)
+        assertTrue("congestion cuts in 2 minutes: $downs", downs <= 2)
+        val late = link.targets.filter { it.first > link.nowMs - 60_000 }
+        assertTrue("stays near the link's rate: ${late.minOf { it.second }}", late.minOf { it.second } >= 4_800_000)
+    }
+
+    @Test
+    fun `each failed probe doubles the wait before the next, and one that holds resets it`() {
+        val c = RtmpRateController(minBps = 1_000_000, maxBps = 6_000_000)
+        var t = 0L
+        val probes = mutableListOf<Long>()
+        var failing = true
+        var lastProbe = Long.MIN_VALUE
+        c.update(t, 500, 5_000_000)
+        t += 250
+        c.update(t, 500, 5_000_000) // an episode: 4.25 Mbps, known limit 6 Mbps
+        while (t < 200_000) {
+            t += 250
+            if (t > 150_000) failing = false
+            // After each probe, while failing, the backlog grows past the step-back level for two readings.
+            val q = if (failing && lastProbe != Long.MIN_VALUE && t - lastProbe in 500L..750L) 300 else 0
+            c.update(t, q, 5_000_000)
+            if (c.lastAction == "probe") { probes += t; lastProbe = t }
+        }
+        val gaps = probes.zipWithNext { a, b -> b - a }
+        val failedGaps = gaps.takeWhile { it > 5_000 }
+        assertEquals("doubling, then capped: $gaps", listOf(10_000L, 20_000L, 40_000L, 40_000L), failedGaps.take(4))
+        // The probe after the failures stop holds, and the one after it comes at the normal interval.
+        assertEquals("back to every 5 s once a probe holds: $gaps", 5_000L, gaps.last())
     }
 
     private companion object {

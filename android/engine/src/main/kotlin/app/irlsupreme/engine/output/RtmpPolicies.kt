@@ -14,9 +14,12 @@ import kotlin.math.min
  *
  * Throughput: while bytes are waiting, what left is what the link carries, so the latest reading is taken as it is
  * (a capacity drop shows at once); with an empty queue it only says what was offered, so it is smoothed.
- * Backlog: the queued bytes divided by the throughput, i.e. how long the newest frame waits. When the link carries
- * under half of what goes in (a stall, or close to one) that would read a two-second stall as minutes, so then the
- * queued bytes are divided by the input rate instead: how much media is waiting, which stays finite.
+ * Backlog: the queued bytes divided by the throughput, i.e. how long the newest frame waits. When almost nothing
+ * leaves (under a tenth of what goes in: a stall) that would read a two-second stall as minutes, so then the queued
+ * bytes are divided by the input rate instead: how much media is waiting, which stays finite. Anything more than a
+ * trickle is divided as it is, so a heavy bottleneck reads as the real wait rather than a fraction of it. (An average
+ * over a second would smooth lumpy readings, but it also lags the start of a stall, when it reads a few hundred ms of
+ * media over a fading rate as seconds and flushes a blip TCP would have recovered.)
  * Without a byte count it falls back to queued items over the frame rate plus AAC's ~47 frames/s.
  */
 class RtmpMeter(private val fps: Int) {
@@ -57,7 +60,7 @@ class RtmpMeter(private val fps: Int) {
         lastMs = nowMs
         lastSent = bytesSent
         lastIn = bytesIn
-        val rate = if (throughputBps * 2 >= inputBps) throughputBps else inputBps
+        val rate = if (throughputBps * STALL_DIVISOR >= inputBps) throughputBps else inputBps
         queueDelayMs = when {
             queueBytes == 0L -> 0
             queueBytes > 0 && rate > 0 -> min(MAX_QUEUE_MS, queueBytes * 8 * 1000 / rate).toInt()
@@ -73,6 +76,8 @@ class RtmpMeter(private val fps: Int) {
         private const val MAX_QUEUE_MS = 60_000L
         /** More than this much media queued means the link, not the encoder, set the pace. */
         private const val BACKLOGGED_MS = 50L
+        /** Under 1/this of the input leaving counts as a stall: the backlog is then measured against the input. */
+        private const val STALL_DIVISOR = 10
     }
 }
 
@@ -180,40 +185,76 @@ class RtmpFramePolicy(
  * Notices a live connection that has died without closing: no bytes leave for [stallMs] although the encoder is
  * producing, past a [graceMs] after connecting. TCP recovers short blips by itself, so the threshold is several
  * seconds. Fires once per connection.
+ *
+ * The client counts a packet's bytes only once all of it is written, so on a slow link one big keyframe can show no
+ * progress for longer than [stallMs] while the socket is busy the whole time (400 KB at 450 kbps takes 7 s). So the
+ * threshold stretches to twice the time the largest recent frame takes at the last throughput seen while bytes still
+ * moved, up to [maxStallMs].
  */
-class StallWatchdog(val graceMs: Long = 5_000, val stallMs: Long = 7_000) {
+class StallWatchdog(val graceMs: Long = 5_000, val stallMs: Long = 7_000, val maxStallMs: Long = 20_000) {
     private var connectedAtMs = Long.MIN_VALUE
     private var lastProgressMs = Long.MIN_VALUE
     private var lastBytes = Long.MIN_VALUE
     private var fired = false
+    private var goodBps = 0L
+    // The largest frame handed over in the current and the previous [FRAME_BUCKET_MS].
+    private var bigNow = 0L
+    private var bigBefore = 0L
+    private var bucketStartMs = Long.MIN_VALUE
 
     fun onConnected(nowMs: Long) {
         connectedAtMs = nowMs
         lastProgressMs = nowMs
         lastBytes = Long.MIN_VALUE
         fired = false
+        goodBps = 0
+        bigNow = 0; bigBefore = 0; bucketStartMs = nowMs
     }
 
     /**
-     * Call every ~1 s while live with the client's running byte count. Returns how long nothing has left (ms) when
-     * the connection should be treated as failed, else -1.
+     * Call every ~1 s while live with the client's running byte count. [largestFrameBytes]: the largest frame handed to
+     * the client since the last call (0 if unknown). [throughputBps]: the meter's current throughput. Returns how long
+     * nothing has left (ms) when the connection should be treated as failed, else -1.
      */
-    fun check(nowMs: Long, encoderProducing: Boolean, bytesSent: Long): Long {
+    fun check(
+        nowMs: Long,
+        encoderProducing: Boolean,
+        bytesSent: Long,
+        largestFrameBytes: Long = 0,
+        throughputBps: Long = 0,
+    ): Long {
         if (connectedAtMs == Long.MIN_VALUE) return -1
+        if (nowMs - bucketStartMs >= FRAME_BUCKET_MS) {
+            bigBefore = bigNow
+            bigNow = 0
+            bucketStartMs = nowMs
+        }
+        if (largestFrameBytes > bigNow) bigNow = largestFrameBytes
         if (lastBytes == Long.MIN_VALUE) {
             lastBytes = bytesSent // the first reading after a connect is the baseline, not progress
         } else if (bytesSent != lastBytes) {
             lastBytes = bytesSent
             lastProgressMs = nowMs
+            if (throughputBps > 0) goodBps = if (goodBps == 0L) throughputBps else (goodBps * 3 + throughputBps) / 4
         }
         // Nothing to send isn't the link's fault.
         if (!encoderProducing) lastProgressMs = nowMs
         if (fired || nowMs - connectedAtMs < graceMs) return -1
         val idle = nowMs - lastProgressMs
-        if (idle < stallMs) return -1
+        if (idle < thresholdMs()) return -1
         fired = true
         return idle
     }
+
+    /** [stallMs], or longer when the largest recent frame takes a while to write at the throughput last seen. */
+    fun thresholdMs(): Long {
+        val big = max(bigNow, bigBefore)
+        if (big <= 0 || goodBps <= 0) return stallMs
+        val writeMs = big * 8 * 1000 / goodBps
+        return min(maxStallMs, max(stallMs, writeMs * 2))
+    }
+
+    private companion object { const val FRAME_BUCKET_MS = 10_000L }
 }
 
 /**

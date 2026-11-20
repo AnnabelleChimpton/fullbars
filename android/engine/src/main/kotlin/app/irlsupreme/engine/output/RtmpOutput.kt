@@ -73,6 +73,7 @@ class RtmpOutput(
     @Volatile private var lastFrameMs = 0L
     @Volatile private var clientDropped = 0L
     private val queuedBytes = AtomicLong()
+    private val largestSinceTick = AtomicLong()
 
     // Frame decisions happen on the encoders' threads; the rest below only on the output's own thread.
     private val lock = Any()
@@ -192,7 +193,13 @@ class RtmpOutput(
         if (wantKey) handler.post(requestKeyframe)
         if (!forward) return
         client.sendVideo(buffer, info)
-        queuedBytes.addAndGet(info.size.toLong())
+        val size = info.size.toLong()
+        queuedBytes.addAndGet(size)
+        // The largest frame since the last tick, for the stall watchdog (a lock-free max: no allocation per frame).
+        while (true) {
+            val cur = largestSinceTick.get()
+            if (size <= cur || largestSinceTick.compareAndSet(cur, size)) break
+        }
     }
 
     override fun sendAudio(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
@@ -240,7 +247,13 @@ class RtmpOutput(
             queueDelayMs = 0
         }
         if (wantKey) requestKeyframe.run()
-        val idleMs = watchdog.check(now, encoderProducing = now - lastFrameMs < PRODUCING_MS, bytesSent = sent)
+        val idleMs = watchdog.check(
+            now,
+            encoderProducing = now - lastFrameMs < PRODUCING_MS,
+            bytesSent = sent,
+            largestFrameBytes = largestSinceTick.getAndSet(0),
+            throughputBps = meter.throughputBps,
+        )
         if (idleMs >= 0) handleFailure("stalled: no bytes for ${idleMs / 1000} s")
     }
 

@@ -107,6 +107,16 @@ class RtmpPoliciesTest {
         val n = RtmpMeter(30)
         n.update(0, 0, 0, -1, 154)
         assertEquals(2_000, n.queueDelayMs)
+        // A heavy bottleneck, not a stall: 1.5 Mbps leaves while 4 Mbps goes in. 750 KB queued waits 4 s at the rate
+        // it really leaves, not the 1.5 s it would take at the input rate.
+        val b = RtmpMeter(30)
+        b.update(0, 0, 0, 0, 0)
+        b.update(1_000, 187_500, 500_000, 750_000, 100)
+        assertEquals(1_500_000L, b.throughputBps)
+        assertEquals(4_000, b.queueDelayMs)
+        // A trickle under a tenth of the input is a stall: measured against the input again, so it stays finite.
+        b.update(2_000, 187_500 + 30_000, 1_000_000, 1_220_000, 200)
+        assertEquals(2_440, b.queueDelayMs) // 1.22 MB at 4 Mbps
         // A counter that restarts (new connection) isn't negative traffic.
         m.update(3_000, 10, 20, 0, 0)
         assertTrue(m.throughputBps >= 0)
@@ -151,6 +161,44 @@ class RtmpPoliciesTest {
         val idle = StallWatchdog()
         idle.onConnected(0)
         for (t in 1_000L..30_000L step 1_000) assertEquals(-1L, idle.check(t, false, 0))
+    }
+
+    @Test fun watchdogAllowsOneBigFrameToCrawlOutOfASlowLink() {
+        // 300 kbps uplink: bytes move until a 400 KB keyframe is handed over, which takes ~11 s to write. The client
+        // counts it only once it is all written, so the byte count stands still that whole time.
+        val w = StallWatchdog()
+        w.onConnected(0)
+        var bytes = 0L
+        var t = 0L
+        while (t < 10_000) {
+            t += 1_000
+            bytes += 37_500 // 300 kbps
+            assertEquals(-1L, w.check(t, true, bytes, largestFrameBytes = 20_000, throughputBps = 300_000))
+        }
+        assertEquals(-1L, w.check(t + 250, true, bytes, largestFrameBytes = 400_000, throughputBps = 300_000))
+        val stuckAt = t
+        while (t < stuckAt + 11_000) {
+            t += 1_000
+            assertEquals("still writing the keyframe at ${t - stuckAt} ms", -1L, w.check(t, true, bytes, 0, 0))
+        }
+        bytes += 400_000 // it went out
+        t += 1_000
+        assertEquals(-1L, w.check(t, true, bytes, 0, 300_000))
+        // A link that really died still fires, at the stretched threshold at the latest (capped at 20 s).
+        assertTrue(w.thresholdMs() in 7_000L..20_000L)
+        var fired = -1L
+        val deadAt = t
+        while (fired < 0 && t < deadAt + 30_000) {
+            t += 1_000
+            if (w.check(t, true, bytes, 0, 0) >= 0) fired = t - deadAt
+        }
+        assertTrue("fired after $fired ms", fired in 7_000L..20_000L)
+        // Small frames on a fast link keep the 7 s threshold.
+        val fast = StallWatchdog()
+        fast.onConnected(0)
+        bytes = 0
+        for (s in 1..10) { bytes += 750_000; fast.check(s * 1_000L, true, bytes, 60_000, 6_000_000) }
+        assertEquals(7_000L, fast.thresholdMs())
     }
 
     // --- reconnect timing ---

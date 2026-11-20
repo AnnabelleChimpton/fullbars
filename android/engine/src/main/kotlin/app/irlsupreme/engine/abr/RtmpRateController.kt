@@ -24,7 +24,9 @@ import kotlin.math.roundToInt
  *  - once the backlog has stayed under [CLEAR_MS] for [CLEAR_HOLD_MS], ramp +10%/s up to 85% of the known limit,
  *    then probe +5% every [PROBE_EVERY_MS] toward the ceiling, stepping back if a probe grows the backlog within
  *    [PROBE_WATCH_MS]. The known limit is forgotten after [KNOWN_LIMIT_TTL_MS] of clear backlog, so a link that got
- *    better is found again in seconds rather than minutes;
+ *    better is found again in seconds rather than minutes. Each probe that fails (a step back, or congestion soon
+ *    after it) doubles both waits, up to [MAX_PROBE_BACKOFF] times, so a steady bottleneck isn't re-tested every few
+ *    seconds; a probe that holds until the next one resets them;
  *  - a backlog over [FLUSH_MS] is past saving: [flushNow] asks the output to drop it and restart from a keyframe.
  */
 class RtmpRateController(
@@ -54,6 +56,10 @@ class RtmpRateController(
     private var probeFromBps = 0
     private var queueAtProbe = 0
     private var lastQueue = 0
+    /** Multiplies the probe interval and the known limit's lifetime; doubles on each failed probe. */
+    private var probeBackoff = 1
+    private var probeFailed = false
+    private var lastProbeBaseBps = 0
 
     /**
      * [queueDelayMs]: how long the client's send backlog takes to leave. [throughputBps]: what actually left recently
@@ -86,6 +92,7 @@ class RtmpRateController(
             knownLimitBps = targetBps
             targetBps = probeFromBps.coerceIn(minBps, ceiling)
             probeFromBps = 0
+            failProbe()
             lastAction = "step back (queue ${queue}ms)"
             return targetBps
         }
@@ -94,6 +101,10 @@ class RtmpRateController(
             probeFromBps = 0
             if (!inEpisode) {
                 inEpisode = true
+                // Congestion soon after a probe, above where it started: that probe found the limit the hard way.
+                if (lastProbeMs != Long.MIN_VALUE && nowMs - lastProbeMs < PROBE_FAIL_WINDOW_MS && targetBps > lastProbeBaseBps) {
+                    failProbe()
+                }
                 knownLimitBps = targetBps
                 cut(nowMs, queue, throughputBps, ceiling, "down")
             } else if (nowMs >= holdUntilMs && queue > queueAtLastCut && queue > previous) {
@@ -110,7 +121,8 @@ class RtmpRateController(
             return targetBps
         }
         inEpisode = false
-        if (clearFor >= KNOWN_LIMIT_TTL_MS && knownLimitBps < ceiling) knownLimitBps = ceiling // forget an old limit
+        // Forget an old limit (the link may have got better), later after probes that failed.
+        if (clearFor >= KNOWN_LIMIT_TTL_MS * probeBackoff && knownLimitBps < ceiling) knownLimitBps = ceiling
         val fastTop = (knownLimitBps * NEAR_LIMIT).roundToInt()
         when {
             targetBps >= ceiling -> lastAction = "at ceiling"
@@ -119,7 +131,10 @@ class RtmpRateController(
                 targetBps = min((targetBps + step).roundToInt(), min(fastTop, ceiling)).coerceIn(minBps, ceiling)
                 lastAction = "up"
             }
-            lastProbeMs == Long.MIN_VALUE || nowMs - lastProbeMs >= PROBE_EVERY_MS -> {
+            lastProbeMs == Long.MIN_VALUE || nowMs - lastProbeMs >= PROBE_EVERY_MS * probeBackoff -> {
+                if (lastProbeMs != Long.MIN_VALUE && !probeFailed) probeBackoff = 1 // the last probe held
+                probeFailed = false
+                lastProbeBaseBps = targetBps
                 probeFromBps = targetBps
                 queueAtProbe = queue
                 lastProbeMs = nowMs
@@ -131,6 +146,15 @@ class RtmpRateController(
         }
         return targetBps
     }
+
+    private fun failProbe() {
+        if (probeFailed) return
+        probeFailed = true
+        probeBackoff = min(probeBackoff * 2, MAX_PROBE_BACKOFF)
+    }
+
+    /** Current multiplier on the probe interval and the known limit's lifetime (1 until a probe fails). */
+    val backoff: Int get() = probeBackoff
 
     private fun cut(nowMs: Long, queue: Int, throughputBps: Long, ceiling: Int, verb: String) {
         val stalled = throughputBps < targetBps * STALL_SHARE
@@ -177,6 +201,10 @@ class RtmpRateController(
         const val STEP_BACK_MS = 200
         /** Clear backlog for this long and the known limit is forgotten (the link may have got better). */
         const val KNOWN_LIMIT_TTL_MS = 8_000L
+        /** Congestion within this long of a probe, above the level it started from, counts as that probe failing. */
+        const val PROBE_FAIL_WINDOW_MS = 10_000L
+        /** Failed probes stretch the probe interval and the known limit's lifetime up to this many times. */
+        const val MAX_PROBE_BACKOFF = 8
         private const val MAX_DT_MS = 2_000L
     }
 }
