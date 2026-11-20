@@ -33,8 +33,11 @@ type ReceiveConfig struct {
 	// should still be asked for early. 0 = no cap. Only used with LossMaxTTL. [fullbars patch]
 	//
 	// With a cap set, LossMaxTTL is only the floor of the packet tolerance: the receiver raises it to the packets
-	// that arrive in 1.25 x LossMaxWait at the measured receive rate (recomputed every second, and unlimited until
-	// the first measurement), so the time cap is the tolerance that actually applies at every bitrate. A fixed
+	// that arrive in 2 x LossMaxWait at the highest receive rate of the last few seconds that carried packets
+	// (recomputed every second, and unlimited until the first measurement and after a second with no packets at
+	// all), so the time cap is the tolerance that actually applies at every bitrate. The factor 2 covers keyframe
+	// bursts, which arrive well above the one-second average; a second with nothing in it (an outage) never lowers
+	// the tolerance, since that is just when a reconnecting bonded stream comes back heavily reordered. A fixed
 	// packet count meant a much shorter wait at high bitrates: 64 packets are about 80 ms at 8 Mbps, less than the
 	// delay difference between a 5G and a congested LTE link, and every packet on the slower link was asked for
 	// again. [fullbars patch]
@@ -94,7 +97,9 @@ type receiver struct {
 	// Reorder tolerance [fullbars patch]
 	lossMaxTTL  uint32
 	lossMaxWait uint64
-	effTTL      uint32      // the packet tolerance in use: lossMaxTTL, raised from the receive rate (see LossMaxWait)
+	effTTL      uint32    // the packet tolerance in use: lossMaxTTL, raised from the receive rate (see LossMaxWait)
+	rateTTL     [4]uint32 // the rate-based tolerance of the last seconds that carried packets, newest at rateNext-1
+	rateNext    int
 	fresh       []freshLoss // gaps not reported yet, in sequence order, never overlapping
 	now         uint64      // time of the last Tick, the receiver's clock for fresh gaps
 }
@@ -569,10 +574,28 @@ func (r *receiver) Tick(now uint64) {
 
 		// [fullbars patch] The packet tolerance follows the receive rate, so LossMaxWait is what applies.
 		if r.lossMaxTTL > 0 && r.lossMaxWait > 0 {
-			r.effTTL = max(r.lossMaxTTL, uint32(min(r.rate.packetsPerSecond*float64(r.lossMaxWait)/1e6*1.25, math.MaxUint32/2)))
+			r.updateTolerance()
 		}
 	}
 	r.lock.Unlock()
+}
+
+// updateTolerance sets effTTL from the rate just measured. Called with the lock held, once a second.
+// [fullbars patch]
+func (r *receiver) updateTolerance() {
+	if r.rate.packetsPerSecond <= 0 {
+		// Nothing arrived (an outage): the time cap alone until packets flow again. The rates from before the
+		// outage are kept, so the first, partly filled second after it doesn't pull the tolerance down either.
+		r.effTTL = math.MaxUint32
+		return
+	}
+	r.rateTTL[r.rateNext] = uint32(min(r.rate.packetsPerSecond*float64(r.lossMaxWait)/1e6*2, math.MaxUint32/2))
+	r.rateNext = (r.rateNext + 1) % len(r.rateTTL)
+	ttl := r.lossMaxTTL
+	for _, t := range r.rateTTL {
+		ttl = max(ttl, t)
+	}
+	r.effTTL = ttl
 }
 
 // LossTolerance returns the reorder tolerance in packets in use now. [fullbars patch]

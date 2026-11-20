@@ -285,7 +285,7 @@ func TestTwoLinkDelaySpreadSendsNoNAKs(t *testing.T) {
 		t.Fatalf("no loss: %d NAKs for %d packets, %d lost, %d of %d delivered", r.naks, r.nakedSeqs, r.lost, r.delivered, r.sent)
 	}
 	if r.tolerance < 200 {
-		t.Fatalf("tolerance at 8 Mbps is %d packets; expected the 250 ms cap to set it (~235)", r.tolerance)
+		t.Fatalf("tolerance at 8 Mbps is %d packets; expected the 250 ms cap to set it (~470)", r.tolerance)
 	}
 	fixed := bondSim(t, [2]uint64{40_000, 220_000}, 8, 0, 64, 0, 10)
 	if fixed.nakedSeqs < fixed.sent/4 {
@@ -305,5 +305,58 @@ func TestTwoLinkRealLossIsRecoveredInTime(t *testing.T) {
 	// Only lost packets are asked for: the reorder between the links causes no resends on top.
 	if r.spurious != 0 {
 		t.Fatalf("%d packets that were only reordered were asked for again (%d lost)", r.spurious, r.lostOnWay)
+	}
+}
+
+// An outage, then the bonded stream comes back with one link 180 ms behind the other. The seconds with nothing in
+// them must not pull the tolerance down to the 64-packet floor: the reordering right after a reconnect would then
+// be asked for again.
+func TestToleranceSurvivesAnOutage(t *testing.T) {
+	var n nakRecorder
+	r := n.receiver(64, 250_000)
+	tol := func() uint32 { return r.(interface{ LossTolerance() uint32 }).LossTolerance() }
+	var seq uint32
+	now := uint64(1_000_000)
+	r.Tick(now)
+	// 3 s at about 8 Mbps (8 packets every 10 ms), in order.
+	for ; now < 4_000_000; now += 10_000 {
+		push(r, seqRange(seq, seq+7)...)
+		seq += 8
+		r.Tick(now)
+	}
+	before := tol()
+	if before < 300 {
+		t.Fatalf("tolerance at 8 Mbps is %d packets, expected about 400", before)
+	}
+	// 2.5 s of nothing.
+	for ; now < 6_500_000; now += 10_000 {
+		r.Tick(now)
+	}
+	if got := tol(); got < before {
+		t.Fatalf("an outage lowered the tolerance from %d to %d", before, got)
+	}
+	// Back, with every odd packet 180 ms late (the slower link).
+	type late struct {
+		at  uint64
+		seq uint32
+	}
+	var slow []late
+	for end := now + 2_000_000; now < end; now += 10_000 {
+		for i := uint32(0); i < 8; i++ {
+			if (seq+i)%2 == 0 {
+				push(r, seq+i)
+			} else {
+				slow = append(slow, late{now + 180_000, seq + i})
+			}
+		}
+		seq += 8
+		for len(slow) > 0 && slow[0].at <= now {
+			push(r, slow[0].seq)
+			slow = slow[1:]
+		}
+		r.Tick(now)
+	}
+	if len(n.naks) != 0 {
+		t.Fatalf("packets reordered after the outage were asked for again: %d NAKs, first %v", len(n.naks), n.naks[0])
 	}
 }
