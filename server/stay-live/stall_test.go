@@ -35,12 +35,33 @@ type phoneSim struct {
 	outWall time.Time
 	worst   float64
 	ppm     float64 // how much faster the phone's clock runs than the server's
+
+	aOff  int64                            // the phone's audio timestamps run this far ahead of its video's
+	vData func(key bool, dts int64) []byte // payloads; nil: small fixed ones
+	aData func(pts int64) []byte
 }
 
-func newPhoneSim(t *testing.T) *phoneSim {
+// tee writes the keeper's output to the recorder and to another writer (the real TS muxer).
+type tee struct{ a, b auWriter }
+
+func (t tee) write(a *au, pts, dts int64) error {
+	if err := t.a.write(a, pts, dts); err != nil {
+		return err
+	}
+	return t.b.write(a, pts, dts)
+}
+
+func newPhoneSim(t *testing.T) *phoneSim { return newPhoneSimWith(t, testSlate(), nil) }
+
+// newPhoneSimWith: a phone sim on the given slate; also writes to out if it isn't nil.
+func newPhoneSimWith(t *testing.T, slate []*au, out auWriter) *phoneSim {
 	t.Helper()
 	s := &phoneSim{t: t, r: &rec{}, now: time.Unix(10_000, 0), session: 1, clock0: 3_000_000, gop: 60}
-	k, err := newKeeper(s.r, testSlate(), 3000, 1500*time.Millisecond, 0, func(e string) { s.evs = append(s.evs, e) })
+	var w auWriter = s.r
+	if out != nil {
+		w = tee{s.r, out}
+	}
+	k, err := newKeeper(w, slate, 3000, 1500*time.Millisecond, 0, func(e string) { s.evs = append(s.evs, e) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +94,9 @@ func (s *phoneSim) run(d time.Duration) {
 					if key {
 						data = idr(0x64, 0xee)
 					}
+					if s.vData != nil {
+						data = s.vData(key, s.nextV)
+					}
 					s.deliver(&au{kind: kindVideo, pts: s.nextV, dts: s.nextV, key: key, data: data})
 				}
 				s.nextV += 3000
@@ -80,7 +104,10 @@ func (s *phoneSim) run(d time.Duration) {
 			} else {
 				if s.sendA {
 					d := adts(1)
-					s.deliver(&au{kind: kindAudio, pts: s.nextA, dts: s.nextA, data: d, dur: adtsDuration(d)})
+					if s.aData != nil {
+						d = s.aData(s.nextA + s.aOff)
+					}
+					s.deliver(&au{kind: kindAudio, pts: s.nextA + s.aOff, dts: s.nextA + s.aOff, data: d, dur: adtsDuration(d)})
 				}
 				s.nextA += 1920
 			}
@@ -135,8 +162,8 @@ func TestStallBackfillsTheDetectionTime(t *testing.T) {
 	for s.k.st == stateLive {
 		s.run(5 * time.Millisecond)
 	}
-	if in := s.now.Sub(t0); in < 1500*time.Millisecond || in > 1520*time.Millisecond {
-		t.Fatalf("slate came up %v after the last live video, want 1.5 s", in)
+	if in := s.now.Sub(t0); in <= 1500*time.Millisecond || in > 1505*time.Millisecond {
+		t.Fatalf("slate came up %v after the last live video, want within one 5 ms tick of 1.5 s", in)
 	}
 	// The same tick pumped the slate: the output has caught up with the 1.5 s of wall time.
 	if got, want := s.r.v[len(s.r.v)-1], lastLive+135000-3000; got < want {
