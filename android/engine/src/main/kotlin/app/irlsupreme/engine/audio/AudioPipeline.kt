@@ -141,6 +141,16 @@ class AudioPipeline(
             cameraBufferMs = cam?.bufferMs ?: 0,
             cameraRatePpm = cam?.ratePpm ?: 0,
             cameraSyncMs = cam?.syncErrorMs ?: 0,
+            postMixClips = postMixClips,
+            inputClipChunks = inputClipChunks,
+            inputClips = inputClips,
+            gapFillChunks = gapFillChunks,
+            fallbackChunks = fallbackChunks,
+            cameraDecoderDrops = cam?.decoderDrops ?: 0,
+            cameraRate = cam?.cameraRate ?: 0,
+            levelerDb = levelerDb,
+            aacEncoder = encoderName.orEmpty(),
+            activeInput = activeInput?.name.orEmpty(),
         )
     }
 

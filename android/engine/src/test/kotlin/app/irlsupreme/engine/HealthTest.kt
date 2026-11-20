@@ -1,6 +1,9 @@
 package app.irlsupreme.engine
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import srtlakt.abr.DelayPreset
 import org.junit.Test
 
 /** The live screen's single health pill must match what viewers actually get. */
@@ -49,5 +52,29 @@ class HealthTest {
         assertEquals(Health.HOT, live.copy(thermalRung = 2).health)
         assertEquals(Health.HOT, live.copy(thermalRung = 3, targetVideoBitrate = 2_000_000).health)
         assertEquals(Health.GREAT, live.copy(thermalStatus = 1).health)
+    }
+
+    @Test fun bondedCongestionIsTheLinksQueueingPastThePresetHeldForTwoTicks() {
+        val preset = DelayPreset.BALANCED // backs off past 200 ms
+        assertFalse(EngineRules.bondedCongested(200, preset))
+        assertTrue(EngineRules.bondedCongested(201, preset))
+        assertTrue(EngineRules.bondedCongested(400, DelayPreset.FAST))
+        assertFalse(EngineRules.bondedCongested(400, DelayPreset.ROCK_SOLID))
+
+        val hold = TickHold(2)
+        val queue = listOf(50, 350, 60, 350, 400, 500, 90, 300)
+        val pill = queue.map { hold.update(EngineRules.bondedCongested(it, preset)) }
+        // One tick over is a keyframe burst; two in a row is congestion, and one clear tick ends it.
+        assertEquals(listOf(false, false, false, false, true, true, false, false), pill)
+        assertEquals(Health.WEAK, live.copy(congested = pill[4]).health)
+        assertEquals(Health.GREAT, live.copy(congested = pill[3]).health)
+    }
+
+    @Test fun aResetClearsTheHold() {
+        val hold = TickHold(2)
+        hold.update(true)
+        hold.reset()
+        assertFalse(hold.update(true))
+        assertTrue(hold.update(true))
     }
 }

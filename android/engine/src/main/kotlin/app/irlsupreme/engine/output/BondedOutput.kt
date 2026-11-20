@@ -242,12 +242,18 @@ class BondedOutput(
             )
         }
         diagBase.keys.retainAll(stats.keys)
+        lastNakRate = out.associate { it.linkId to it.nakRate }
         return out.sortedBy { it.kind }
     }
 
+    /** Each link's [LinkDiag.nakRate] from the last [linkDiagnostics] call, for [links]. */
+    @Volatile private var lastNakRate: Map<Int, Double> = emptyMap()
+
+    /** Per-link state for the live screen; the resend rate is from the last [linkDiagnostics] window. */
     override fun links(): List<LinkInfo> {
         val stats = sender.stats.links.associateBy { it.id }
         val helpers = helperHost?.helpers.orEmpty().associateBy { it.id }
+        val naks = lastNakRate
         return linkManager.labels.map { l ->
             val s = stats[l.linkId]
             val h = linkManager.helperFor(l.linkId)?.let { helpers[it] }
@@ -259,6 +265,10 @@ class BondedOutput(
                 rttMs = s?.rttMs,
                 batteryPercent = h?.batteryPercentage,
                 hot = h?.thermal == Moblink.Thermal.RED,
+                queueMs = s?.queueDelayMs ?: 0,
+                nakRate = naks[l.linkId] ?: 0.0,
+                capPackets = s?.capPackets ?: 0,
+                overCap = s?.overCapSent ?: 0,
             )
         }.sortedBy { it.kind }
     }

@@ -302,6 +302,10 @@ class Compositor(
     val zoomRatio: Float get() = camera?.zoomRatio ?: 1f
 
     val measuredBitrate: Long get() = encoder?.measuredBitrate ?: 0
+    /** What the live encoder is (codec, profile and level, rate control); null before it's built. */
+    val encoderInfo: EncoderInfo? get() = encoder?.encoderInfo
+    /** The live encoder's output meter (frame rate, keyframe sizes and gaps); null before it's built. */
+    val encoderMeter: EncoderMeter? get() = encoder?.meter
 
     @Volatile private var camera: CameraSource? = null
     /** The RTMP camera (null with the phone camera only). Created on the render thread; check [rtmpReady]. */
