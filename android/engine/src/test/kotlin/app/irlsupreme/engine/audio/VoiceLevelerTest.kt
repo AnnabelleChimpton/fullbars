@@ -84,4 +84,55 @@ class VoiceLevelerTest {
         repeat(200) { lev.process(buf, frames, false) }
         assertEquals(0f, lev.gainDb, 0f)
     }
+
+    @Test fun `a reopened mic starts from 0 dB, so auto level coming back on gets no leftover boost`() {
+        // A quiet raw mic builds the gain up...
+        val dsp = MicDsp(rate, 2)
+        val quiet = Signals.speechLike(-40.0, 6 * rate, rate)
+        var l = MicLevel.SILENT
+        for (c in 0 until quiet.size / (frames * 2)) l = dsp.process(Signals.toPcm(quiet, c * frames * 2, frames * 2), frames, leveler = true)
+        assertTrue("built up ${l.levelerDb} dB", l.levelerDb > 6f)
+        // ...then the phone's auto level goes back on: the mic reopens ~28 dB hotter, leveler off.
+        dsp.micReopened()
+        val hot = Signals.sine(1000.0, Math.pow(10.0, -10.0 / 20), frames)
+        l = dsp.process(Signals.toPcm(hot), frames, leveler = false)
+        assertEquals(0f, l.levelerDb, 0f)
+        assertEquals(0f, l.reductionDb, 0f)
+    }
+
+    /** Room noise 15 dB under a -35 dB voice, as in the pause test. */
+    private fun talkOverRoom(seconds: Int): FloatArray {
+        val r = Signals.gain(Signals.pink(seconds * rate, 8).let { p -> FloatArray(p.size * 2) { p[it / 2] } }, -50.0)
+        return Signals.speechLike(-35.0, seconds * rate, rate).also { t -> for (i in t.indices) t[i] += r[i] }
+    }
+
+    private fun VoiceLeveler.feed(x: FloatArray, enabled: Boolean = true) {
+        val buf = FloatArray(frames * 2)
+        for (c in 0 until x.size / (frames * 2)) { x.copyInto(buf, 0, c * frames * 2, (c + 1) * frames * 2); process(buf, frames, enabled) }
+    }
+
+    @Test fun `gap-fill silence neither moves the gain nor drags the noise floor down`() {
+        val lev = VoiceLeveler(rate, 2)
+        lev.feed(Signals.gain(talkOverRoom(6), 12.0))
+        val floor = lev.floorDb
+        val gain = lev.gainDb
+        // Three of the longest gaps the timeline fills, close together: counted, they'd be the floor (10th percentile).
+        lev.feed(FloatArray(30 * frames * 2))
+        // The filters' tail makes the first chunk of a gap not quite silent; the rest is.
+        assertEquals(floor, lev.floorDb, 1.5f)
+        assertEquals(gain, lev.gainDb, 0.1f)
+        assertTrue(lev.frozen)
+    }
+
+    @Test fun `switched off and on again, it measures fresh audio rather than what it heard before`() {
+        val lev = VoiceLeveler(rate, 2)
+        lev.feed(Signals.speechLike(-20.0, 4 * rate, rate))
+        lev.feed(FloatArray(2 * frames * 2), enabled = false)
+        // Back on with steady quiet noise: the first chunk's 400 ms loudness is that noise alone, not the old voice.
+        val p = Signals.pink(frames, 4)
+        val noise = Signals.gain(FloatArray(frames * 2) { p[it / 2] }, -55.0)
+        lev.process(noise, frames, true)
+        assertTrue("loudness ${lev.loudnessLufs}", lev.loudnessLufs < -45f && lev.loudnessLufs > VoiceLeveler.DIGITAL_SILENCE_LUFS)
+        assertTrue(lev.frozen)
+    }
 }

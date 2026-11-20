@@ -26,8 +26,8 @@ import kotlin.math.pow
 internal class VoiceLeveler(private val sampleRate: Int, private val channels: Int) {
     private val kw = Biquad.kWeighting(sampleRate, channels)
 
-    /** The gain now, dB (0 = untouched). */
-    var gainDb = 0f
+    /** The gain now, dB (0 = untouched). Read by the stats from other threads. */
+    @Volatile var gainDb = 0f
         private set
 
     /** Per-chunk K-weighted energy (sum of squares over channels) and frame counts, newest at [blockPos - 1]. */
@@ -50,10 +50,18 @@ internal class VoiceLeveler(private val sampleRate: Int, private val channels: I
     var frozen = true
         private set
 
-    /** Back to untouched: a new session. */
+    /** Whether the last chunk was levelled: switching off forgets what was measured. */
+    private var wasEnabled = false
+
+    /** Back to untouched: a new session, or a new mic (whose level has nothing to do with the last one's). */
     fun reset() {
         gainDb = 0f
         kw.first.reset(); kw.second.reset()
+        forget()
+    }
+
+    /** Drops the loudness and noise-floor history, so a later start measures fresh audio, not minutes-old audio. */
+    private fun forget() {
         blockEnergy.fill(0.0); blockFrames.fill(0); blockPos = 0
         hist.fill(0); histRing.fill(0); histPos = 0; histCount = 0
         loudnessLufs = HIST_FLOOR_DB; floorDb = HIST_FLOOR_DB; frozen = true
@@ -62,10 +70,16 @@ internal class VoiceLeveler(private val sampleRate: Int, private val channels: I
     /**
      * Levels [frames] interleaved frames of [x] (float, 1.0 = full scale) in place. With [enabled] false it measures
      * nothing and glides any gain it had back to 0 dB, so switching it off doesn't jump either.
+     *
+     * A chunk of digital silence ([DIGITAL_SILENCE_LUFS]), such as the silence that fills a gap in the timeline,
+     * holds the gain and isn't measured: counted, it would drag the noise floor down and unfreeze the gain on the
+     * room's own noise.
      */
     fun process(x: FloatArray, frames: Int, enabled: Boolean) {
         val from = gainDb
         val chunkS = frames.toFloat() / sampleRate
+        if (wasEnabled && !enabled) forget()
+        wasEnabled = enabled
         if (enabled) {
             var e = 0.0
             for (f in 0 until frames) {
@@ -74,14 +88,18 @@ internal class VoiceLeveler(private val sampleRate: Int, private val channels: I
                     e += k * k
                 }
             }
-            blockEnergy[blockPos] = e
-            blockFrames[blockPos] = frames
-            blockPos = (blockPos + 1) % BLOCKS
-            loudnessLufs = shortTermLufs()
             val chunkDb = lufs(e, frames)
-            pushFloor(chunkDb, frames)
-            floorDb = lowPercentileDb()
-            frozen = loudnessLufs < floorDb + FREEZE_ABOVE_FLOOR_DB || loudnessLufs <= SILENCE_LUFS
+            if (chunkDb <= DIGITAL_SILENCE_LUFS) {
+                frozen = true
+            } else {
+                blockEnergy[blockPos] = e
+                blockFrames[blockPos] = frames
+                blockPos = (blockPos + 1) % BLOCKS
+                loudnessLufs = shortTermLufs()
+                pushFloor(chunkDb, frames)
+                floorDb = lowPercentileDb()
+                frozen = loudnessLufs < floorDb + FREEZE_ABOVE_FLOOR_DB || loudnessLufs <= SILENCE_LUFS
+            }
             if (!frozen) {
                 val want = (TARGET_LUFS - loudnessLufs).coerceIn(-MAX_CUT_DB, MAX_BOOST_DB)
                 gainDb = if (want > gainDb) minOf(want, gainDb + RISE_DB_S * chunkS) else maxOf(want, gainDb - FALL_DB_S * chunkS)
@@ -159,6 +177,11 @@ internal class VoiceLeveler(private val sampleRate: Int, private val channels: I
         const val FREEZE_ABOVE_FLOOR_DB = 6f
         /** Below this nothing is worth levelling (a muted or dead input). */
         const val SILENCE_LUFS = -70f
+        /**
+         * A chunk this quiet is digital silence (gap fill, a muted input), not a quiet room: even a raw mic's own
+         * noise sits well above it once its level is applied. Far under [SILENCE_LUFS], so a quiet room still counts.
+         */
+        const val DIGITAL_SILENCE_LUFS = -90f
         private const val HIST_FLOOR_DB = -100f
         /** Enough chunks for 400 ms at any chunk size down to 256 frames at 48 kHz. */
         private const val BLOCKS = 80

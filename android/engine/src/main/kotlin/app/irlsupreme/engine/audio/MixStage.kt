@@ -62,13 +62,16 @@ internal class MixStage(
      */
     var clockOffsetNs = 0L
 
-    /** Samples of the final mix at full scale (|x| >= 32767): should stay 0, the limiter covers chimes too. */
-    var postMixClips = 0L
+    /**
+     * Samples of the final mix at full scale (|x| >= 32767): should stay 0, the limiter covers chimes too. Counters
+     * are written by the capture thread only and read from others (stats), hence volatile.
+     */
+    @Volatile var postMixClips = 0L
         private set
     /** Chunks whose voice arrived clipped (before any gain), and the clipped-looking samples in them. */
-    var inputClipChunks = 0L
+    @Volatile var inputClipChunks = 0L
         private set
-    var inputClips = 0L
+    @Volatile var inputClips = 0L
         private set
 
     private var micF = FloatArray(0)

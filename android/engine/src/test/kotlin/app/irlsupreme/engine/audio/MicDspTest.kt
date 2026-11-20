@@ -77,6 +77,30 @@ class MicDspTest {
         assertTrue(level.peakDb <= -0.9f)
     }
 
+    @Test fun `a chime over the voice is limited with it but doesn't count as the voice being too hot`() {
+        val dsp = MicDsp(rate, 2)
+        val voice = FloatArray(frames * 2)
+        val chime = FloatArray(frames * 2)
+        val out = ByteArray(frames * 4)
+        var level = MicLevel.SILENT
+        for (c in 0 until 10) {
+            for (f in 0 until frames) {
+                val t = (c * frames + f).toDouble() / rate
+                val v = (0.7 * sin(2 * PI * 300 * t)).toFloat() // -3 dBFS: under the ceiling on its own
+                val e = (0.7 * sin(2 * PI * 1500 * t)).toFloat() // the chime pushes the sum well over it
+                voice[2 * f] = v; voice[2 * f + 1] = v
+                chime[2 * f] = e; chime[2 * f + 1] = e
+            }
+            level = dsp.limit(voice, chime, frames, out)
+            assertTrue("chunk $c peak ${peak(out)}", peak(out) <= (MicDsp.CEILING * 32768).toInt() + 1)
+        }
+        assertEquals(0f, level.reductionDb, 0f)
+        // The same voice pushed over the ceiling on its own does count.
+        for (i in voice.indices) voice[i] *= 2f
+        repeat(3) { level = dsp.limit(voice, chime, frames, out) }
+        assertTrue("reduction ${level.reductionDb}", level.reductionDb > 3f)
+    }
+
     @Test fun `output is the input a lookahead later, sample for sample, when nothing is limited`() {
         val dsp = MicDsp(rate, 2)
         val a = sine(0.2f, hz = 1000f)

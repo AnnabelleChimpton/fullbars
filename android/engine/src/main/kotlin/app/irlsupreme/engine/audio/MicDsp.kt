@@ -102,23 +102,20 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
 
     // --- Back: the limiter ---
 
-    private var env = 1f
-    private val release = exp(-1.0 / (RELEASE_S * sampleRate)).toFloat()
     private val la = latencyFrames
+    private val release = exp(-1.0 / (RELEASE_S * sampleRate)).toFloat()
     private val hold = (HOLD_S * sampleRate).roundToInt()
     /** The voice and the alert sound, [la] frames deep: kept apart so the meter can show the voice alone. */
     private val delay = FloatArray(la * channels)
     private val delayFx = FloatArray(la * channels)
     private var delayPos = 0
-    /** The last [la] envelope values and their sum: the smoothing that turns a gain step into a ramp. */
-    private val ramp = FloatArray(la) { 1f }
-    private var rampPos = 0
-    private var rampSum = la.toDouble()
-    /** Sliding minimum of the needed gain over the current frame and the [la] + [hold] before it (a monotonic queue). */
-    private val minVal = FloatArray(la + hold + 2)
-    private val minIdx = LongArray(la + hold + 2)
-    private var minHead = 0
-    private var minCount = 0
+    /** The gain the sum gets. */
+    private val gainSum = LimiterGain(la, hold, release)
+    /**
+     * The gain the voice alone would have got: only for [MicLevel.reductionDb], so a chime over speech doesn't read
+     * as the level being set too hot (turning the mic down can't help with a chime).
+     */
+    private val gainVoice = LimiterGain(la, hold, release)
     private var frameNo = 0L
 
     /** Scratch for [process]. */
@@ -203,14 +200,19 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
         this.leveler.process(out, frames, leveler)
     }
 
-    /** The mic reopened (a new source starts mid-sound): the low cut forgets the old one, so it doesn't ring. */
-    internal fun micReopened() { lowCut.reset() }
+    /**
+     * The mic reopened (a new source starts mid-sound, faded in): the low cut forgets the old one, so it doesn't ring,
+     * and the leveler starts again from 0 dB. The new source can be ~28 dB hotter (the phone's auto level back on),
+     * and a boost left over from a quiet raw mic would hit it as a burst.
+     */
+    internal fun micReopened() { lowCut.reset(); leveler.reset() }
 
     /**
      * The limiter and meter: [x] is the voice (float, interleaved; any level, the limiter brings it under the
      * [CEILING]), [fx] the alert sound to add to it (null: none). Writes [frames] frames of 16-bit PCM to [out], the
      * sum of [latencyFrames] frames earlier. The meter reads the voice alone (at the gain the sum got), so a chime
-     * doesn't show as the mic's level; [MicLevel.reductionDb] is what the sum needed.
+     * doesn't show as the mic's level, and [MicLevel.reductionDb] is what the voice alone would have needed (the sum
+     * itself is always limited as a whole).
      */
     internal fun limit(x: FloatArray, fx: FloatArray?, frames: Int, out: ByteArray): MicLevel {
         var peak = 0f
@@ -219,21 +221,21 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
         for (f in 0 until frames) {
             val base = f * channels
             var framePeak = 0f
+            var voicePeak = 0f
             for (ch in 0 until channels) {
-                val s = if (fx != null) x[base + ch] + fx[base + ch] else x[base + ch]
+                val v = x[base + ch]
+                val s = if (fx != null) v + fx[base + ch] else v
                 val a = if (s < 0) -s else s
                 if (a > framePeak) framePeak = a
+                val av = if (v < 0) -v else v
+                if (av > voicePeak) voicePeak = av
             }
-            // The gain this frame needs, the least any frame in the lookahead and hold needs, and a release towards none.
             val need = if (framePeak > CEILING) CEILING / framePeak else 1f
-            val windowMin = pushMin(need)
-            env = 1f - (1f - env) * release
-            if (windowMin < env) env = windowMin
-            rampSum += env - ramp[rampPos]
-            ramp[rampPos] = env
-            rampPos = if (rampPos + 1 == la) 0 else rampPos + 1
-            val g = (rampSum / la).toFloat().coerceAtMost(1f)
-            if (g < minGain) minGain = g
+            val g = gainSum.next(need, frameNo)
+            // Without a chime the voice's own gain is the same; with one, it's what the voice alone would have needed.
+            val needVoice = if (voicePeak > CEILING) CEILING / voicePeak else 1f
+            val gv = gainVoice.next(needVoice, frameNo)
+            if (gv < minGain) minGain = gv
             val d = delayPos * channels
             for (ch in 0 until channels) {
                 val v = delay[d + ch]
@@ -268,14 +270,41 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
         return level
     }
 
-    /** Adds this frame's needed gain and returns the minimum over it and the [la] + [hold] frames before it. */
-    private fun pushMin(v: Float): Float {
-        val cap = minVal.size
-        while (minCount > 0 && minVal[(minHead + minCount - 1) % cap] >= v) minCount--
-        val at = (minHead + minCount) % cap
-        minVal[at] = v; minIdx[at] = frameNo; minCount++
-        while (minIdx[minHead] < frameNo - la - hold) { minHead = (minHead + 1) % cap; minCount-- }
-        return minVal[minHead]
+    /**
+     * The limiter's gain, frame by frame: the least gain any frame in the lookahead and hold needs, a release towards
+     * none, and an [la]-frame moving average that turns a gain step into a ramp. No allocation after construction.
+     */
+    private class LimiterGain(private val la: Int, private val hold: Int, private val release: Float) {
+        private var env = 1f
+        /** The last [la] envelope values and their sum. */
+        private val ramp = FloatArray(la) { 1f }
+        private var rampPos = 0
+        private var rampSum = la.toDouble()
+        /** Sliding minimum of the needed gain over the current frame and the [la] + [hold] before it (a monotonic queue). */
+        private val minVal = FloatArray(la + hold + 2)
+        private val minIdx = LongArray(la + hold + 2)
+        private var minHead = 0
+        private var minCount = 0
+
+        /** Frame [frameNo] needs at most [need] (1 = none); returns the gain for the frame [la] before it. */
+        fun next(need: Float, frameNo: Long): Float {
+            val windowMin = pushMin(need, frameNo)
+            env = 1f - (1f - env) * release
+            if (windowMin < env) env = windowMin
+            rampSum += env - ramp[rampPos]
+            ramp[rampPos] = env
+            rampPos = if (rampPos + 1 == la) 0 else rampPos + 1
+            return (rampSum / la).toFloat().coerceAtMost(1f)
+        }
+
+        private fun pushMin(v: Float, frameNo: Long): Float {
+            val cap = minVal.size
+            while (minCount > 0 && minVal[(minHead + minCount - 1) % cap] >= v) minCount--
+            val at = (minHead + minCount) % cap
+            minVal[at] = v; minIdx[at] = frameNo; minCount++
+            while (minIdx[minHead] < frameNo - la - hold) { minHead = (minHead + 1) % cap; minCount-- }
+            return minVal[minHead]
+        }
     }
 
     companion object {
