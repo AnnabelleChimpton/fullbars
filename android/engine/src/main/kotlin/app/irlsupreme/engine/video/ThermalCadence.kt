@@ -11,7 +11,8 @@ package app.irlsupreme.engine.video
  *    drops every other frame, evenly).
  *  - The web overlay is latched less often from rung 1 ([browserLatchEvery]); at rung 3 it's closed and its last
  *    frame stays up as a still picture (the compositor keeps a copy), so the layout doesn't jump.
- *  - The preview gets every other frame from rung 1 ([previewEvery]) unless the screen is being touched.
+ *  - The preview gets every other frame from rung 1 ([previewEvery]) unless the screen is being touched (only once
+ *    the app reports touches).
  */
 internal object ThermalCadence {
     /** The rung from which the output rate is reduced. */
@@ -54,8 +55,12 @@ internal object ThermalCadence {
         else -> 4
     }
 
-    /** Offer the preview every Nth tick: every other one from rung 1, all while the streamer is touching the screen. */
-    fun previewEvery(rung: Int, touched: Boolean): Int = if (rung >= 1 && !touched) 2 else 1
+    /**
+     * Offer the preview every Nth tick: every other one from rung 1 when [halving] is on, all while the streamer is
+     * touching the screen. [halving] is off until the app reports touches, so a warm phone's preview never drops to
+     * half rate under a finger it can't see.
+     */
+    fun previewEvery(rung: Int, halving: Boolean, touched: Boolean): Int = if (halving && rung >= 1 && !touched) 2 else 1
 
     /**
      * While the output runs below the encoder's configured rate, the encoder's own GOP (counted in frames) stretches

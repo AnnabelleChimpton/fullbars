@@ -141,9 +141,11 @@ class ThermalCadenceTest {
 
     @Test fun overlayAndPreviewRates() {
         assertEquals(listOf(1, 2, 4, 4), (0..3).map { ThermalCadence.browserLatchEvery(it) })
-        assertEquals(1, ThermalCadence.previewEvery(0, touched = false))
-        assertEquals(2, ThermalCadence.previewEvery(1, touched = false))
-        assertEquals(1, ThermalCadence.previewEvery(2, touched = true))
+        assertEquals(1, ThermalCadence.previewEvery(0, halving = true, touched = false))
+        assertEquals(2, ThermalCadence.previewEvery(1, halving = true, touched = false))
+        assertEquals(1, ThermalCadence.previewEvery(2, halving = true, touched = true))
+        // Until the app reports touches, the preview keeps its full rate on a warm phone.
+        assertEquals(1, ThermalCadence.previewEvery(2, halving = false, touched = false))
     }
 
     @Test fun forcedKeyframesFollowPtsTime() {

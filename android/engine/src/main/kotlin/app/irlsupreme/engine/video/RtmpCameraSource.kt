@@ -56,7 +56,8 @@ class RtmpCameraSource(val clock: IngestClock) {
      * decoded, as before, in case a decoder misbehaves with buffers held.
      */
     @Volatile var paceOutput = true
-        /** System.nanoTime when [clock] last anchored (0: not since the session started). */
+
+    /** System.nanoTime when [clock] last anchored (0: not since the session started). */
     @Volatile var anchoredAtNs = 0L
         private set
 
@@ -285,6 +286,9 @@ class RtmpCameraSource(val clock: IngestClock) {
         drain = null
         runCatching { c.stop() }
         runCatching { c.release() }
+        // What was queued was for the codec just stopped. Left counted, it would make the compositor hold the frozen
+        // external frame (SceneRules.holdExternal) over a fresh phone camera until the next decoder starts.
+        synchronized(pending) { pending.clear(); queuedFrames = 0 }
     }
 
     fun close(): Unit = synchronized(lock) {
