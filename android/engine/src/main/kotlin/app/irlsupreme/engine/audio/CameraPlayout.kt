@@ -87,9 +87,12 @@ internal class CameraPlayout(
     }
 
     /** Decoded audio in the stream's format (interleaved), whose first sample is at camera time [camNs]. */
+    fun push(camNs: Long, pcm: ShortArray): Unit = push(camNs, pcm, pcm.size / channels)
+
+    /** The first [count] frames of [pcm] (a reused buffer may hold more). */
     @Synchronized
-    fun push(camNs: Long, pcm: ShortArray) {
-        var frames = pcm.size / channels
+    fun push(camNs: Long, pcm: ShortArray, count: Int) {
+        var frames = count.coerceAtMost(pcm.size / channels)
         if (frames == 0) return
         var from = 0
         var t = camNs
@@ -129,7 +132,7 @@ internal class CameraPlayout(
 
     /**
      * Fills [out] ([frames] interleaved frames) with the camera audio that belongs at camera time [targetCamNs] onwards
-     * (null: the clock hasn't anchored yet, so nothing plays), silence where there is none. Returns how many frames
+     * (null: the clock has no mapping yet, so nothing plays), silence where there is none. Returns how many frames
      * came from the camera, so the caller can tell a camera that's there from one that isn't.
      */
     @Synchronized
