@@ -37,3 +37,11 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: Vet and test
         run: go vet ./... && go test -count=1 ./...
+      # The keeper's output through the real ffmpeg, decoded with -xerror (integration_test.go).
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+      - name: End-to-end test with ffmpeg
+        run: go vet -tags integration ./... && go test -count=1 -tags integration -run Integration ./...
+      - name: Vendored gosrt tests
+        working-directory: server/stay-live/third_party/gosrt
+        run: go test -count=1 ./congestion/... ./circular/... ./packet/...
