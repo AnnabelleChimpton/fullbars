@@ -92,7 +92,7 @@ class RtmpIngestServer(
             var appName = ""
             var acked = 0L
             var window = DEFAULT_WINDOW
-            val video = VideoState()
+            var video = VideoState()
             while (true) {
                 val m = reader.readMessage()
                 if (counting.count - acked >= window) { // keep peers that wait for acknowledgements going
@@ -138,6 +138,7 @@ class RtmpIngestServer(
                                 // Newest publisher wins: a camera reconnecting after a Wi-Fi blip replaces its stale session.
                                 current.getAndSet(socket)?.takeIf { it !== socket }?.let { runCatching { it.close() } }
                                 session = sessions.incrementAndGet()
+                                video = VideoState() // a republish on this connection is a new session: report afresh
                                 writer.write(2, RtmpType.USER_CONTROL, 0, 0, byteArrayOf(0, 0) + u32(STREAM_ID.toLong())) // StreamBegin
                                 writer.write(5, RtmpType.COMMAND_AMF0, STREAM_ID, 0, Amf0.encode(
                                     "onStatus", 0.0, null,

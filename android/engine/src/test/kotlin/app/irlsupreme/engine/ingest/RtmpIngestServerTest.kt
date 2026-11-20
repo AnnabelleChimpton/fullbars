@@ -198,6 +198,20 @@ class RtmpIngestServerTest {
     }
 
     @Test
+    fun `a republish on the same connection reports an unsupported codec again`() {
+        server = RtmpIngestServer(0, listener).start()
+        val c = Client(server!!.localPort)
+        c.publish("live", "cam")
+        c.writer.write(6, RtmpType.VIDEO, 1, 0, exTag(1, 0, "hvc1", ByteArray(23)))
+        c.writer.write(8, RtmpType.COMMAND_AMF0, 1, 0, Amf0.encode("publish", 6.0, null, "cam", "live"))
+        c.await("onStatus")
+        c.writer.write(6, RtmpType.VIDEO, 1, 33, exTag(1, 0, "hvc1", ByteArray(23)))
+        c.command("FCUnpublish", 7.0, null, "cam")
+        assertTrue(ended.await(5, TimeUnit.SECONDS))
+        assertEquals(listOf("unsupported 1 hvc1", "unsupported 2 hvc1"), events.filter { it.startsWith("unsupported") })
+    }
+
+    @Test
     fun `a reconnecting camera replaces the old session`() {
         server = RtmpIngestServer(0, listener).start()
         val a = Client(server!!.localPort)
