@@ -10,7 +10,9 @@ package app.irlsupreme.engine.video
  * frame's worth, ~3%, as frames cross the edge).
  *
  * Reads 0 until one full window has passed since the first sample, the same "no measurement yet" the callers already
- * handle. Time going backwards starts it over. Single writer, no allocation after construction.
+ * handle. A sample a little older than the newest (one out-of-order timestamp, or B-frames, whose output order isn't
+ * presentation order) is counted at the newest time, so one odd timestamp can't blank the reading; only a jump back of
+ * more than a window, which means a new timeline, starts it over. Single writer, no allocation after construction.
  */
 class RateWindow(private val windowNs: Long = 1_000_000_000L, capacity: Int = 256) {
     init {
@@ -25,8 +27,14 @@ class RateWindow(private val windowNs: Long = 1_000_000_000L, capacity: Int = 25
     private var firstNs = 0L
     private var started = false
 
-    fun add(timeNs: Long, size: Int) {
-        if (count > 0 && timeNs < newestNs()) reset()
+    fun add(sampleNs: Long, size: Int) {
+        var timeNs = sampleNs
+        if (count > 0) {
+            val newest = newestNs()
+            if (timeNs < newest) {
+                if (newest - timeNs > windowNs) reset() else timeNs = newest
+            }
+        }
         if (!started) { firstNs = timeNs; started = true }
         if (count == times.size) dropOldest() // more samples per window than the ring holds: the window just shortens
         val i = (head + count) % times.size

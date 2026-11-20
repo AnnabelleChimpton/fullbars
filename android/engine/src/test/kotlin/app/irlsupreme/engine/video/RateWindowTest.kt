@@ -90,11 +90,47 @@ class RateWindowTest {
         assertEquals(25_000L * 8, w.bitsPerSecond())
     }
 
-    @Test fun timeGoingBackwardsStartsOver() {
+    @Test fun aJumpBackOfMoreThanAWindowStartsOver() {
         val w = RateWindow()
-        w.feed(0, 3 * sec, 30, { 25_000 })
-        w.add(sec, 25_000)
+        w.feed(0, 3 * sec, 30, { 25_000 }) // last frame at ~2.97 s
+        w.add(sec, 25_000) // ~2 s back: a new timeline
         assertEquals(0, w.bitsPerSecond())
+    }
+
+    @Test fun oneOutOfOrderFrameDoesNotBlankTheReading() {
+        val w = RateWindow()
+        val expected = 25_000L * 8 * 30
+        val period = 33_333_000L
+        for (i in 0 until 90) w.add(i * period, 25_000)
+        w.add(88 * period + period / 2, 25_000) // a glitched timestamp, 1.5 frames behind the newest
+        for (i in 90 until 150) {
+            w.add(i * period, 25_000)
+            val err = abs(w.bitsPerSecond() - expected).toDouble() / expected
+            // One extra frame's bytes in the window for a second: at most ~1/30 over, never 0.
+            assertTrue("frame $i: ${w.bitsPerSecond()}", err < 0.05)
+        }
+    }
+
+    @Test fun bFrameOutputOrderReadsSteady() {
+        // An encoder with B-frames hands frames out in decode order: I P B B P B B ..., so presentation times step
+        // back by up to two frames all the time. The reading must stay on the real rate, not sit at 0. The B-frames
+        // are counted at their P-frame's time, so the reading rises by up to two frames' worth (~7%) as each group
+        // arrives and settles back with the next P-frame.
+        val w = RateWindow()
+        val expected = 25_000L * 8 * 30
+        val period = 33_333_000L
+        val order = intArrayOf(0, 3, 1, 2) // in each group of three after the first: P, then its two B-frames
+        var frame = 0
+        for (g in 0 until 100) {
+            for (o in order.drop(if (g == 0) 0 else 1)) {
+                w.add((g * 3 + o) * period, 25_000)
+                frame++
+                if (frame > 60) {
+                    val err = abs(w.bitsPerSecond() - expected).toDouble() / expected
+                    assertTrue("frame $frame: ${w.bitsPerSecond()}", err < 0.08)
+                }
+            }
+        }
     }
 
     @Test fun moreSamplesThanTheRingShortensTheWindowButStaysRight() {
