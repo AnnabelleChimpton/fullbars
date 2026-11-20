@@ -24,7 +24,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Size: one GOP encoded at the stream's own bitrate (so its SPS/PPS match the live stream's), about bitrate x GOP
  * length: ~1.5 MB at 6 Mbps with 2 s keyframes. BondedOutput logs the real figure when it encodes ("slate ... GOP
  * N KB"). That is far too much to send in a burst over the live stream's own links, so the upload is paced by bytes
- * at a small fraction of the live rate (see [SlatePacer]); the server keeps its default slate until it completes.
+ * at a small fraction of the live rate (see [SlatePacer]; frame by frame, so the keyframe itself still leaves in one
+ * burst); the server keeps its default slate until it completes.
  *
  * SRT live mode releases data at the receiver only after the latency window, so the connection is held open for
  * latency + margin before the clean close that tells the server the upload is complete.
@@ -175,6 +176,10 @@ class SlateUploader(
  * a multiple of real time over the same links as the live stream during its first seconds, it filled their queues and
  * the live bitrate controller backed off for it. Never catches up after a late wake-up (that would be a burst): a frame
  * handed over late pushes the schedule back instead.
+ *
+ * The pacing is per frame, not per datagram: a frame is handed to the SRT client whole and leaves as one burst, and
+ * only the gap after it is stretched. The card's first frame (the keyframe, often a large share of the GOP) still
+ * goes out in one go; what this prevents is the whole GOP going out at once.
  */
 internal class SlatePacer(private val minBps: Int = MIN_BPS) {
     private var nextDueNs = Long.MIN_VALUE
