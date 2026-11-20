@@ -21,7 +21,13 @@ import java.util.concurrent.ConcurrentLinkedQueue
  *
  * No allocation per chunk.
  */
-internal class MixStage(private val sampleRate: Int, private val channels: Int, private val dsp: MicDsp) {
+internal class MixStage(
+    private val sampleRate: Int,
+    private val channels: Int,
+    private val dsp: MicDsp,
+    /** How long a switch between the camera and the mic crossfades (0: a hard cut, which clicks; for tests). */
+    private val switchFadeFrames: Int = SWITCH_FADE_FRAMES,
+) {
     /** Whether the last chunk came from the camera. Read from any thread. */
     @Volatile var usingCamera = false
         private set
@@ -132,8 +138,8 @@ internal class MixStage(private val sampleRate: Int, private val channels: Int, 
         // A switch crossfades over a few ms: cutting from one source to the other mid-wave is a click.
         val voice = when {
             usingCamera && wasCamera -> camF
-            usingCamera -> { crossfadeF(micF, camF, mixF, frames, channels, SWITCH_FADE_FRAMES); mixF }
-            wasCamera -> { crossfadeF(if (cam != null) camF else null, micF, mixF, frames, channels, SWITCH_FADE_FRAMES); mixF }
+            usingCamera -> { crossfadeF(micF, camF, mixF, frames, channels, switchFadeFrames); mixF }
+            wasCamera -> { crossfadeF(if (cam != null) camF else null, micF, mixF, frames, channels, switchFadeFrames); mixF }
             else -> micF
         }
 
