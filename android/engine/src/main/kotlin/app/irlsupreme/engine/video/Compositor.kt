@@ -25,6 +25,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicReferenceArray
 
 /**
  * The never-stop video pipeline:
@@ -196,6 +197,10 @@ class Compositor(
     private val thread = Thread(::run, "engine-render")
     @Volatile private var running = false
     private val recoveryExecutor = Executors.newSingleThreadExecutor { Thread(it, "engine-venc-recovery") }
+    /** Draws card bitmaps off the render thread (Canvas work that once cost the stream a late frame per redraw). */
+    private val cardExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread({ runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT) }; r.run() }, "engine-card-raster")
+    }
     private val pendingEncoder = AtomicReference<VideoEncoder?>(null)
     @Volatile private var encoder: VideoEncoder? = null
     @Volatile private var preview: PreviewRenderer? = null
@@ -237,6 +242,7 @@ class Compositor(
         recoveryExecutor.shutdownNow()
         runCatching { recoveryExecutor.awaitTermination(2, TimeUnit.SECONDS) }
         pendingEncoder.getAndSet(null)?.let { runCatching { it.release() } }
+        cardExecutor.shutdownNow() // already done by teardown, unless setup failed
     }
 
     fun attachPreview(surface: Surface, width: Int, height: Int) {
@@ -329,6 +335,14 @@ class Compositor(
          * freed with it ([releaseBackdrop]).
          */
         val cardTex = arrayOfNulls<CardTex>(Slates.Card.entries.size * CardLayer.entries.size)
+        /** Card bitmaps drawn in the background, waiting for their upload; by slot, like [cardTex]. */
+        val cardReady = AtomicReferenceArray<CardRaster?>(cardTex.size)
+        /** What each slot was last sent to be drawn for (version -1: nothing), so a stale slot is queued once. */
+        val cardQueuedAudio = arrayOfNulls<SlateAudio>(cardTex.size)
+        val cardQueuedVersion = IntArray(cardTex.size) { -1 }
+        /** The tick a background card was last uploaded on: at most one per tick. */
+        var cardUploadTick = -1L
+        var tickIndex = 0L
         /** Each card's GIF background and web page, while it's shown (and [BACKDROP_GRACE_NS] after); by ordinal. */
         val backdrops = arrayOfNulls<Backdrop>(Slates.Card.entries.size)
         /** Draws GIF and web cards; made the first time one is shown ([drawCardScene]). */
@@ -383,6 +397,9 @@ class Compositor(
     /** One cached card texture (see [Gpu.cardTex]). */
     private class CardTex(val audio: SlateAudio, val version: Int, val tex: Int)
 
+    /** A card bitmap drawn off the render thread for one footer audio state and style version. */
+    private class CardRaster(val bitmap: Bitmap, val audio: SlateAudio, val version: Int)
+
     /**
      * What a phone-drawn card shows besides its own bitmap: a looping GIF behind it and/or a web page instead of it.
      * Render thread only. Re-read from [Slates.style] only when [Slates.version] moves, so a tick costs no file checks.
@@ -421,6 +438,7 @@ class Compositor(
             ready.countDown()
         }
         if (g == null) return
+        warmCards(g) // before the clock starts, so it costs no live frames
         val clock = FrameClock(config.fps)
         val hint = RenderThreadHint.create(ctx, clock.periodNs)
         g.windowStartNs = System.nanoTime()
@@ -585,6 +603,7 @@ class Compositor(
         val cam = g.cam
         val ext = g.ext
         g.steadySource = null
+        g.tickIndex = clock.tick
 
         // 1. Sources (each guarded: one bad frame or a dying source must not take the tick, let alone the stream)
         val phoneGot = guarded("phone camera", false) { cam.update(now) }
@@ -753,6 +772,7 @@ class Compositor(
         drawAlert(config.width, config.height)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         pruneBackdrops(g, now)
+        if (sceneCard == null && !g.fading) guarded("card warm-up", Unit) { rewarmCards(g) }
 
         // 3. Encoder: swap in a recovered instance, then feed this tick
         pendingEncoder.getAndSet(null)?.let { fresh ->
@@ -1003,6 +1023,8 @@ class Compositor(
         val i = c.ordinal * CardLayer.entries.size + CardLayer.FOREGROUND.ordinal
         g.cardTex[i]?.let { runCatching { GLES30.glDeleteTextures(1, intArrayOf(it.tex), 0) } }
         g.cardTex[i] = null
+        g.cardReady.getAndSet(i, null)?.bitmap?.recycle()
+        g.cardQueuedVersion[i] = -1
     }
 
     /** Closes a card page the same way as the overlay page: the GL side goes once the main thread has closed it. */
@@ -1042,18 +1064,110 @@ class Compositor(
         }
     }
 
+    /**
+     * A slot that already has a texture is never drawn on the render thread: while it's outdated (the footer's audio
+     * or the style changed) the old texture keeps showing and the new bitmap is drawn on [cardExecutor], then uploaded
+     * into the same texture on a later tick. Only a slot with no texture at all is drawn here and now.
+     */
     private fun cardTexture(g: Gpu, c: Slates.Card, layer: CardLayer): Int {
         val audio = Slates.shownAudio(c, slateAudio)
         val v = Slates.version
         val i = c.ordinal * CardLayer.entries.size + layer.ordinal
         val cached = g.cardTex[i]
         if (cached != null && cached.audio == audio && cached.version == v) return cached.tex
-        if (cached != null) GLES30.glDeleteTextures(1, intArrayOf(cached.tex), 0)
-        g.cardTex[i] = null
-        val bmp = Slates.bitmap(config.width, config.height, c, config.channelLogin, audio, style = Slates.style(c), layer = layer)
+        if (cached != null) {
+            if (takeReadyCard(g, i, audio, v)) return g.cardTex[i]!!.tex
+            queueCardRaster(g, i, c, layer, audio, v)
+            return cached.tex
+        }
+        val ready = g.cardReady.getAndSet(i, null) // one may have finished for this slot after it was freed
+        val bmp = if (ready != null && ready.audio == audio && ready.version == v) {
+            ready.bitmap
+        } else {
+            ready?.bitmap?.recycle()
+            Slates.bitmap(config.width, config.height, c, config.channelLogin, audio, style = Slates.style(c), layer = layer)
+        }
         val tex = try { GlUtil.textureFromBitmap(bmp) } finally { bmp.recycle() }
         g.cardTex[i] = CardTex(audio, v, tex)
         return tex
+    }
+
+    /**
+     * Render thread: if slot [i]'s background bitmap for ([audio], [version]) is ready, uploads it into the slot's
+     * texture and returns true. At most one upload per tick, and none during a crossfade (an 8 MB upload mid-fade is
+     * where a late frame would show most). A bitmap drawn for an older state is thrown away.
+     */
+    private fun takeReadyCard(g: Gpu, i: Int, audio: SlateAudio, version: Int): Boolean {
+        val ready = g.cardReady.get(i) ?: return false
+        if (ready.audio != audio || ready.version != version) {
+            if (g.cardReady.compareAndSet(i, ready, null)) ready.bitmap.recycle()
+            return false
+        }
+        if (g.fading || g.cardUploadTick == g.tickIndex) return false
+        if (!g.cardReady.compareAndSet(i, ready, null)) return false // a newer one just landed: next tick
+        val b = ready.bitmap
+        try {
+            val cached = g.cardTex[i]
+            val tex = if (cached == null) {
+                GlUtil.textureFromBitmap(b)
+            } else {
+                GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, cached.tex)
+                if (b.width == config.width && b.height == config.height) GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, b)
+                else GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, b, 0)
+                cached.tex
+            }
+            g.cardTex[i] = CardTex(audio, version, tex)
+        } finally {
+            b.recycle()
+        }
+        g.cardUploadTick = g.tickIndex
+        return true
+    }
+
+    /** Render thread: has slot [i] drawn for ([audio], [version]) on [cardExecutor], once per state. */
+    private fun queueCardRaster(g: Gpu, i: Int, c: Slates.Card, layer: CardLayer, audio: SlateAudio, version: Int) {
+        if (g.cardQueuedAudio[i] == audio && g.cardQueuedVersion[i] == version) return
+        g.cardQueuedAudio[i] = audio
+        g.cardQueuedVersion[i] = version
+        val w = config.width
+        val h = config.height
+        val channel = config.channelLogin
+        try {
+            cardExecutor.execute {
+                try {
+                    val bmp = Slates.bitmap(w, h, c, channel, audio, style = Slates.style(c), layer = layer)
+                    g.cardReady.getAndSet(i, CardRaster(bmp, audio, version))?.bitmap?.recycle()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "card $c couldn't be drawn in the background; it's drawn on the next miss", t)
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            g.cardQueuedVersion[i] = -1 // stopping
+        }
+    }
+
+    /**
+     * Render thread, before the first tick: draws the cards most likely to cut in without warning (BRB and Camera lost)
+     * for the current audio state, so their first frame isn't a late one.
+     */
+    private fun warmCards(g: Gpu) {
+        for (c in WARM_CARDS) guarded("card warm-up", Unit) { card(g, c, CardLayer.FULL) }
+    }
+
+    /**
+     * Render thread, on ticks with no card on air: keeps the warmed cards current. A mute or style change queues a
+     * redraw in the background, and the result is uploaded on a later idle tick, so the card is right the moment it
+     * cuts in.
+     */
+    private fun rewarmCards(g: Gpu) {
+        val v = Slates.version
+        for (c in WARM_CARDS) {
+            val i = c.ordinal * CardLayer.entries.size + CardLayer.FULL.ordinal
+            val cached = g.cardTex[i] ?: continue
+            val audio = Slates.shownAudio(c, slateAudio)
+            if (cached.audio == audio && cached.version == v) continue
+            if (!takeReadyCard(g, i, audio, v)) queueCardRaster(g, i, c, CardLayer.FULL, audio, v)
+        }
     }
 
     /** The overlay texture: re-specified only on first use or a size change, else updated in place. */
@@ -1152,6 +1266,9 @@ class Compositor(
             runCatching { b?.web?.browser?.release(wait = false) }
         }
         cardPageRef = null
+        cardExecutor.shutdownNow()
+        runCatching { cardExecutor.awaitTermination(1, TimeUnit.SECONDS) }
+        for (i in 0 until g.cardReady.length()) g.cardReady.getAndSet(i, null)?.bitmap?.recycle()
         val cardTextures = g.cardTex.filterNotNull().map { it.tex }.toIntArray()
         runCatching { if (cardTextures.isNotEmpty()) GLES30.glDeleteTextures(cardTextures.size, cardTextures, 0) }
         runCatching { g.layered?.release() }
@@ -1206,6 +1323,8 @@ class Compositor(
         private const val BACKDROP_GRACE_NS = 1_000_000_000L
         /** GIFs (and, separately, card pages) open at once: the two cards of a crossfade. */
         private const val MAX_LIVE_BACKDROPS = 2
+        /** Drawn before the first tick and kept current: the cards that can cut in at any moment. */
+        private val WARM_CARDS = arrayOf(Slates.Card.BRB, Slates.Card.CAMERA_LOST)
     }
 }
 
