@@ -171,3 +171,49 @@ class CameraGeometryTest {
         assertEquals(1f, unknown[0], 0f); assertEquals(1f, unknown[5], 0f)
     }
 }
+
+class CameraFrameRateTest {
+    private val sizes = listOf(3840 to 2160, 1920 to 1080, 1280 to 720)
+    /** A phone whose 1080p output tops out at 30 fps; 720p and 4K (oddly) do 60. */
+    private val minFrame = { s: Pair<Int, Int> -> if (s == (1920 to 1080)) 33_333_333L else 16_666_666L }
+
+    @Test fun sizesTooSlowForSixtyAreRejected() {
+        assertEquals(1920 to 1080, CameraGeometry.chooseBufferSize(sizes, 1920, 1080, 30, minFrame))
+        assertEquals(3840 to 2160, CameraGeometry.chooseBufferSize(sizes, 1920, 1080, 60, minFrame))
+        // Nothing fast enough: the normal choice rather than none.
+        assertEquals(1920 to 1080, CameraGeometry.chooseBufferSize(sizes, 1920, 1080, 120, minFrame))
+    }
+
+    @Test fun sixtyNeedsAnExactRange() {
+        val ranges = listOf(15 to 30, 30 to 30, 15 to 60)
+        assertEquals(null, CameraPolicy.aeRange(ranges, 60))
+        assertEquals(30, CameraPolicy.fpsFallback(ranges, 60))
+        assertEquals(60 to 60, CameraPolicy.aeRange(ranges + (60 to 60), 60))
+        assertEquals(30 to 30, CameraPolicy.aeRange(ranges, 30))
+        assertEquals(24 to 30, CameraPolicy.aeRange(listOf(15 to 30, 24 to 30), 30)) // no [30,30]: highest floor, as before
+        assertEquals(setOf(30, 60), CameraPolicy.exactRates(ranges + (60 to 60)))
+    }
+
+    @Test fun sixtyIsSupportedOnlyWithARangeAndAFastEnoughSize() {
+        val fast = { _: Pair<Int, Int> -> 16_666_666L }
+        assertTrue(CameraPolicy.supports(listOf(60 to 60), sizes, fast, 1920, 1080, 60))
+        assertFalse(CameraPolicy.supports(listOf(30 to 60), sizes, fast, 1920, 1080, 60))
+        assertFalse(CameraPolicy.supports(listOf(60 to 60), listOf(1920 to 1080), minFrame, 1920, 1080, 60))
+    }
+
+    @Test fun stabilisationStepsDownToWhatsListed() {
+        val on = CameraPolicy.VIDEO_STAB_ON
+        val off = CameraPolicy.VIDEO_STAB_OFF
+        val preview = CameraPolicy.VIDEO_STAB_PREVIEW
+        assertEquals(preview, CameraPolicy.videoStabilization(StabilizationMode.PREVIEW, setOf(off, on, preview), 33))
+        assertEquals(on, CameraPolicy.videoStabilization(StabilizationMode.PREVIEW, setOf(off, on, preview), 32))
+        assertEquals(on, CameraPolicy.videoStabilization(StabilizationMode.PREVIEW, setOf(off, on), 34))
+        assertEquals(off, CameraPolicy.videoStabilization(StabilizationMode.STANDARD, setOf(off), 34))
+        assertEquals(on, CameraPolicy.videoStabilization(StabilizationMode.STANDARD, setOf(off, on), 31))
+        assertEquals(off, CameraPolicy.videoStabilization(StabilizationMode.OFF, setOf(off, on, preview), 34))
+        // Refused at run time: PREVIEW, then ON, then OFF.
+        assertEquals(on, CameraPolicy.stepDown(preview, setOf(off, on, preview)))
+        assertEquals(off, CameraPolicy.stepDown(preview, setOf(off, preview)))
+        assertEquals(off, CameraPolicy.stepDown(on, setOf(off, on)))
+    }
+}

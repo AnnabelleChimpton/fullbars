@@ -115,6 +115,8 @@ class RtmpFeedSchedulerTest {
         assertEquals(RtmpFeedScheduler.Action.WAIT, RtmpFeedScheduler.decide(99, 100, frameNs))
         assertEquals(RtmpFeedScheduler.Action.RENDER, RtmpFeedScheduler.decide(100 + frameNs, 100, frameNs))
         assertEquals(RtmpFeedScheduler.Action.DROP, RtmpFeedScheduler.decide(101 + frameNs, 100, frameNs))
+        // Late with nothing newer to show instead: shown anyway (a slow decoder mustn't blank the camera).
+        assertEquals(RtmpFeedScheduler.Action.RENDER, RtmpFeedScheduler.decide(101 + frameNs, 100, frameNs, newerWaiting = false))
     }
 
     @Test fun pacerIsAFixedRing() {

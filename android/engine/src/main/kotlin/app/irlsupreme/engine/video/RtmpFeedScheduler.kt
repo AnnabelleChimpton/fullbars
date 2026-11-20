@@ -26,13 +26,14 @@ object RtmpFeedScheduler {
 
     /**
      * [dueNs] is the frame's presentation time ([NOW] during the clock's warm-up, when there's no schedule yet).
-     * Released on time; dropped unrendered if it's already more than [intervalNs] late, since showing it would only
-     * push the next one later still.
+     * Released on time; dropped unrendered if it's already more than [intervalNs] late and [newerWaiting] (a later
+     * decoded frame is held behind it), since showing it would only push that one later still. A frame that's late
+     * with nothing behind it is still shown: a decoder that runs consistently slow must not end up showing nothing.
      */
-    fun decide(nowNs: Long, dueNs: Long, intervalNs: Long): Action = when {
+    fun decide(nowNs: Long, dueNs: Long, intervalNs: Long, newerWaiting: Boolean = true): Action = when {
         dueNs == NOW -> Action.RENDER
         nowNs < dueNs -> Action.WAIT
-        nowNs - dueNs > intervalNs -> Action.DROP
+        nowNs - dueNs > intervalNs && newerWaiting -> Action.DROP
         else -> Action.RENDER
     }
 
