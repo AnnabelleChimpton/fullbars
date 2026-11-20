@@ -40,8 +40,19 @@ type statusReply struct {
 	Detail  string         `json:"detail,omitempty"`
 	Updated time.Time      `json:"updated,omitzero"`
 	Output  outputSummary  `json:"output"`
-	Slate   string         `json:"slate"`  // phone | default
+	Slate   string         `json:"slate"`  // phone | default: whether a phone slate is saved here
 	Extras  []extraSummary `json:"extras"` // "Also stream to" destinations (names and hosts, never keys)
+
+	// NeedKeyframe: the keeper is waiting for a live keyframe to put the phone back on air and the phone is sending.
+	// While a slate is on air the app polls this and asks its encoder for a keyframe when it is set.
+	NeedKeyframe bool `json:"needKeyframe"`
+	// SlateMatches: the slate's SPS/PPS equal the live video's, so every splice is a clean remux. Absent until a
+	// live keyframe has been compared (or when the live video carries no parameter sets).
+	SlateMatches  *bool  `json:"slateMatches,omitempty"`
+	SlateSource   string `json:"slateSource,omitempty"` // the slate in use: phone (this stream) | saved | default
+	SlateSize     string `json:"slateSize,omitempty"`
+	LiveSize      string `json:"liveSize,omitempty"`
+	SlateRejected string `json:"slateRejected,omitempty"` // why the phone's last slate upload was refused, if it was
 }
 
 type outputSummary struct {
@@ -93,6 +104,13 @@ func (c *control) status(w http.ResponseWriter, r *http.Request) {
 	if _, err := os.Stat(filepath.Join(c.dir, "slate-phone.ts")); err == nil {
 		st.Slate = "phone"
 	}
+	st.NeedKeyframe = air.NeedKeyframe
+	switch air.SlateMatch {
+	case "match", "mismatch":
+		m := air.SlateMatch == "match"
+		st.SlateMatches = &m
+	}
+	st.SlateSource, st.SlateSize, st.LiveSize, st.SlateRejected = air.SlateSource, air.SlateSize, air.LiveSize, air.SlateRejected
 	u, src := currentOutput(c.dir, c.env)
 	st.Output = summarize(u)
 	st.Output.Source = src
@@ -204,6 +222,8 @@ type airTracker struct {
 	air, airDetail string            // waiting | live | slate | weak | unknown
 	outErr         string            // the last OUTPUT ERROR / ERROR, until the output works again
 	extraErr       map[string]string // extra output name -> its last error, until it works again
+	keeper         keeperStatus      // what the keeper reports besides its events
+	slateRejected  string            // the last refused slate upload, until one is accepted
 }
 
 type airState struct {
@@ -211,11 +231,20 @@ type airState struct {
 	Detail string            `json:"detail,omitempty"`
 	At     time.Time         `json:"at,omitzero"`
 	Extras map[string]string `json:"extras,omitempty"` // failing extra outputs: name -> error
+
+	NeedKeyframe  bool   `json:"needKeyframe,omitempty"`
+	SlateMatch    string `json:"slateMatch,omitempty"` // match | mismatch | unknown
+	SlateSource   string `json:"slateSource,omitempty"`
+	SlateSize     string `json:"slateSize,omitempty"`
+	LiveSize      string `json:"liveSize,omitempty"`
+	SlateRejected string `json:"slateRejected,omitempty"`
 }
 
 // same reports whether two states show the same thing (At aside).
 func (a airState) same(b airState) bool {
-	if a.State != b.State || a.Detail != b.Detail || len(a.Extras) != len(b.Extras) {
+	if a.State != b.State || a.Detail != b.Detail || len(a.Extras) != len(b.Extras) ||
+		a.NeedKeyframe != b.NeedKeyframe || a.SlateMatch != b.SlateMatch || a.SlateSource != b.SlateSource ||
+		a.SlateSize != b.SlateSize || a.LiveSize != b.LiveSize || a.SlateRejected != b.SlateRejected {
 		return false
 	}
 	for k, v := range a.Extras {
@@ -256,7 +285,18 @@ func (t *airTracker) add(e string) bool {
 		t.outErr = e
 	case strings.HasPrefix(e, "output: "): // opened, or reconnected after an error
 		t.outErr = ""
+	case strings.HasPrefix(e, "slate upload rejected"):
+		t.slateRejected = strings.TrimPrefix(e, "slate upload rejected ")
+	case strings.HasPrefix(e, "slate received from the phone"):
+		t.slateRejected = ""
 	}
+	return !t.state().same(before)
+}
+
+// setKeeper takes the keeper's latest status and reports whether the state it shows changed.
+func (t *airTracker) setKeeper(k keeperStatus) bool {
+	before := t.state()
+	t.keeper = k
 	return !t.state().same(before)
 }
 
@@ -269,13 +309,20 @@ func (t *airTracker) state() airState {
 			extras[k] = v
 		}
 	}
+	st := airState{State: t.air, Detail: t.airDetail, Extras: extras,
+		SlateMatch: t.keeper.SlateMatch, SlateSource: t.keeper.SlateSource, SlateSize: t.keeper.SlateSize,
+		LiveSize: t.keeper.LiveSize, SlateRejected: t.slateRejected}
 	switch {
 	case t.outErr != "":
-		return airState{State: "error", Detail: t.outErr, Extras: extras}
+		st.State, st.Detail = "error", t.outErr
 	case t.air == "":
-		return airState{State: "unknown", Extras: extras}
+		st.State, st.Detail = "unknown", ""
 	}
-	return airState{State: t.air, Detail: t.airDetail, Extras: extras}
+	// A keyframe only helps while the keeper can splice one in and viewers can see it. "weak" stays the state after
+	// the signal recovers, until the keeper splices live back in at a keyframe, so it counts too. The keeper itself
+	// says false while the Weak signal slate is held on purpose.
+	st.NeedKeyframe = t.keeper.NeedKeyframe && (st.State == "slate" || st.State == "live" || st.State == "weak")
+	return st
 }
 
 const stateFile = "state.json"

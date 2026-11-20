@@ -8,6 +8,10 @@
 #   OUTPUT_URL   optional fallback output (rtmp(s)/srt incl. key) when the app hasn't set one. Unset = record.
 #   REC_KEEP     recordings kept in /data (the newest; default 5)
 #   SLATE_W/H    default slate size (1920x1080), STALL (1500ms), HOLD (10m)
+#   LATENCY      SRT latency the server asks for (default 1s). SRT uses the larger of both sides', so the phone's
+#                setting (2 s today) decides; raise this to force more on every sender.
+#   REORDER      SRT reorder tolerance floor in packets (default 64). It grows with the bitrate, so a gap waits
+#                latency/8 (20-250 ms) for a packet still on a slower link before it is asked for again.
 # Output URLs contain stream keys: they are never printed (only scheme + host), and ffmpeg's errors are redacted.
 #
 # This script is PID 1. If the control API or srtla_rec dies, it exits 1 so Docker's restart policy
@@ -58,7 +62,7 @@ while true; do
     exit 1
   fi
   brb -wait-live -listen :4001 -pull-listen ":${OBS_PORT:-5001}" -data /data -slate /data/slate.ts -phone-slate /data/slate-phone.ts \
-    -stall "${STALL:-1500ms}" -hold "${HOLD:-10m}" -events /data/events.jsonl &
+    -stall "${STALL:-1500ms}" -hold "${HOLD:-10m}" -latency "${LATENCY:-1s}" -reorder "${REORDER:-64}" -events /data/events.jsonl &
   KEEPER_PID=$!
   wait "$KEEPER_PID" || true
   KEEPER_PID=""

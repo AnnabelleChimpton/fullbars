@@ -5,7 +5,11 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/asticode/go-astits"
 )
@@ -57,7 +61,7 @@ func adtsDuration(b []byte) int64 {
 // demuxAUs reads MPEG-TS and calls emit for every H.264 / AAC PES. Returns when the reader ends. Damaged data is an
 // error: slates are looped for a whole stream, so they must be whole.
 func demuxAUs(ctx context.Context, r io.Reader, emit func(*au)) error {
-	return demux(ctx, r, emit, nil)
+	return demux(ctx, r, emit, nil, nil)
 }
 
 // demuxLive is demuxAUs for the live feed. A PES that can't be parsed (TS packets lost or dropped too late on the
@@ -65,8 +69,68 @@ func demuxAUs(ctx context.Context, r io.Reader, emit func(*au)) error {
 // next TS packets: the TS layer is still in step (SRT carries whole 188-byte packets), and one broken audio or video
 // frame is a glitch, where ending the session took the stream off air. A failing reader still ends it, and so does
 // a run of maxSkipsInARow errors with nothing good between them (that isn't a damaged stream, it isn't MPEG-TS).
-func demuxLive(ctx context.Context, r io.Reader, emit func(*au), skipped func(error)) error {
-	return demux(ctx, r, emit, skipped)
+// stats (may be nil) counts what arrived, for the session's stats line.
+func demuxLive(ctx context.Context, r io.Reader, emit func(*au), skipped func(error), stats *ingestStats) error {
+	return demux(ctx, r, emit, skipped, stats)
+}
+
+// ingestStats counts the live video that arrived in one session. It shows whether keyframes get through: the phone
+// sends one every 2 s, and before the continuity filter (tsfilter.go) the large ones were silently lost. Written by
+// the demux goroutine, read by the stats goroutine.
+type ingestStats struct {
+	cc        ccStats
+	videoAUs  atomic.Int64
+	keyframes atomic.Int64
+	bigAUs    atomic.Int64 // video AUs over 64 KB: sent with PES_packet_length 0
+	maxAU     atomic.Int64
+
+	mu      sync.Mutex
+	keySize []int // keyframe sizes since the last report, bytes
+}
+
+// bigAU is the size past which a video PES can't carry its length (PES_packet_length is 16 bits).
+const bigAU = 64 << 10
+
+func (s *ingestStats) video(a *au) {
+	n := int64(len(a.data))
+	s.videoAUs.Add(1)
+	if n > bigAU {
+		s.bigAUs.Add(1)
+	}
+	if n > s.maxAU.Load() {
+		s.maxAU.Store(n) // one writer: no race on the compare
+	}
+	if a.key {
+		s.keyframes.Add(1)
+		s.mu.Lock()
+		if len(s.keySize) < 256 {
+			s.keySize = append(s.keySize, int(n))
+		}
+		s.mu.Unlock()
+	}
+}
+
+// report describes the video since the last report (window long), and starts a new window. At one keyframe per 2 s
+// a 30 s window should show 15.
+func (s *ingestStats) report(window float64) string {
+	s.mu.Lock()
+	sizes := s.keySize
+	s.keySize = nil
+	s.mu.Unlock()
+	var kb strings.Builder
+	for i, n := range sizes {
+		if i > 0 {
+			kb.WriteByte(' ')
+		}
+		fmt.Fprintf(&kb, "%d", (n+512)/1024)
+	}
+	mode := "per-PID"
+	if s.cc.shared.Load() {
+		mode = "shared (rewritten)"
+	}
+	return fmt.Sprintf("video AUs %d, keyframes %d in the last %.0fs (expected about %.0f at one per 2 s; KB: %s), largest AU %d KB, %d over 64 KB; continuity counters %s, gaps %d, damaged PES dropped %d (%d packets)",
+		s.videoAUs.Load(), len(sizes), window, window/2, kb.String(), (s.maxAU.Load()+512)/1024, s.bigAUs.Load(),
+		mode, s.cc.gaps.Load(), s.cc.droppedPES.Load(), s.cc.droppedPkts.Load())
 }
 
 const maxSkipsInARow = 100
@@ -86,11 +150,16 @@ func (t *readTracker) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func demux(ctx context.Context, r io.Reader, emit func(*au), skipped func(error)) error {
+func demux(ctx context.Context, r io.Reader, emit func(*au), skipped func(error), stats *ingestStats) error {
 	in := &readTracker{r: r}
+	var ccs *ccStats
+	if stats != nil {
+		ccs = &stats.cc
+	}
 	// astits detects the packet size by peeking, which it can only do on a *bufio.Reader (or by seeking back);
-	// without one it would lose the first packets.
-	dmx := astits.NewDemuxer(ctx, bufio.NewReader(in))
+	// without one it would lose the first packets. The continuity filter goes in front of it for every input: the
+	// phone's slates come from the same muxer as its live video.
+	dmx := astits.NewDemuxer(ctx, bufio.NewReader(newCCFilter(in, ccs)))
 	var vpid, apid uint16
 	inARow := 0
 	for {
@@ -130,7 +199,11 @@ func demux(ctx context.Context, r io.Reader, emit func(*au), skipped func(error)
 		data := append([]byte(nil), d.PES.Data...)
 		switch {
 		case vpid != 0 && d.PID == vpid:
-			emit(&au{kind: kindVideo, pts: pts, dts: dts, data: data, key: hasIDR(data)})
+			a := &au{kind: kindVideo, pts: pts, dts: dts, data: data, key: hasIDR(data)}
+			if stats != nil {
+				stats.video(a)
+			}
+			emit(a)
 		case apid != 0 && d.PID == apid:
 			emit(&au{kind: kindAudio, pts: pts, dts: pts, data: data, dur: adtsDuration(data)})
 		}
@@ -243,14 +316,21 @@ const (
 	outAudioPID = 257
 )
 
-type tsOut struct{ mx *astits.Muxer }
+// tsOut muxes the keeper's output. Each access unit goes downstream in one Write (PAT/PMT included, which the muxer
+// writes in front of keyframes): the muxer itself writes a few bytes at a time, and passing those on one by one made
+// one output queue entry and one pipe write per TS packet.
+type tsOut struct {
+	mx *astits.Muxer
+	w  *bufio.Writer
+}
 
 func newTSOut(w io.Writer) *tsOut {
-	mx := astits.NewMuxer(context.Background(), w)
+	bw := bufio.NewWriterSize(w, 256<<10) // a 1080p keyframe fits: one Write per AU
+	mx := astits.NewMuxer(context.Background(), bw)
 	_ = mx.AddElementaryStream(astits.PMTElementaryStream{ElementaryPID: outVideoPID, StreamType: astits.StreamTypeH264Video})
 	_ = mx.AddElementaryStream(astits.PMTElementaryStream{ElementaryPID: outAudioPID, StreamType: astits.StreamTypeAACAudio})
 	mx.SetPCRPID(outVideoPID)
-	return &tsOut{mx: mx}
+	return &tsOut{mx: mx, w: bw}
 }
 
 func (t *tsOut) write(a *au, pts, dts int64) error {
@@ -278,6 +358,8 @@ func (t *tsOut) write(a *au, pts, dts int64) error {
 			PCR:                   &astits.ClockReference{Base: dts - 9000}, // 100 ms ahead of decode
 		}
 	}
-	_, err := t.mx.WriteData(md)
-	return err
+	if _, err := t.mx.WriteData(md); err != nil {
+		return err
+	}
+	return t.w.Flush()
 }

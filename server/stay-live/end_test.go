@@ -323,7 +323,7 @@ func TestDemuxLiveSkipsDamagedPES(t *testing.T) {
 		} else {
 			a++
 		}
-	}, func(err error) { skipped = append(skipped, err) })
+	}, func(err error) { skipped = append(skipped, err) }, nil)
 	if err != nil {
 		t.Fatalf("demuxLive ended on damaged data: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestDemuxLiveSkipsDamagedPES(t *testing.T) {
 func TestDemuxLiveGivesUpOnGarbage(t *testing.T) {
 	junk := bytes.Repeat([]byte{0x12, 0x34, 0x56, 0x78}, 188*(maxSkipsInARow+50)/4)
 	skips := 0
-	err := demuxLive(context.Background(), bytes.NewReader(junk), func(*au) {}, func(error) { skips++ })
+	err := demuxLive(context.Background(), bytes.NewReader(junk), func(*au) {}, func(error) { skips++ }, nil)
 	if err == nil || skips != maxSkipsInARow {
 		t.Fatalf("err=%v skips=%d", err, skips)
 	}

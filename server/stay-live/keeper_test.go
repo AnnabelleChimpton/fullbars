@@ -120,8 +120,9 @@ func TestSlateLoopsAndSplicesWithoutHoles(t *testing.T) {
 		vEnds[i] = v + 3000
 	}
 	checkContinuous(t, "video", r.v, vEnds, 1)
-	// audio: tolerate one frame of overlap/gap at live<->slate splices, never a hole bigger than that
-	checkContinuous(t, "audio", r.a, r.aEnd, 1920)
+	// audio: the slate follows on from live audio exactly; back to live, live audio starts at its first AU at or
+	// after the slate's end (keeping its offset against the live video), so the hole there is under one frame
+	checkContinuous(t, "audio", r.a, r.aEnd, 1919)
 	if len(r.v) < 250 || len(r.a) < 40 {
 		t.Fatalf("too little output: %d video, %d audio", len(r.v), len(r.a))
 	}
@@ -614,4 +615,290 @@ func TestStalledOutputNeverBlocksTheKeeper(t *testing.T) {
 	waitFor(t, "the hung ffmpeg to be replaced", 5*time.Second, func() bool {
 		return l.count("OUTPUT ERROR: the connection to the output stopped moving; reconnecting in") > 0
 	}, nil)
+}
+
+// --- slate format checks ---------------------------------------------------------------------------------------
+
+type bitWriter struct {
+	b    []byte
+	nbit int
+}
+
+func (w *bitWriter) bits(v, n int) {
+	for i := n - 1; i >= 0; i-- {
+		if w.nbit%8 == 0 {
+			w.b = append(w.b, 0)
+		}
+		w.b[len(w.b)-1] |= byte((v>>i)&1) << (7 - w.nbit%8)
+		w.nbit++
+	}
+}
+
+func (w *bitWriter) ue(v int) {
+	v++
+	n := 0
+	for x := v; x > 1; x >>= 1 {
+		n++
+	}
+	w.bits(0, n)
+	w.bits(v, n+1)
+}
+
+// testSPS builds an SPS NAL (start code included) for a w x h picture, as a phone encoder would: macroblock sizes
+// plus cropping. high: High profile (chroma format and bit depth fields).
+func testSPS(w, h int, high bool) []byte {
+	bw := &bitWriter{}
+	profile := 66
+	if high {
+		profile = 100
+	}
+	bw.bits(profile, 8)
+	bw.bits(0, 8)
+	bw.bits(41, 8)
+	bw.ue(0)
+	if high {
+		bw.ue(1) // 4:2:0
+		bw.ue(0)
+		bw.ue(0)
+		bw.bits(0, 1)
+		bw.bits(0, 1)
+	}
+	bw.ue(0)      // log2_max_frame_num_minus4
+	bw.ue(2)      // pic_order_cnt_type
+	bw.ue(1)      // max_num_ref_frames
+	bw.bits(0, 1) // gaps
+	mbW, mbH := (w+15)/16, (h+15)/16
+	bw.ue(mbW - 1)
+	bw.ue(mbH - 1)
+	bw.bits(1, 1) // frame_mbs_only
+	bw.bits(1, 1) // direct_8x8
+	if cr, cb := mbW*16-w, mbH*16-h; cr != 0 || cb != 0 {
+		bw.bits(1, 1)
+		bw.ue(0)
+		bw.ue(cr / 2)
+		bw.ue(0)
+		bw.ue(cb / 2)
+	} else {
+		bw.bits(0, 1)
+	}
+	bw.bits(0, 1) // no VUI
+	bw.bits(1, 1) // rbsp stop bit
+	// Emulation prevention, as an encoder adds it.
+	out := []byte{0, 0, 0, 1, 0x67}
+	zeros := 0
+	for _, c := range bw.b {
+		if zeros >= 2 && c <= 3 {
+			out = append(out, 3)
+			zeros = 0
+		}
+		out = append(out, c)
+		if c == 0 {
+			zeros++
+		} else {
+			zeros = 0
+		}
+	}
+	return out
+}
+
+func idrWithSPS(sps []byte, pps byte) []byte {
+	return append(append([]byte(nil), sps...), 0, 0, 0, 1, 0x68, pps, 0, 0, 0, 1, 0x65, 0x88, 0x84)
+}
+
+func TestSPSSize(t *testing.T) {
+	for _, c := range []struct {
+		w, h int
+		high bool
+	}{{1920, 1080, true}, {1080, 1920, true}, {1280, 720, false}, {720, 1280, true}, {640, 360, false}} {
+		w, h, err := spsSize(testSPS(c.w, c.h, c.high))
+		if err != nil || w != c.w || h != c.h {
+			t.Errorf("%dx%d (high %v): got %dx%d, %v", c.w, c.h, c.high, w, h, err)
+		}
+	}
+	if _, _, err := spsSize([]byte{0, 0, 1, 0x67, 0x64}); err == nil {
+		t.Error("a cut SPS must not parse")
+	}
+	if _, _, err := spsSize([]byte{0, 0, 1, 0x68, 0xee, 0x3c, 0x80}); err == nil {
+		t.Error("a PPS is not an SPS")
+	}
+}
+
+// The slate loops on its own frame length: a 60 fps slate's 120 frames loop every 120 x 1500 ticks.
+func TestSlateFrameLengthFromItsTimestamps(t *testing.T) {
+	var s []*au
+	for i := int64(0); i < 120; i++ {
+		s = append(s, &au{kind: kindVideo, pts: 5000 + i*1500, dts: 5000 + i*1500, key: i == 0})
+	}
+	v, _, _, err := prepareSlate(s, 3000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.dur != 120*1500 || v.frameDur != 1500 {
+		t.Fatalf("loop %d, frame %d; want %d, 1500", v.dur, v.frameDur, 120*1500)
+	}
+	// A one-frame slate falls back to the given frame length.
+	v, _, _, _ = prepareSlate(s[:1], 3000)
+	if v.dur != 3000 {
+		t.Fatalf("one-frame slate loops on %d, want 3000", v.dur)
+	}
+}
+
+// A 60 fps phone stream: the splice into live and back to the slate use each side's own frame length, so video
+// DTS steps exactly one frame across both splices even though the keeper was started with the 30 fps default.
+func TestSpliceUsesEachSidesFrameLength(t *testing.T) {
+	r := &rec{}
+	var slate []*au
+	for i := int64(0); i < 120; i++ {
+		slate = append(slate, &au{kind: kindVideo, pts: i * 1500, dts: i * 1500, key: i == 0})
+	}
+	k, err := newKeeper(r, slate, 3000, 1500*time.Millisecond, 0, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Unix(100, 0)
+	k.enterSlate(t0, "startup")
+	_ = k.pumpSlate(t0.Add(500 * time.Millisecond))
+	for i := int64(0); i < 60; i++ {
+		_ = k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: 7e6 + i*1500, dts: 7e6 + i*1500, key: i == 0}}, t0.Add(500*time.Millisecond+time.Duration(i)*16667*time.Microsecond))
+	}
+	k.enterSlate(t0.Add(2*time.Second), "stall")
+	_ = k.pumpSlate(t0.Add(3 * time.Second))
+	for i := 1; i < len(r.v); i++ {
+		if d := r.v[i] - r.v[i-1]; d != 1500 {
+			t.Fatalf("video DTS step %d at output %d, want 1500 throughout", d, i)
+		}
+	}
+}
+
+// The phone turned to portrait since its last stream: its saved slate (landscape) would switch the picture size at
+// every dropout, so the keeper reports the mismatch and falls back to the default slate until the phone sends its own.
+func TestSavedSlateOfAnotherSizeIsNotUsed(t *testing.T) {
+	landscape, portrait := testSPS(1920, 1080, true), testSPS(1080, 1920, true)
+	saved := testSlate()
+	saved[0].data = idrWithSPS(landscape, 0xee)
+	def := testSlate()
+	def[0].data = idrWithSPS(testSPS(1920, 1080, false), 0xaa) // the server's default: also landscape, other bytes
+	var evs []string
+	var st keeperStatus
+	k, err := newKeeper(&rec{}, saved, 3000, 1500*time.Millisecond, 0, func(e string) { evs = append(evs, e) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.useSavedSlate(def)
+	k.status = func(s keeperStatus) { st = s }
+	k.st = stateWaiting
+	now := time.Unix(500, 0)
+	_ = k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: 1000, dts: 1000, key: true, data: idrWithSPS(portrait, 0xee)}}, now)
+	_, _ = k.tick(now)
+	log := strings.Join(evs, "\n")
+	if !strings.Contains(log, "saved slate is 1920x1080 but the live video is 1080x1920") {
+		t.Fatalf("missing the size mismatch event in:\n%s", log)
+	}
+	if k.slateSource != "default" || string(k.slateParams) != string(paramSets(def[0].data)) {
+		t.Fatalf("the saved slate is still in use (source %q)", k.slateSource)
+	}
+	if st.SlateMatch != "mismatch" || st.SlateSource != "default" || st.LiveSize != "1080x1920" || st.SlateSize != "1920x1080" {
+		t.Fatalf("status: %+v", st)
+	}
+
+	// Same size, other encoder details: the saved slate stays (only a warning), and a matching one reports a match.
+	k, _ = newKeeper(&rec{}, saved, 3000, 1500*time.Millisecond, 0, func(e string) { evs = append(evs, e) })
+	k.useSavedSlate(def)
+	k.status = func(s keeperStatus) { st = s }
+	k.st = stateWaiting
+	_ = k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: 1000, dts: 1000, key: true, data: idrWithSPS(landscape, 0xef)}}, now)
+	_, _ = k.tick(now)
+	if k.slateSource != "saved" || st.SlateMatch != "mismatch" {
+		t.Fatalf("same size: source %q, match %q", k.slateSource, st.SlateMatch)
+	}
+	k.replaceSlate(slateUpdate{aus: func() []*au { s := testSlate(); s[0].data = idrWithSPS(landscape, 0xef); return s }()})
+	k.liveSynced, k.session = false, 2
+	_ = k.onLive(liveEvent{session: 2, a: &au{kind: kindVideo, pts: 9000, dts: 9000, key: true, data: idrWithSPS(landscape, 0xef)}}, now)
+	_, _ = k.tick(now)
+	if st.SlateMatch != "match" || st.SlateSource != "phone" {
+		t.Fatalf("the phone's own slate: %+v", st)
+	}
+}
+
+// A default slate.ts that can't loop (here: it doesn't start with an IDR) must never replace a working saved slate:
+// the next dropout would have nothing to put on air.
+func TestUnusableDefaultSlateKeepsTheSavedOne(t *testing.T) {
+	landscape, portrait := testSPS(1920, 1080, true), testSPS(1080, 1920, true)
+	saved := testSlate()
+	saved[0].data = idrWithSPS(landscape, 0xee)
+	var bad []*au
+	for _, a := range testSlate() {
+		if a.kind == kindAudio || !a.key {
+			bad = append(bad, a) // no IDR left
+		}
+	}
+	var evs []string
+	newK := func() *keeper {
+		k, err := newKeeper(&rec{}, saved, 3000, 1500*time.Millisecond, 0, func(e string) { evs = append(evs, e) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		k.st = stateWaiting
+		return k
+	}
+	k := newK()
+	k.useSavedSlate(bad)
+	if k.fallback != nil || !strings.Contains(strings.Join(evs, "\n"), "default slate unusable") {
+		t.Fatalf("an unusable default slate was kept in reserve (events %q)", evs)
+	}
+
+	// And if one gets there anyway, the size check keeps the saved slate and a dropout still shows it.
+	k = newK()
+	k.slateSource, k.fallback = "saved", bad
+	now := time.Unix(500, 0)
+	if err := k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: 1000, dts: 1000, key: true, data: idrWithSPS(portrait, 0xee)}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if k.slateSource != "saved" || len(k.vSlate.aus) == 0 {
+		t.Fatalf("the saved slate was replaced by an unusable one (source %q, %d frames)", k.slateSource, len(k.vSlate.aus))
+	}
+	for i := 0; i < 400; i++ { // 2 s with no live data: a stall
+		now = now.Add(5 * time.Millisecond)
+		if _, err := k.tick(now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if k.st != stateSlate {
+		t.Fatalf("expected the saved slate on air after the stall, state %v", k.st)
+	}
+}
+
+// Phone audio whose timestamps step 1919 ticks for 1920-tick frames (its clock a little fast against its sample
+// rate) for two minutes: every frame is written, each at its own timestamp, so audio never drifts against video.
+func TestSlightlyFastAudioClockDoesNotDrift(t *testing.T) {
+	r := &rec{}
+	k, _ := newKeeper(r, testSlate(), 3000, 1500*time.Millisecond, 0, func(string) {})
+	k.st = stateWaiting
+	now := time.Unix(0, 0)
+	_ = k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: 1000, dts: 1000, key: true, data: idr(0x64, 0xee)}}, now)
+	n := 2 * 60 * 48000 / 1024
+	var in []int64
+	for i := 0; i < n; i++ {
+		d := adts(1)
+		pts := 1000 + int64(i)*1919
+		in = append(in, pts)
+		if err := k.onLive(liveEvent{session: 1, a: &au{kind: kindAudio, pts: pts, dts: pts, data: d, dur: adtsDuration(d)}}, now); err != nil {
+			t.Fatal(err)
+		}
+		if i%15 == 0 && i > 0 {
+			v := 1000 + int64(i)*1919
+			_ = k.onLive(liveEvent{session: 1, a: &au{kind: kindVideo, pts: v, dts: v, data: pFrame(10)}}, now)
+		}
+	}
+	c := k.counters.snapshot()
+	if len(r.a) != n || c.AudioOverlap != 0 {
+		t.Fatalf("%d of %d audio AUs written, %d dropped as overlaps", len(r.a), n, c.AudioOverlap)
+	}
+	// The offset between where each AU was written and where the phone put it is the same for all of them.
+	off := r.a[0] - in[0]
+	for i := range r.a {
+		if d := r.a[i] - in[i] - off; d != 0 {
+			t.Fatalf("audio AU %d moved %d ticks against the first", i, d)
+		}
+	}
 }

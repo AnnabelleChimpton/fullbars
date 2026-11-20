@@ -80,9 +80,11 @@ func main() {
 	fps := flag.Float64("fps", 30, "output frame rate")
 	stall := flag.Duration("stall", 1500*time.Millisecond, "switch to slate after this long without live data")
 	hold := flag.Duration("hold", 10*time.Minute, "end the output after this long on slate (0 = never)")
-	latency := flag.Duration("latency", 2*time.Second, "SRT receiver latency")
+	// SRT uses the larger of both sides' latencies, so the server asks for the smallest the app offers and the phone's
+	// own setting decides (2 s today).
+	latency := flag.Duration("latency", time.Second, "SRT receiver latency (the phone's, if larger, wins)")
 	idle := flag.Duration("peer-idle", 30*time.Second, "SRT peer idle timeout (tunnels!)")
-	reorder := flag.Uint("reorder", 64, "SRT reorder tolerance (SRTO_LOSSMAXTTL) in packets: how many newer packets may overtake a missing one before a resend is asked for; 0 = ask at once")
+	reorder := flag.Uint("reorder", 64, "SRT reorder tolerance (SRTO_LOSSMAXTTL) in packets: how many newer packets may overtake a missing one before a resend is asked for, at least; it grows with the receive rate so a gap waits latency/8 (20-250 ms). 0 = ask at once")
 	eventsPath := flag.String("events", "", "append JSON lines of state changes to this file")
 	waitLive := flag.Bool("wait-live", false, "write nothing until the first live keyframe; exit after -hold on slate")
 	pullListen := flag.String("pull-listen", ":5001", "with -data: SRT address home OBS pulls from in \"My OBS\" mode")
@@ -108,6 +110,15 @@ func main() {
 	// control API reports (state.json), so the app and the mod remote see the keeper's state without parsing logs.
 	var evMu sync.Mutex
 	var air airTracker
+	writeState := func(now time.Time) { // with evMu held
+		if *dataDir == "" {
+			return
+		}
+		st := air.state()
+		st.At = now.UTC()
+		b, _ := json.Marshal(st)
+		_ = writeFileAtomic(filepath.Join(*dataDir, stateFile), b, 0o644)
+	}
 	events := func(msg string) {
 		evMu.Lock()
 		defer evMu.Unlock()
@@ -117,11 +128,8 @@ func main() {
 			b, _ := json.Marshal(map[string]any{"t": now.Sub(t0).Seconds(), "at": now.UTC().Format(time.RFC3339Nano), "event": msg})
 			fmt.Fprintln(evf, string(b))
 		}
-		if air.add(msg) && *dataDir != "" {
-			st := air.state()
-			st.At = now.UTC()
-			b, _ := json.Marshal(st)
-			_ = writeFileAtomic(filepath.Join(*dataDir, stateFile), b, 0o644)
+		if air.add(msg) {
+			writeState(now)
 		}
 	}
 	// fatal records why the keeper stopped where the app and `docker logs` can see it, then exits.
@@ -134,9 +142,10 @@ func main() {
 	if err != nil {
 		fatal("slate: %v", err)
 	}
+	defaultSlate, saved := slate, false
 	if *phoneSlate != "" {
 		if ps, err := loadSlate(*phoneSlate); err == nil {
-			slate = ps
+			slate, saved = ps, true
 			events("using the phone's slate from its last stream")
 		} else if !errors.Is(err, os.ErrNotExist) {
 			events(fmt.Sprintf("phone slate unusable (%v); using the default", err))
@@ -167,11 +176,20 @@ func main() {
 		}
 		writeStats(*dataDir, nil)
 	}
-	w := bufio.NewWriterSize(dst, 64*1024)
-	flushing := &flushWriter{w: w}
-	k, err := newKeeper(newTSOut(flushing), slate, int64(90000 / *fps), *stall, *hold, events)
+	// -fps is only the fallback frame length: the slates' and the live sessions' own timestamps say what it is.
+	k, err := newKeeper(newTSOut(dst), slate, int64(90000 / *fps), *stall, *hold, events)
 	if err != nil {
 		fatal("slate: %v", err)
+	}
+	if saved {
+		k.useSavedSlate(defaultSlate)
+	}
+	k.status = func(ks keeperStatus) {
+		evMu.Lock()
+		defer evMu.Unlock()
+		if air.setKeeper(ks) {
+			writeState(time.Now())
+		}
 	}
 	if *phoneSlate != "" {
 		if ws, err := loadSlate(weakSlatePath(*phoneSlate)); err == nil {
@@ -187,7 +205,8 @@ func main() {
 	cfg.PeerIdleTimeout = *idle
 	// Bonding sends packets over links with different delays, so they arrive out of order all the time. Without a
 	// reorder tolerance every overtaken packet is asked for again (a quarter of all packets in the first real stream)
-	// and the phone's bitrate control reads those resends as congestion.
+	// and the phone's bitrate control reads those resends as congestion. The vendored gosrt raises this floor with
+	// the receive rate, so the time a gap waits is the same at every bitrate (third_party/gosrt/PATCHES.md).
 	cfg.LossMaxTTL = uint32(*reorder)
 	ln, err := srt.Listen("srt", *listen, cfg)
 	if err != nil {
@@ -208,7 +227,6 @@ func main() {
 	go acceptLoop(ctx, ln, live, slates, quality, *phoneSlate, *dataDir, events)
 
 	runErr := k.run(live, ctx.Done(), *waitLive)
-	_ = w.Flush()
 	if out != nil {
 		_ = out.Close()
 		writeStats(*dataDir, nil)
@@ -325,7 +343,8 @@ func acceptLoop(ctx context.Context, ln srt.Listener, live chan<- liveEvent, sla
 		go func() {
 			defer conn.Close()
 			stop := make(chan struct{})
-			go reportStats(conn, s, stop, events)
+			ingest := &ingestStats{}
+			go reportStats(conn, s, ingest, stop, events)
 			go watchLoss(conn, s, quality, stop)
 			if dataDir != "" {
 				go publishStats(conn, s, &newest, dataDir, stop)
@@ -342,7 +361,7 @@ func acceptLoop(ctx context.Context, ln srt.Listener, live chan<- liveEvent, sla
 					lastSaid = now
 					events(fmt.Sprintf("SRT session %d: skipped damaged data and carried on (%d so far): %v", s, skipped, err))
 				}
-			})
+			}, ingest)
 			close(stop)
 			events(fmt.Sprintf("SRT session %d ended (%v); skipped damaged %d; %s", s, err, skipped, statsLine(conn)))
 			live <- liveEvent{session: s, ended: true, err: err}
@@ -372,9 +391,11 @@ func classifyStream(streamID, token string) (string, bool) {
 
 // reportStats logs the session's SRT receive counters every 30 s. Bonding reorders packets across links; the
 // vendored gosrt waits for -reorder newer packets (or a short time) before asking for a missing one, so "resent"
-// should be close to the packets really lost on the way, not to "reordered but in time".
-func reportStats(conn srt.Conn, session int, stop <-chan struct{}, events func(string)) {
-	t := time.NewTicker(30 * time.Second)
+// should be close to the packets really lost on the way, not to "reordered but in time". The video line shows
+// whether every keyframe got through.
+func reportStats(conn srt.Conn, session int, ingest *ingestStats, stop <-chan struct{}, events func(string)) {
+	const every = 30 * time.Second
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
@@ -382,6 +403,7 @@ func reportStats(conn srt.Conn, session int, stop <-chan struct{}, events func(s
 			return
 		case <-t.C:
 			events(fmt.Sprintf("SRT session %d stats: %s", session, statsLine(conn)))
+			events(fmt.Sprintf("SRT session %d video: %s", session, ingest.report(every.Seconds())))
 		}
 	}
 }
@@ -406,7 +428,8 @@ func publishStats(conn srt.Conn, session int, newest *atomic.Int64, dir string, 
 			kbps := int64(float64(st.Accumulated.ByteRecv-lastBytes) * 8 / 1000 / now.Sub(last).Seconds())
 			lastBytes, last = st.Accumulated.ByteRecv, now
 			if newest.Load() == int64(session) {
-				writeStats(dir, &publisherStats{Bitrate: kbps, RTT: st.Instantaneous.MsRTT, DroppedPkts: int64(st.Accumulated.PktRecvLost)})
+				writeStats(dir, &publisherStats{Bitrate: kbps, RTT: st.Instantaneous.MsRTT, DroppedPkts: int64(st.Accumulated.PktRecvLost),
+					ReadQueueDrops: int64(readQueueDrops(conn))})
 			}
 		}
 	}
@@ -416,8 +439,17 @@ func statsLine(conn srt.Conn) string {
 	var st srt.Statistics
 	conn.Stats(&st)
 	a := st.Accumulated
-	return fmt.Sprintf("received %d (unique %d), reordered but in time %d, resent %d, asked for again %d, lost %d, dropped %d, NAKs sent %d",
-		a.PktRecv, a.PktRecvUnique, a.PktRecvLate, a.PktRecvRetrans, a.PktRecvLoss, a.PktRecvLost, a.PktRecvDrop, a.PktSentNAK)
+	return fmt.Sprintf("received %d (unique %d), reordered but in time %d, resent %d, asked for again %d, lost %d, dropped %d, NAKs sent %d, read queue overflow %d",
+		a.PktRecv, a.PktRecvUnique, a.PktRecvLate, a.PktRecvRetrans, a.PktRecvLoss, a.PktRecvLost, a.PktRecvDrop, a.PktSentNAK, readQueueDrops(conn))
+}
+
+// readQueueDrops is how many received packets the vendored gosrt dropped because the keeper didn't read them fast
+// enough (third_party/gosrt/PATCHES.md). SRT doesn't count those as lost: they were acknowledged.
+func readQueueDrops(conn srt.Conn) uint64 {
+	if c, ok := conn.(interface{ ReadQueueDrops() uint64 }); ok {
+		return c.ReadQueueDrops()
+	}
+	return 0
 }
 
 func envOr(name, def string) string {
@@ -456,7 +488,7 @@ func receiveSlate(ctx context.Context, conn srt.Conn, weak bool, slates chan sla
 	var aus []*au
 	err = demuxAUs(ctx, bytes.NewReader(ts), func(a *au) { aus = append(aus, a) })
 	if err == nil {
-		_, _, _, err = prepareSlate(aus, 3000)
+		_, _, _, err = prepareSlate(aus, defaultFrameDur) // the frame length only matters for a one-frame slate
 	}
 	if err == nil {
 		var st srt.Statistics
@@ -520,6 +552,9 @@ func weakSlatePath(store string) string {
 
 const maxSlateBytes = 8 << 20
 
+// defaultFrameDur is the frame length (90 kHz) assumed when nothing measured says otherwise: 30 fps.
+const defaultFrameDur = 3000
+
 func loadSlate(path string) ([]*au, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -534,15 +569,4 @@ func loadSlate(path string) ([]*au, error) {
 		return nil, fmt.Errorf("no access units in %s", path)
 	}
 	return aus, nil
-}
-
-// flushWriter flushes after every write so the downstream ffmpeg sees data immediately.
-type flushWriter struct{ w *bufio.Writer }
-
-func (f *flushWriter) Write(p []byte) (int, error) {
-	n, err := f.w.Write(p)
-	if err != nil {
-		return n, err
-	}
-	return n, f.w.Flush()
 }
