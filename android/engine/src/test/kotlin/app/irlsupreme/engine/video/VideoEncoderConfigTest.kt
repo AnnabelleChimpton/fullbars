@@ -61,6 +61,17 @@ class VideoEncoderConfigTest {
         )) assertTrue("$k should stay", k in fb)
     }
 
+    @Test fun firstRetryDropsOnlyTheColourDescription() {
+        val keys = AvcSettings.keys(1920, 1080, 30, 6_000_000, 2, cbr = true)
+        val first = AvcSettings.withoutColour(keys).toMap()
+        assertEquals(keys.size - 3, first.size)
+        assertFalse(MediaFormat.KEY_COLOR_STANDARD in first)
+        assertFalse(MediaFormat.KEY_COLOR_RANGE in first)
+        assertFalse(MediaFormat.KEY_COLOR_TRANSFER in first)
+        assertEquals(CodecProfileLevel.AVCProfileHigh, first[MediaFormat.KEY_PROFILE])
+        assertEquals(CodecProfileLevel.AVCLevel41, first[MediaFormat.KEY_LEVEL])
+    }
+
     @Test fun parsesProfileAndLevelFromCsd0() {
         val high41 = SpsInfo.parse(buf(0, 0, 0, 1, 0x67, 0x64, 0x00, 0x29, 0xAC, 0x2B, 0x40))!!
         assertEquals(100, high41.profileIdc)
@@ -111,6 +122,8 @@ class VideoEncoderConfigTest {
         val base = SpsInfo.parse(buf(0, 0, 0, 1, 0x67, 0x42, 0xC0, 0x1F))
         assertEquals("c2.x Constrained Baseline@3.1 VBR (hints rejected, encoder defaults)",
             EncoderInfo("c2.x", false, true, "4.1", base).describe())
+        assertEquals("c2.x High@4.1 CBR (no colour description)",
+            EncoderInfo("c2.x", true, false, "4.1", sps, colour = false).describe())
     }
 
     @Test fun levelNamesMatchTheSpsNames() {

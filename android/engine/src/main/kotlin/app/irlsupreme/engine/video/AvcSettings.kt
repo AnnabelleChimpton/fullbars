@@ -13,17 +13,18 @@ import java.nio.ByteBuffer
  * transcoding only when its SPS/PPS are byte-identical to the live stream's.
  */
 internal object AvcSettings {
-    /**
-     * Keys the retry leaves out when the encoder rejects the first configure. Profile and level hints are the usual
-     * cause; some encoders also refuse colour keys they don't understand.
-     */
-    val FALLBACK_DROPPED = setOf(
-        MediaFormat.KEY_PROFILE,
-        MediaFormat.KEY_LEVEL,
+    /** The colour description keys: the first thing a retry drops, so an encoder that dislikes them keeps High. */
+    val COLOUR_KEYS = setOf(
         MediaFormat.KEY_COLOR_STANDARD,
         MediaFormat.KEY_COLOR_RANGE,
         MediaFormat.KEY_COLOR_TRANSFER,
     )
+
+    /**
+     * Keys the last retry leaves out: colour, plus the profile and level hints, which are the usual reason an encoder
+     * rejects a format. The encoder then picks its own defaults.
+     */
+    val FALLBACK_DROPPED = COLOUR_KEYS + setOf(MediaFormat.KEY_PROFILE, MediaFormat.KEY_LEVEL)
 
     /**
      * H.264 levels from Table A-1: (level constant, max macroblocks per second, max frame size in macroblocks).
@@ -69,7 +70,10 @@ internal object AvcSettings {
         MediaFormat.KEY_PRIORITY to 0, // realtime
     )
 
-    /** [keys] minus what the retry drops. */
+    /** [keys] without the colour description: the first retry. */
+    fun withoutColour(keys: List<Pair<String, Int>>): List<Pair<String, Int>> = keys.filter { it.first !in COLOUR_KEYS }
+
+    /** [keys] minus everything a retry may drop: the last retry. */
     fun fallback(keys: List<Pair<String, Int>>): List<Pair<String, Int>> = keys.filter { it.first !in FALLBACK_DROPPED }
 
     /** "4.1" for a CodecProfileLevel.AVCLevel41 constant, for logs. */
@@ -146,8 +150,8 @@ class SpsInfo(val profileIdc: Int, val constraintFlags: Int, val levelIdc: Int) 
 
 /**
  * What the live encoder is, for the session log: e.g. "c2.qti.avc.encoder High@4.1 CBR". [sps] is null until the
- * encoder hands over its first SPS. [fallback] means the first configure was rejected and the encoder chose its own
- * profile, level and colour signalling.
+ * encoder hands over its first SPS. [colour] is false when the encoder refused the colour description; [fallback]
+ * means it also refused the profile and level hints and chose its own.
  */
 data class EncoderInfo(
     val codecName: String,
@@ -156,13 +160,14 @@ data class EncoderInfo(
     /** The level asked for, e.g. "4.1"; the SPS shows what was produced. */
     val requestedLevel: String,
     val sps: SpsInfo? = null,
+    val colour: Boolean = !fallback,
 ) {
     fun describe(): String = buildString {
         append(codecName).append(' ')
         append(sps?.toString() ?: "?@?").append(' ')
         append(if (cbr) "CBR" else "VBR")
         if (sps != null && sps.level != requestedLevel && !fallback) append(" (asked ").append(requestedLevel).append(')')
-        if (fallback) append(" (hints rejected, encoder defaults)")
+        if (fallback) append(" (hints rejected, encoder defaults)") else if (!colour) append(" (no colour description)")
     }
 
     override fun toString() = describe()

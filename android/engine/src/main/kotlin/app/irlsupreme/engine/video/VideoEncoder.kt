@@ -70,7 +70,7 @@ class VideoEncoder(
             codec.start()
             inputSurface = surface
             drain = Thread(::drainLoop, "engine-venc-drain").apply { start() }
-            Log.i(TAG, "encoder ${codec.name} ${width}x$height@$fps ${bitrate / 1000}kbps cbr=${info.cbr} level=${info.requestedLevel} fallback=${info.fallback}")
+            Log.i(TAG, "encoder ${codec.name} ${width}x$height@$fps ${bitrate / 1000}kbps cbr=${info.cbr} level=${info.requestedLevel} colour=${info.colour} fallback=${info.fallback}")
         } catch (t: Throwable) {
             runCatching { codec.stop() }
             runCatching { codec.release() }
@@ -157,17 +157,24 @@ class VideoEncoder(
             val cbr = caps.encoderCapabilities?.isBitrateModeSupported(EncoderCapabilities.BITRATE_MODE_CBR) == true
             val keys = AvcSettings.keys(width, height, fps, bitrate, keyframeIntervalSec, cbr)
             val level = AvcSettings.levelName(AvcSettings.level(width, height, fps))
-            var fallback = false
+            // Some encoders reject hints they don't support. Retry first without the colour description (so an encoder
+            // that only dislikes that keeps High at the right level), then without profile and level too. The order
+            // is fixed, so the slate encoder ends up with the same format and the same SPS as the live one.
             try {
                 codec.configure(format(width, height, keys), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                return EncoderInfo(codec.name, cbr, fallback = false, requestedLevel = level)
             } catch (e: Exception) {
-                // Some encoders reject the profile/level or colour hints: retry without them and let the encoder pick.
-                // Logged, because the stream then runs at the encoder's default profile, often Baseline.
-                Log.w(TAG, "encoder ${codec.name} rejected profile/level/colour hints, retrying with defaults", e)
-                fallback = true
-                codec.configure(format(width, height, AvcSettings.fallback(keys)), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                Log.w(TAG, "encoder ${codec.name} rejected the format, retrying without the colour description", e)
             }
-            return EncoderInfo(codec.name, cbr, fallback, level)
+            try {
+                codec.configure(format(width, height, AvcSettings.withoutColour(keys)), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                return EncoderInfo(codec.name, cbr, fallback = false, requestedLevel = level, colour = false)
+            } catch (e: Exception) {
+                // Logged, because the stream then runs at the encoder's default profile, often Baseline.
+                Log.w(TAG, "encoder ${codec.name} rejected profile/level hints too, retrying with its defaults", e)
+            }
+            codec.configure(format(width, height, AvcSettings.fallback(keys)), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            return EncoderInfo(codec.name, cbr, fallback = true, requestedLevel = level)
         }
 
         private fun format(width: Int, height: Int, keys: List<Pair<String, Int>>): MediaFormat =
