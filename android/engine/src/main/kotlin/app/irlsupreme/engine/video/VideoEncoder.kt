@@ -57,7 +57,7 @@ class VideoEncoder(
      * Which encoder this is and what it really produces, e.g. "c2.qti.avc.encoder High@4.1 CBR". The profile and
      * level fill in once the encoder hands over its SPS.
      */
-    @Volatile var info: EncoderInfo
+    @Volatile var encoderInfo: EncoderInfo
         private set
 
     init {
@@ -65,12 +65,12 @@ class VideoEncoder(
         // back before rethrowing, or every failed recovery attempt leaks one until none are left.
         var surface: Surface? = null
         try {
-            info = configureAvc(codec, width, height, fps, bitrate, keyframeIntervalSec)
+            encoderInfo = configureAvc(codec, width, height, fps, bitrate, keyframeIntervalSec)
             surface = codec.createInputSurface()
             codec.start()
             inputSurface = surface
             drain = Thread(::drainLoop, "engine-venc-drain").apply { start() }
-            Log.i(TAG, "encoder ${codec.name} ${width}x$height@$fps ${bitrate / 1000}kbps cbr=${info.cbr} level=${info.requestedLevel} colour=${info.colour} fallback=${info.fallback}")
+            Log.i(TAG, "encoder ${codec.name} ${width}x$height@$fps ${bitrate / 1000}kbps cbr=${encoderInfo.cbr} level=${encoderInfo.requestedLevel} colour=${encoderInfo.colour} fallback=${encoderInfo.fallback}")
         } catch (t: Throwable) {
             runCatching { codec.stop() }
             runCatching { codec.release() }
@@ -104,8 +104,8 @@ class VideoEncoder(
                         val sps = f.getByteBuffer("csd-0")
                         val pps = f.getByteBuffer("csd-1")
                         if (sps != null) {
-                            this.info = this.info.copy(sps = SpsInfo.parse(sps))
-                            Log.i(TAG, "encoder ${this.info.describe()}")
+                            encoderInfo = encoderInfo.copy(sps = SpsInfo.parse(sps))
+                            Log.i(TAG, "encoder ${encoderInfo.describe()}")
                         }
                         if (sps != null && pps != null) sink.onVideoConfig(sps, pps)
                     }

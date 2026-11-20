@@ -105,7 +105,7 @@ class EncoderCadenceTest : TestCase() {
         }
         assertTrue("IDR gap ${maxGap / 1000} ms at $fps fps input (limit ${limitUs / 1000} ms)", maxGap <= limitUs)
         // What the engine will log for this phone, for the benchmark notes.
-        android.util.Log.i("EncoderCadenceTest", "$fps fps in: ${enc.info.describe()} maxIdrMs=${enc.meter.maxIdrIntervalMs} fpsOut=${"%.1f".format(enc.meter.framesPerSecond)}")
+        android.util.Log.i("EncoderCadenceTest", "$fps fps in: ${enc.encoderInfo.describe()} maxIdrMs=${enc.meter.maxIdrIntervalMs} fpsOut=${"%.1f".format(enc.meter.framesPerSecond)}")
     }
 
     fun testCadenceAtTheConfiguredRate() = cadence(config.fps)
@@ -152,6 +152,6 @@ class EncoderCadenceTest : TestCase() {
         val slate = SlateEncoder.encode(config)
         assertTrue("slate SPS differs from live", sps!!.contentEquals(slate.sps))
         assertTrue("slate PPS differs from live", pps!!.contentEquals(slate.pps))
-        android.util.Log.i("EncoderCadenceTest", "slate GOP ${slate.video.size} frames, ${slate.bytes / 1024} KB; live ${enc.info.describe()}")
+        android.util.Log.i("EncoderCadenceTest", "slate GOP ${slate.video.size} frames, ${slate.bytes / 1024} KB; live ${enc.encoderInfo.describe()}")
     }
 }
