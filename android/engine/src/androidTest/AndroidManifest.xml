@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- On-device checks run by hand before a release (see docs/BENCHMARKS.md). The runner is the platform's own
+     android.test library, so the test APK needs no extra dependencies. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <uses-library android:name="android.test.runner" android:required="false" />
+    </application>
+</manifest>

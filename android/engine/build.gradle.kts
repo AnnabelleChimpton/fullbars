@@ -6,7 +6,14 @@ android {
     namespace = "app.irlsupreme.engine"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
-    defaultConfig { minSdk = 31 }
+    defaultConfig {
+        minSdk = 31
+        // On-device encoder, audio and GL checks (src/androidTest), run by hand on a phone before a release. The
+        // platform's own JUnit 3 runner, so they need no test libraries beyond the SDK's.
+        testInstrumentationRunner = "android.test.InstrumentationTestRunner"
+    }
+    useLibrary("android.test.runner")
+    useLibrary("android.test.base")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

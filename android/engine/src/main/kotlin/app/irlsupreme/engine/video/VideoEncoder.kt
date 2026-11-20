@@ -1,10 +1,10 @@
 package app.irlsupreme.engine.video
 
 import android.media.MediaCodec
-import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.EncoderCapabilities
 import android.media.MediaFormat
 import android.os.Bundle
+import android.os.Process
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -44,26 +44,33 @@ class VideoEncoder(
     @Volatile var createdNs = System.nanoTime()
         private set
 
+    /** Output numbers (rate, fps, IDR size and spacing), updated per frame on the drain thread. */
+    val meter = EncoderMeter()
+
     /**
-     * Output bytes per second, measured over a sliding ~2 s window. ABR must steer on this, not the target: CBR
-     * undershoots the target on simple scenes.
+     * Output bits per second over a 1 s sliding window (0 until the first full second). ABR must steer on this, not
+     * the target: CBR undershoots the target on simple scenes.
      */
-    @Volatile var measuredBitrate = 0L
+    val measuredBitrate: Long get() = meter.bitsPerSecond
+
+    /**
+     * Which encoder this is and what it really produces, e.g. "c2.qti.avc.encoder High@4.1 CBR". The profile and
+     * level fill in once the encoder hands over its SPS.
+     */
+    @Volatile var encoderInfo: EncoderInfo
         private set
-    private var windowStartNs = 0L
-    private var windowBytes = 0L
 
     init {
         // A codec that fails half-way (configure rejects the size, start fails) still holds a hardware slot: give it
         // back before rethrowing, or every failed recovery attempt leaks one until none are left.
         var surface: Surface? = null
         try {
-            val cbr = configureAvc(codec, width, height, fps, bitrate, keyframeIntervalSec)
+            encoderInfo = configureAvc(codec, width, height, fps, bitrate, keyframeIntervalSec)
             surface = codec.createInputSurface()
             codec.start()
             inputSurface = surface
             drain = Thread(::drainLoop, "engine-venc-drain").apply { start() }
-            Log.i(TAG, "encoder ${codec.name} ${width}x$height@$fps ${bitrate / 1000}kbps cbr=$cbr")
+            Log.i(TAG, "encoder ${codec.name} ${width}x$height@$fps ${bitrate / 1000}kbps cbr=${encoderInfo.cbr} level=${encoderInfo.requestedLevel} colour=${encoderInfo.colour} fallback=${encoderInfo.fallback}")
         } catch (t: Throwable) {
             runCatching { codec.stop() }
             runCatching { codec.release() }
@@ -82,6 +89,10 @@ class VideoEncoder(
     }
 
     private fun drainLoop() {
+        // Above ordinary app threads (the WebView, Compose, GC) so output keeps flowing when the phone is busy; a
+        // late drain backs up the encoder and shows as uneven frame timing downstream. Same level as the UI's display
+        // work, below audio.
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) }
         val info = MediaCodec.BufferInfo()
         try {
             while (running) {
@@ -92,6 +103,10 @@ class VideoEncoder(
                         val f = codec.outputFormat
                         val sps = f.getByteBuffer("csd-0")
                         val pps = f.getByteBuffer("csd-1")
+                        if (sps != null) {
+                            encoderInfo = encoderInfo.copy(sps = SpsInfo.parse(sps))
+                            Log.i(TAG, "encoder ${encoderInfo.describe()}")
+                        }
                         if (sps != null && pps != null) sink.onVideoConfig(sps, pps)
                     }
                     idx >= 0 -> {
@@ -100,7 +115,8 @@ class VideoEncoder(
                         if (buf != null && !config && info.size > 0) {
                             buf.position(info.offset).limit(info.offset + info.size)
                             sink.onVideoFrame(buf, info)
-                            account(info.size)
+                            lastOutputNs = System.nanoTime()
+                            meter.onFrame(info.presentationTimeUs, info.size, info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
                         }
                         codec.releaseOutputBuffer(idx, false)
                     }
@@ -111,19 +127,6 @@ class VideoEncoder(
                 failure = e.toString()
                 Log.e(TAG, "encoder drain failed", e)
             }
-        }
-    }
-
-    private fun account(bytes: Int) {
-        val now = System.nanoTime()
-        lastOutputNs = now
-        if (windowStartNs == 0L) windowStartNs = now
-        windowBytes += bytes
-        val elapsed = now - windowStartNs
-        if (elapsed >= 2_000_000_000L) {
-            measuredBitrate = windowBytes * 8 * 1_000_000_000L / elapsed
-            windowStartNs = now
-            windowBytes = 0
         }
     }
 
@@ -147,32 +150,36 @@ class VideoEncoder(
         /**
          * Configures [codec] for the live stream. The phone's BRB slate is encoded through this too (SlateEncoder):
          * identical settings give byte-identical SPS/PPS, which is what lets the server splice it in without
-         * transcoding. Returns whether CBR is in use.
+         * transcoding. The settings themselves are in [AvcSettings]. Returns what was set up; its SPS is still unknown.
          */
-        fun configureAvc(codec: MediaCodec, width: Int, height: Int, fps: Int, bitrate: Int, keyframeIntervalSec: Int): Boolean {
+        fun configureAvc(codec: MediaCodec, width: Int, height: Int, fps: Int, bitrate: Int, keyframeIntervalSec: Int): EncoderInfo {
             val caps = codec.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
             val cbr = caps.encoderCapabilities?.isBitrateModeSupported(EncoderCapabilities.BITRATE_MODE_CBR) == true
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyframeIntervalSec)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, if (cbr) EncoderCapabilities.BITRATE_MODE_CBR else EncoderCapabilities.BITRATE_MODE_VBR)
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
-                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel41)
-                // No KEY_REPEAT_PREVIOUS_FRAME_AFTER: the compositor renders every tick, and encoder-inserted repeats
-                // produced a duplicate timestamp in testing.
-                setInteger(MediaFormat.KEY_LATENCY, 1)
-                setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
+            val keys = AvcSettings.keys(width, height, fps, bitrate, keyframeIntervalSec, cbr)
+            val level = AvcSettings.levelName(AvcSettings.level(width, height, fps))
+            // Some encoders reject hints they don't support. Retry first without the colour description (so an encoder
+            // that only dislikes that keeps High at the right level), then without profile and level too. The order
+            // is fixed, so the slate encoder ends up with the same format and the same SPS as the live one.
+            try {
+                codec.configure(format(width, height, keys), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                return EncoderInfo(codec.name, cbr, fallback = false, requestedLevel = level)
+            } catch (e: Exception) {
+                Log.w(TAG, "encoder ${codec.name} rejected the format, retrying without the colour description", e)
             }
             try {
-                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                codec.configure(format(width, height, AvcSettings.withoutColour(keys)), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                return EncoderInfo(codec.name, cbr, fallback = false, requestedLevel = level, colour = false)
             } catch (e: Exception) {
-                // Some encoders reject profile/level hints; fall back to defaults.
-                format.removeKey(MediaFormat.KEY_PROFILE); format.removeKey(MediaFormat.KEY_LEVEL)
-                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                // Logged, because the stream then runs at the encoder's default profile, often Baseline.
+                Log.w(TAG, "encoder ${codec.name} rejected profile/level hints too, retrying with its defaults", e)
             }
-            return cbr
+            codec.configure(format(width, height, AvcSettings.fallback(keys)), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            return EncoderInfo(codec.name, cbr, fallback = true, requestedLevel = level)
         }
+
+        private fun format(width: Int, height: Int, keys: List<Pair<String, Int>>): MediaFormat =
+            MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                for ((k, v) in keys) setInteger(k, v)
+            }
     }
 }
