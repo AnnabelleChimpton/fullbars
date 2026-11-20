@@ -271,4 +271,24 @@ class SrtlaSchedulingTest {
         val first = events.map { it.second }.filterIsInstance<SrtlaEvent.LinkUp>().single()
         assertTrue(first.afterOutage)
     }
+
+    @Test
+    fun `a helper reporting thermal RED carries at most half its former share`() {
+        val sim = Sim()
+        sim.connect(0, 1)
+        var start = now
+        sim.run(3_000)
+        val before = sim.dataOn(1, start).toDouble() / sim.data.count { it.first >= start }
+
+        val load = srtlakt.moblink.HelperLoad()
+        assertTrue(load.update(srtlakt.moblink.Moblink.Thermal.RED, 70))
+        // What the app's link manager does with it.
+        sim.core.setPriority(1, if (load.demoted) LinkPriority.SECONDARY else LinkPriority.PRIMARY)
+        sim.core.setCapScale(1, load.capScale)
+        start = now
+        sim.run(3_000)
+        val after = sim.dataOn(1, start).toDouble() / sim.data.count { it.first >= start }
+        assertTrue(after <= before * 0.5, "helper share $before -> $after")
+        assertTrue(after > 0, "still warm")
+    }
 }
