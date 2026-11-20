@@ -316,14 +316,21 @@ const (
 	outAudioPID = 257
 )
 
-type tsOut struct{ mx *astits.Muxer }
+// tsOut muxes the keeper's output. Each access unit goes downstream in one Write (PAT/PMT included, which the muxer
+// writes in front of keyframes): the muxer itself writes a few bytes at a time, and passing those on one by one made
+// one output queue entry and one pipe write per TS packet.
+type tsOut struct {
+	mx *astits.Muxer
+	w  *bufio.Writer
+}
 
 func newTSOut(w io.Writer) *tsOut {
-	mx := astits.NewMuxer(context.Background(), w)
+	bw := bufio.NewWriterSize(w, 256<<10) // a 1080p keyframe fits: one Write per AU
+	mx := astits.NewMuxer(context.Background(), bw)
 	_ = mx.AddElementaryStream(astits.PMTElementaryStream{ElementaryPID: outVideoPID, StreamType: astits.StreamTypeH264Video})
 	_ = mx.AddElementaryStream(astits.PMTElementaryStream{ElementaryPID: outAudioPID, StreamType: astits.StreamTypeAACAudio})
 	mx.SetPCRPID(outVideoPID)
-	return &tsOut{mx: mx}
+	return &tsOut{mx: mx, w: bw}
 }
 
 func (t *tsOut) write(a *au, pts, dts int64) error {
@@ -351,6 +358,8 @@ func (t *tsOut) write(a *au, pts, dts int64) error {
 			PCR:                   &astits.ClockReference{Base: dts - 9000}, // 100 ms ahead of decode
 		}
 	}
-	_, err := t.mx.WriteData(md)
-	return err
+	if _, err := t.mx.WriteData(md); err != nil {
+		return err
+	}
+	return t.w.Flush()
 }

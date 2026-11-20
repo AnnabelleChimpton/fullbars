@@ -167,9 +167,7 @@ func main() {
 		}
 		writeStats(*dataDir, nil)
 	}
-	w := bufio.NewWriterSize(dst, 64*1024)
-	flushing := &flushWriter{w: w}
-	k, err := newKeeper(newTSOut(flushing), slate, int64(90000 / *fps), *stall, *hold, events)
+	k, err := newKeeper(newTSOut(dst), slate, int64(90000 / *fps), *stall, *hold, events)
 	if err != nil {
 		fatal("slate: %v", err)
 	}
@@ -208,7 +206,6 @@ func main() {
 	go acceptLoop(ctx, ln, live, slates, quality, *phoneSlate, *dataDir, events)
 
 	runErr := k.run(live, ctx.Done(), *waitLive)
-	_ = w.Flush()
 	if out != nil {
 		_ = out.Close()
 		writeStats(*dataDir, nil)
@@ -538,15 +535,4 @@ func loadSlate(path string) ([]*au, error) {
 		return nil, fmt.Errorf("no access units in %s", path)
 	}
 	return aus, nil
-}
-
-// flushWriter flushes after every write so the downstream ffmpeg sees data immediately.
-type flushWriter struct{ w *bufio.Writer }
-
-func (f *flushWriter) Write(p []byte) (int, error) {
-	n, err := f.w.Write(p)
-	if err != nil {
-		return n, err
-	}
-	return n, f.w.Flush()
 }

@@ -60,6 +60,7 @@ func (s *sink) open() {
 	default:
 		o := newFFmpegOut(u, s.events)
 		s.w, s.close = o, o.Close
+		mainOut.Store(o)
 		s.events("output: " + describeURL(u))
 	}
 	s.openExtras(u)
@@ -200,6 +201,7 @@ type ffmpegOut struct {
 	pat, pmt []byte
 	pmtPID   int
 	dropped  time.Time // last "falling behind" event
+	behind   bool      // overflowed, and still waiting for the keyframe to resume on
 	closed   bool
 
 	// Shared.
@@ -207,6 +209,33 @@ type ffmpegOut struct {
 	queued atomic.Int64 // bytes in ch
 	ch     chan tsChunk
 	done   chan struct{}
+
+	// Counters for the stats (written by the keeper side and the loop, read by the stats goroutine).
+	chunks       atomic.Int64 // queue entries: about one per access unit
+	overflows    atomic.Int64 // times the queue was full and output skipped to the next keyframe
+	droppedBytes atomic.Int64 // bytes never sent: the queue was full, or output waited for a keyframe after that
+	peakQueued   atomic.Int64 // the most bytes ever waiting in the queue
+	restarts     atomic.Int64 // ffmpeg runs that ended on their own and were started again
+}
+
+// mainOut is the main output's ffmpeg, for the stats; nil until one opens (or when the output isn't ffmpeg).
+var mainOut atomic.Pointer[ffmpegOut]
+
+// outputCounters is what the stats report about the main output.
+type outputCounters struct {
+	Overflows    int64 `json:"overflows"`
+	DroppedBytes int64 `json:"droppedBytes"`
+	PeakQueued   int64 `json:"peakQueuedBytes"`
+	Queued       int64 `json:"queuedBytes"`
+	Restarts     int64 `json:"restarts"`
+}
+
+func (o *ffmpegOut) counters() outputCounters {
+	if o == nil {
+		return outputCounters{}
+	}
+	return outputCounters{Overflows: o.overflows.Load(), DroppedBytes: o.droppedBytes.Load(), PeakQueued: o.peakQueued.Load(),
+		Queued: o.queued.Load(), Restarts: o.restarts.Load()}
 }
 
 type tsChunk struct {
@@ -215,8 +244,10 @@ type tsChunk struct {
 }
 
 const (
-	tsPacket      = 188
-	maxQueueBytes = 4 << 20 // ~5 s at 6 Mbps
+	tsPacket = 188
+	// maxQueueBytes is how far ffmpeg may fall behind before output skips ahead: about 5 s at 6 Mbps. The channel
+	// has room for that many bytes even in single packets, so the byte budget is the limit that binds.
+	maxQueueBytes = 4 << 20
 	quickFailures = 5
 )
 
@@ -256,7 +287,7 @@ func newFFmpegOutWith(u string, events func(string), cmd func(string) *exec.Cmd)
 }
 
 func (o *ffmpegOut) start() {
-	o.ch = make(chan tsChunk, 8192)
+	o.ch = make(chan tsChunk, maxQueueBytes/tsPacket+1)
 	o.done = make(chan struct{})
 	o.live.Store(1) // the first run's data queues up while ffmpeg starts: the go-live keyframe isn't lost
 	go o.loop()
@@ -284,28 +315,39 @@ func (o *ffmpegOut) Write(p []byte) (int, error) {
 	} else {
 		k := o.scan(pkts)
 		if g == 0 || k < 0 || o.pat == nil || o.pmt == nil {
+			if o.behind {
+				o.droppedBytes.Add(int64(n))
+			}
 			return len(p), nil // ffmpeg is down, or waiting for a keyframe
 		}
 		out = make([]byte, 0, 2*tsPacket+n-k)
 		out = append(append(append(out, o.pat...), o.pmt...), pkts[k:]...)
-		o.synced = true
+		if o.behind {
+			o.droppedBytes.Add(int64(k))
+		}
+		o.synced, o.behind = true, false
 	}
 	if o.queued.Load()+int64(len(out)) > maxQueueBytes {
-		o.overflow()
+		o.overflow(len(out))
 		return len(p), nil
 	}
 	select {
 	case o.ch <- tsChunk{gen: g, data: out}:
-		o.queued.Add(int64(len(out)))
+		if q := o.queued.Add(int64(len(out))); q > o.peakQueued.Load() {
+			o.peakQueued.Store(q) // only this side raises it
+		}
+		o.chunks.Add(1)
 	default:
-		o.overflow()
+		o.overflow(len(out))
 	}
 	return len(p), nil
 }
 
 // overflow: ffmpeg can't keep up. Skip to the next keyframe rather than send a broken picture.
-func (o *ffmpegOut) overflow() {
-	o.synced = false
+func (o *ffmpegOut) overflow(n int) {
+	o.overflows.Add(1)
+	o.droppedBytes.Add(int64(n))
+	o.synced, o.behind = false, true
 	if time.Since(o.dropped) > time.Minute {
 		o.dropped = time.Now()
 		o.events("output is falling behind (slow connection to the ingest?); skipping to the next keyframe")
@@ -369,6 +411,7 @@ func (o *ffmpegOut) loop() {
 			return
 		}
 		failedBefore = true
+		o.restarts.Add(1)
 		if time.Since(startedAt) >= o.healthy {
 			quick, backoff, refusedSaid = 0, o.minBackoff, false
 		} else {
