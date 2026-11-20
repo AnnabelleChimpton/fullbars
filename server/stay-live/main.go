@@ -325,7 +325,8 @@ func acceptLoop(ctx context.Context, ln srt.Listener, live chan<- liveEvent, sla
 		go func() {
 			defer conn.Close()
 			stop := make(chan struct{})
-			go reportStats(conn, s, stop, events)
+			ingest := &ingestStats{}
+			go reportStats(conn, s, ingest, stop, events)
 			go watchLoss(conn, s, quality, stop)
 			if dataDir != "" {
 				go publishStats(conn, s, &newest, dataDir, stop)
@@ -342,7 +343,7 @@ func acceptLoop(ctx context.Context, ln srt.Listener, live chan<- liveEvent, sla
 					lastSaid = now
 					events(fmt.Sprintf("SRT session %d: skipped damaged data and carried on (%d so far): %v", s, skipped, err))
 				}
-			})
+			}, ingest)
 			close(stop)
 			events(fmt.Sprintf("SRT session %d ended (%v); skipped damaged %d; %s", s, err, skipped, statsLine(conn)))
 			live <- liveEvent{session: s, ended: true, err: err}
@@ -372,9 +373,11 @@ func classifyStream(streamID, token string) (string, bool) {
 
 // reportStats logs the session's SRT receive counters every 30 s. Bonding reorders packets across links; the
 // vendored gosrt waits for -reorder newer packets (or a short time) before asking for a missing one, so "resent"
-// should be close to the packets really lost on the way, not to "reordered but in time".
-func reportStats(conn srt.Conn, session int, stop <-chan struct{}, events func(string)) {
-	t := time.NewTicker(30 * time.Second)
+// should be close to the packets really lost on the way, not to "reordered but in time". The video line shows
+// whether every keyframe got through.
+func reportStats(conn srt.Conn, session int, ingest *ingestStats, stop <-chan struct{}, events func(string)) {
+	const every = 30 * time.Second
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
@@ -382,6 +385,7 @@ func reportStats(conn srt.Conn, session int, stop <-chan struct{}, events func(s
 			return
 		case <-t.C:
 			events(fmt.Sprintf("SRT session %d stats: %s", session, statsLine(conn)))
+			events(fmt.Sprintf("SRT session %d video: %s", session, ingest.report(every.Seconds())))
 		}
 	}
 }
