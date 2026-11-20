@@ -6,6 +6,8 @@ import android.opengl.EGL14
 import android.opengl.EGLSurface
 import android.opengl.GLES30
 import android.opengl.GLUtils
+import android.os.Process
+import android.os.Trace
 import android.util.Log
 import android.view.Surface
 import app.irlsupreme.engine.CameraPhase
@@ -22,11 +24,15 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicIntegerArray
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicReferenceArray
 
 /**
  * The never-stop video pipeline:
- *  - one render thread ticks a fixed 30 fps clock, independent of sources and of the display;
+ *  - one render thread ticks a fixed-rate clock ([FrameClock], 30 fps by default), independent of sources and of the
+ *    display. While a camera is on air and steady, the clock is gently phase-locked to its frames ([FramePhaseLock]),
+ *    so a frame arriving a few ms early or late can't be shown twice or skipped; otherwise it free-runs;
  *  - each tick composes the current scene into an FBO: the camera's newest frame, or its last frame (hold), or after
  *    [HOLD_NS] the Camera lost card; or a scene card, crossfaded per [SceneRules]; then the layers and the alert;
  *  - a phone-drawn card can carry a looping GIF behind it ([GifBackground], decoded off-thread) or a web page in its
@@ -111,18 +117,63 @@ class Compositor(
         set(v) { if (field != v) { field = v; browserGen++ } }
 
     /**
-     * The thermal ladder's rung (set by the engine): from 2, every 5th tick is skipped (~24 fps, the timestamps just
-     * show the gap), overlay uploads slow to one per [OVERLAY_HOT_INTERVAL_NS] and the camera's stabilisation goes off;
-     * at 3 the preview pauses ([previewPaused]).
+     * The thermal ladder's rung (set by the engine), see [ThermalCadence]: from 1 the web overlay is latched less often
+     * and the preview gets every other frame (if [previewHalving], and unless [previewTouchBoost]); from 2 the output rate steps down evenly (to
+     * the phone camera's fixed 20 or 24 fps where offered, else half rate) and overlay uploads slow to one per
+     * [OVERLAY_HOT_INTERVAL_NS]; at 3 the preview pauses ([previewPaused]). Stabilisation is never touched: turning it
+     * off mid-shot jumps the field of view.
      */
     @Volatile var thermalRung = 0
-        set(v) {
-            if (field == v) return
-            field = v
-            camera?.setStabilizationAllowed(v < 2)
-        }
     /** The preview is paused to save heat (the stream carries on). */
     val previewPaused: Boolean get() = thermalRung >= 3
+
+    /**
+     * Halve the preview's rate from thermal rung 1 (off by default). Turn it on together with [previewTouchBoost]
+     * reporting, so the preview is only halved while nobody is touching it.
+     */
+    @Volatile var previewHalving = false
+    /** The streamer is touching the live screen: the preview keeps its full rate through the hot-phone halving. */
+    @Volatile var previewTouchBoost = false
+    /**
+     * Stops feeding the preview without detaching it (a dark "pocket" screen): the stream is untouched and the preview
+     * resumes on the next frame when this goes false. Detaching instead would be undone by the surface callbacks.
+     */
+    @Volatile var previewSuppressed = false
+    /**
+     * Phase-lock the output clock to the on-air camera ([FramePhaseLock]). On by default; off makes the clock
+     * free-run exactly as it used to, for comparison.
+     */
+    @Volatile var phaseLock = true
+    /**
+     * The phone camera's stabilisation ([StabilizationMode]). Set it before [start]; a later change is applied (and
+     * changes the crop), so the app should only change it while not live.
+     */
+    @Volatile var stabilization = StabilizationMode.STANDARD
+        set(v) { field = v; camera?.setStabilization(v) }
+
+    /**
+     * The detail rung, for the engine to set from the bitrate: 1, 0.75 or 0.5 (other values snap to the nearest; see
+     * [DetailScale]). Below 1 the camera, phone or external, is drawn at that scale with a filtered downscale and
+     * scaled back up; cards, overlays, alerts and chat stay at full resolution. The encoder's size never changes.
+     */
+    @Volatile var detailScale = 1f
+
+    /** The phone camera's median capture-to-tick latency (ns), or null when it isn't known (see [CameraSource.cameraLatencyNs]). */
+    val cameraLatencyNs: Long? get() = camera?.cameraLatencyNs
+    /** Its 95th percentile (ns), or null. */
+    val cameraLatencyP95Ns: Long? get() = camera?.cameraLatencyP95Ns
+    /** What the phone camera last reported doing (stabilisation applied, real frame rate, exposure), or null. */
+    val cameraCaptureStats: CaptureStats? get() = camera?.captureStats
+    /** The rate the compositor is outputting now (fps); lower than configured while the thermal ladder has it reduced. */
+    @Volatile var outputFps = config.fps.toFloat()
+        private set
+
+    @Volatile private var lastCadence: CadenceSnapshot? = null
+    /**
+     * Frame timing over the last [CADENCE_WINDOW_NS] window (counters since the start), or null before the first
+     * window ends. Cheap: published by the render thread; call it whenever the session log snapshots.
+     */
+    fun cadenceSnapshot(): CadenceSnapshot? = lastCadence
 
     /** The browser overlay (a web page drawn under the native overlay); null removes it. */
     fun setBrowser(content: BrowserSource.Content?) {
@@ -136,8 +187,14 @@ class Compositor(
     /** Ticks the render thread fell behind on (frames missing from the stream). Heat-saving skips aren't counted. */
     @Volatile var skippedTicks = 0L
         private set
-    /** Ticks dropped on purpose by the thermal ladder. */
+    /**
+     * Ticks dropped on purpose by the thermal ladder. Always 0 now that the ladder lowers the rate evenly instead of
+     * skipping ticks; kept so the stats keep their shape.
+     */
     @Volatile var thermalSkips = 0L
+        private set
+    /** Ticks whose render work took more than 0.8 of a period (late, even when no tick was skipped). */
+    @Volatile var lateTicks = 0L
         private set
     /** Unexpected errors caught inside ticks this stream (each one cost at most that tick). */
     @Volatile var renderErrors = 0
@@ -153,6 +210,10 @@ class Compositor(
     private val thread = Thread(::run, "engine-render")
     @Volatile private var running = false
     private val recoveryExecutor = Executors.newSingleThreadExecutor { Thread(it, "engine-venc-recovery") }
+    /** Draws card bitmaps off the render thread (Canvas work that once cost the stream a late frame per redraw). */
+    private val cardExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread({ runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT) }; r.run() }, "engine-card-raster")
+    }
     private val pendingEncoder = AtomicReference<VideoEncoder?>(null)
     @Volatile private var encoder: VideoEncoder? = null
     @Volatile private var preview: PreviewRenderer? = null
@@ -194,6 +255,7 @@ class Compositor(
         recoveryExecutor.shutdownNow()
         runCatching { recoveryExecutor.awaitTermination(2, TimeUnit.SECONDS) }
         pendingEncoder.getAndSet(null)?.let { runCatching { it.release() } }
+        cardExecutor.shutdownNow() // already done by teardown, unless setup failed
     }
 
     fun attachPreview(surface: Surface, width: Int, height: Int) {
@@ -286,6 +348,18 @@ class Compositor(
          * freed with it ([releaseBackdrop]).
          */
         val cardTex = arrayOfNulls<CardTex>(Slates.Card.entries.size * CardLayer.entries.size)
+        /** Card bitmaps drawn in the background, waiting for their upload; by slot, like [cardTex]. */
+        val cardReady = AtomicReferenceArray<CardRaster?>(cardTex.size)
+        /** What each slot was last sent to be drawn for (version -1: nothing), so a stale slot is queued once. */
+        val cardQueuedAudio = arrayOfNulls<SlateAudio>(cardTex.size)
+        val cardQueuedVersion = IntArray(cardTex.size) { -1 }
+        /** Set (1) by [cardExecutor] when a slot's background draw failed, so the render thread queues it again. */
+        val cardFailed = AtomicIntegerArray(cardTex.size)
+        /** How many times each slot's current state has been queued again after a failure (see [CARD_RETRIES]). */
+        val cardRetries = IntArray(cardTex.size)
+        /** The tick a background card was last uploaded on: at most one per tick. */
+        var cardUploadTick = -1L
+        var tickIndex = 0L
         /** Each card's GIF background and web page, while it's shown (and [BACKDROP_GRACE_NS] after); by ordinal. */
         val backdrops = arrayOfNulls<Backdrop>(Slates.Card.entries.size)
         /** Draws GIF and web cards; made the first time one is shown ([drawCardScene]). */
@@ -310,15 +384,46 @@ class Compositor(
         var lastSceneCard: Slates.Card? = null
         var sceneChangedAtNs = 0L
         var browser: BrowserSource? = null
+        /** The overlay content [browser] was opened for (a still is only kept for the page that's really showing). */
+        var browserFor: BrowserSource.Content? = null
         var browserSeen = 0
         /** Closed pages whose GL side is freed once the main thread has closed them (see [BrowserSource.retire]). */
         val retiring = ArrayList<BrowserSource>()
         var phoneOpen = true
         var extFreshSinceNs = 0L
+        /** The web overlay's last frame, kept as a still while the thermal ladder has the page closed. */
+        var browserStill: Fbo? = null
+        /** The overlay content [browserStill] shows (so a different page never shows the old one's still). */
+        var browserStillFor: BrowserSource.Content? = null
+        /** The detail rung's smaller framebuffer and filter, while [detailScale] is below 1. */
+        var detail: Fbo? = null
+        var detailScaleInUse = 1f
+        var downscaler: DetailDownscaler? = null
+        /** The filter failed on this phone: full detail for the rest of the stream. */
+        var detailFailed = false
+
+        // This tick's facts, for the timing step after it ([pace]).
+        var phoneGot = false
+        var extGot = false
+        /** The on-air source was a camera, LIVE and steady, with no card or fade: what the phase lock may follow. */
+        var steadySource: CadenceMeter? = null
+        val phaseLock = FramePhaseLock()
+        var lockedTo: CadenceMeter? = null
+        /** The frame-rate cap last asked of the phone camera (-1: none asked yet). */
+        var camCapAsked = -1
+        var reducedRate = false
+        /** The output rate [pace] last chose (fps). */
+        var paceFps = 0
+        var lastForcedKeyNs = 0L
+        val tickWork = DurationHistogram(100_000L, 500) // 0-50 ms in 0.1 ms buckets
+        var windowStartNs = 0L
     }
 
     /** One cached card texture (see [Gpu.cardTex]). */
     private class CardTex(val audio: SlateAudio, val version: Int, val tex: Int)
+
+    /** A card bitmap drawn off the render thread for one footer audio state and style version. */
+    private class CardRaster(val bitmap: Bitmap, val audio: SlateAudio, val version: Int)
 
     /**
      * What a phone-drawn card shows besides its own bitmap: a looping GIF behind it and/or a web page instead of it.
@@ -344,6 +449,9 @@ class Compositor(
     }
 
     private fun run() {
+        // Above ordinary app threads (the WebView, Compose, GC compete for the CPU when the phone is hot), but below
+        // the audio capture thread's AUDIO priority, so sound still wins.
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) }
         val g = try {
             setup()
         } catch (t: Throwable) {
@@ -355,10 +463,14 @@ class Compositor(
             ready.countDown()
         }
         if (g == null) return
+        warmCards(g) // before the clock starts, so it costs no live frames
         val clock = FrameClock(config.fps)
+        val hint = RenderThreadHint.create(ctx, clock.periodNs)
+        g.windowStartNs = System.nanoTime()
         try {
             while (running) {
                 skippedTicks += clock.awaitTick()
+                val workStartNs = System.nanoTime()
                 try {
                     tick(g, clock)
                 } catch (t: Throwable) {
@@ -366,11 +478,108 @@ class Compositor(
                     renderErrors++
                     logError("render tick", t)
                 }
+                try {
+                    pace(g, clock, hint)
+                } catch (t: Throwable) {
+                    renderErrors++
+                    logError("frame timing", t)
+                }
+                // Only the tick's own work, not the wait for it: that's what the deadline and the CPU governor care about.
+                val workNs = System.nanoTime() - workStartNs
+                g.tickWork.record(workNs)
+                if (workNs > clock.periodNs * 4 / 5) lateTicks++
+                hint?.report(workNs)
+                if (workStartNs - g.windowStartNs >= CADENCE_WINDOW_NS) publishCadence(g, workStartNs)
                 clock.advance()
             }
         } finally {
+            runCatching { hint?.close() }
             teardown(g)
         }
+    }
+
+    /**
+     * Render thread, after each tick: counts what viewers saw, picks the output rate for the next tick (the thermal
+     * ladder's even step-down, see [ThermalCadence]), asks for keyframes while the rate is reduced, and steers the phase
+     * lock. Allocates nothing unless something changes.
+     */
+    private fun pace(g: Gpu, clock: FrameClock, hint: RenderThreadHint?) {
+        val now = clock.tickTimeNs()
+        val cam = g.cam
+        val ext = g.ext
+        val steady = g.steadySource
+        steady?.onLiveTick(if (steady === cam.cadence) g.phoneGot else g.extGot)
+
+        // Output rate. The phone camera drops to a fixed lower rate itself where it offers one; it's asked only when
+        // the wanted cap changes (a camera-thread post).
+        val rung = thermalRung
+        val cap = if (rung >= ThermalCadence.REDUCED_RATE_RUNG) cam.reducedFpsOffered else 0
+        if (cap != g.camCapAsked) { g.camCapAsked = cap; cam.setFrameRateCap(cap) }
+        val phoneOnAir = activeSource == "phone"
+        val camFps = cam.cameraFps
+        val base = ThermalCadence.baseFps(config.fps, phoneOnAir, camFps)
+        val fps = ThermalCadence.outputFps(base, rung, phoneOnAir, cam.fpsCapInUse)
+        val reduced = fps < config.fps
+
+        // Phase lock: only at the full rate (the camera's own rate when a 60 fps stream fell back to 30), following
+        // the steady on-air camera; anything else free-runs.
+        val source = if (phaseLock && fps == base) steady else null
+        if (source !== g.lockedTo) {
+            g.phaseLock.reset(source?.arrivals ?: 0L)
+            g.lockedTo = source
+        }
+        var periodNs = ThermalCadence.periodNs(fps)
+        if (source != null && source === ext?.cadence) periodNs = g.phaseLock.slavedPeriodNs(periodNs) // 29.97 in: follow it
+        if (periodNs != clock.periodNs) {
+            clock.setPeriod(periodNs)
+            outputFps = 1e9f / periodNs
+        }
+        if (fps != g.paceFps) { // a real rate change, not the phase lock following a 29.97 camera
+            g.paceFps = fps
+            hint?.setTarget(ThermalCadence.periodNs(fps))
+            Log.i(TAG, "output rate $fps fps (thermal rung $rung, ${if (phoneOnAir) "phone" else "external"} camera)")
+        }
+        val camInterval = ThermalCadence.periodNs(if (cam.fpsCapInUse > 0) cam.fpsCapInUse else camFps)
+        cam.cadence.expectedIntervalNs = maxOf(camInterval, periodNs)
+        ext?.cadence?.expectedIntervalNs = maxOf(EXT_NOMINAL_INTERVAL_NS, periodNs)
+
+        // The encoder counts its GOP in frames at the configured rate, so at a lower rate keyframes would come further
+        // apart: ask for one every keyframe interval of PTS instead (and one at the switch, which some HALs need).
+        val keyEveryNs = config.keyframeIntervalSec * 1_000_000_000L - periodNs / 2
+        if (reduced != g.reducedRate) {
+            g.reducedRate = reduced
+            if (reduced) { g.enc?.requestKeyframe(); g.lastForcedKeyNs = now }
+        } else if (reduced && ThermalCadence.keyframeDue(now, g.lastForcedKeyNs, keyEveryNs)) {
+            g.enc?.requestKeyframe()
+            g.lastForcedKeyNs = now
+        }
+
+        if (source != null) clock.nudge(g.phaseLock.update(now, clock.periodNs, source.arrivals, source.lastArrivalNs, allowed = true))
+    }
+
+    /** Render thread, every [CADENCE_WINDOW_NS]: publishes [cadenceSnapshot] and starts the next window. */
+    private fun publishCadence(g: Gpu, nowNs: Long) {
+        val cam = g.cam
+        val ext = g.ext
+        lastCadence = CadenceSnapshot(
+            phone = cam.cadence.snapshot(),
+            external = ext?.cadence?.snapshot(),
+            tickWorkP50Ms = g.tickWork.percentileNs(0.5) / 1e6f,
+            tickWorkP99Ms = g.tickWork.percentileNs(0.99) / 1e6f,
+            tickWorkMaxMs = g.tickWork.maxNs / 1e6f,
+            lateTicks = lateTicks,
+            skippedTicks = skippedTicks,
+            thermalSkips = thermalSkips,
+            outputFps = outputFps,
+            phaseLocked = g.lockedTo != null && g.phaseLock.locked,
+            cameraLatencyP50Ms = cam.cameraLatencyNs?.let { it / 1e6f },
+            cameraLatencyP95Ms = cam.cameraLatencyP95Ns?.let { it / 1e6f },
+            externalLateDrops = ext?.lateDrops ?: 0L,
+        )
+        g.tickWork.reset()
+        cam.cadence.resetWindow()
+        ext?.cadence?.resetWindow()
+        g.windowStartNs = nowNs
     }
 
     /** Render thread: builds the pipeline; on failure releases whatever was built (newest first) and rethrows. */
@@ -393,9 +602,8 @@ class Compositor(
             rtmp = ext
             rtmpReady.countDown()
             setupStage = "camera"
-            val cam = CameraSource(ctx, config.width, config.height, config.fps, wantedFacing).also { c -> undo += { c.release() } }
+            val cam = CameraSource(ctx, config.width, config.height, config.fps, wantedFacing, stabilization).also { c -> undo += { c.release() } }
             if (displayRotation >= 0) cam.setDisplayRotation(displayRotation)
-            cam.setStabilizationAllowed(thermalRung < 2)
             cam.open() // with an external camera: the fallback until it appears, then closed while it streams
             val pr = PreviewRenderer(egl, previewFbo.texture, previewFbo.width, previewFbo.height).also { p -> undo += { p.release() } }
             setupStage = "encoder"
@@ -417,17 +625,20 @@ class Compositor(
     private fun tick(g: Gpu, clock: FrameClock) {
         val now = clock.tickTimeNs()
         if (g.retiring.isNotEmpty()) g.retiring.removeAll { b -> runCatching { b.freeIfClosed() }.getOrDefault(true) }
-        // Thermal rung 2+: every 5th tick isn't drawn or sent (~24 fps). Tick times still only go up, so PTS stay monotonic.
-        if (thermalRung >= 2 && clock.tick % 5 == 4L) { thermalSkips++; return }
         val cam = g.cam
         val ext = g.ext
+        g.steadySource = null
+        g.tickIndex = clock.tick
 
         // 1. Sources (each guarded: one bad frame or a dying source must not take the tick, let alone the stream)
-        guarded("phone camera", false) { cam.update(now) }
+        val phoneGot = guarded("phone camera", false) { cam.update(now) }
+        var extGot = false
         val extFresh = ext != null && guarded("external camera", false) {
-            ext.update(now)
+            extGot = ext.update(now)
             ext.lastFrameNs != 0L && now - ext.lastFrameNs <= HOLD_NS
         }
+        g.phoneGot = phoneGot
+        g.extGot = extGot
         if (restartRequested) {
             restartRequested = false
             if (extFresh) {
@@ -462,15 +673,27 @@ class Compositor(
         g.egl.makeCurrent(g.egl.idleSurface)
         if (browserGen != g.browserSeen) {
             g.browserSeen = browserGen
-            g.browser?.let { retireBrowser(g, it) }
-            g.browser = guarded("web overlay", null) {
-                browserWanted?.takeIf { !browserHeld }?.let { BrowserSource(ctx, browserW, browserH, cssW, cssH, it) }
+            val wanted = browserWanted
+            val old = g.browser
+            // Closed for heat: its last frame stays up as a still, so the layout doesn't jump. A different page (or
+            // none) never shows the old one's still.
+            if (old != null && browserHeld && wanted != null && wanted == g.browserFor && old.hasFrame) {
+                guarded("web overlay still", Unit) { keepBrowserStill(g, old, wanted) }
             }
+            if (wanted == null || wanted != g.browserStillFor) freeBrowserStill(g)
+            old?.let { retireBrowser(g, it) }
+            g.browser = guarded("web overlay", null) {
+                wanted?.takeIf { !browserHeld }?.let { BrowserSource(ctx, browserW, browserH, cssW, cssH, it) }
+            }
+            g.browserFor = if (g.browser != null) wanted else null
             browserRef = g.browser
         }
-        g.browser?.let { b ->
+        // Hot phone: the page is latched every 2nd tick at rung 1, every 4th from rung 2 (it keeps rendering; we
+        // just take its frames less often).
+        if (clock.tick % ThermalCadence.browserLatchEvery(thermalRung) == 0L) g.browser?.let { b ->
             try {
                 b.update()
+                if (b.pageShown && g.browserStill != null) freeBrowserStill(g) // the reopened page has painted: drop the still
                 browserCrashes = b.crashes
             } catch (t: Throwable) {
                 logError("web overlay (closed until it changes)", t)
@@ -486,12 +709,14 @@ class Compositor(
         val sceneJustChanged = now - g.sceneChangedAtNs < SCENE_OVERLAY_GRACE_NS
         if (sceneJustChanged || now - g.lastOverlayUploadNs >= overlayEveryNs) pendingOverlay.getAndSet(null)?.let { u ->
             g.lastOverlayUploadNs = now
+            Trace.beginSection("uploadOverlay")
             try {
                 uploadOverlay(g, u.bitmap)
             } catch (t: Throwable) {
                 renderErrors++
                 logError("overlay upload", t)
             } finally {
+                Trace.endSection()
                 u.bitmap?.recycle()
             }
         }
@@ -516,16 +741,17 @@ class Compositor(
         }
         var phoneDrawn = false
         fun drawCard(c: Slates.Card, alpha: Float) = drawCardScene(g, c, now, clock.tick, gop, alpha)
+        val extHeld = !extFresh && ext != null && SceneRules.holdExternal(now, ext.lastFrameNs, ext.queuedFrames, ext.anchoredAtNs)
         /** The camera, its held last frame, or the Camera lost card (returned true), at [alpha]. */
         fun drawCamera(alpha: Float): Boolean {
             when {
-                extFresh -> { g.programOes.draw(ext!!.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera" }
+                extFresh || extHeld -> { drawCameraFrame(g, ext!!.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera" }
                 g.phoneOpen && cam.lastFrameNs != 0L && now - cam.lastFrameNs <= holdNs -> {
-                    g.programOes.draw(cam.texture, cam.texMatrix, alpha = alpha); activeSource = "phone"; phoneDrawn = true
+                    drawCameraFrame(g, cam.texture, cam.texMatrix, GlUtil.IDENTITY, alpha); activeSource = "phone"; phoneDrawn = true
                 }
                 // External camera dropped and the phone camera isn't up yet: hold its last frame rather than flash a card.
                 ext != null && ext.lastFrameNs != 0L && now - ext.lastFrameNs <= EXT_HOLD_NS -> {
-                    g.programOes.draw(ext.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera"
+                    drawCameraFrame(g, ext.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera"
                 }
                 else -> { drawCard(Slates.Card.CAMERA_LOST, alpha); activeSource = "none"; return true }
             }
@@ -537,6 +763,13 @@ class Compositor(
         }
         val cameraLostShown = if (sceneCard == null) drawCamera(fadeIn) else { drawCard(sceneCard, fadeIn); false }
         if (g.fading) phoneDrawn = false // mid-fade the preview copies the blend, never the bare (mirrored) camera
+        // What the phase lock may follow, and whose repeats count: a camera on air on its own, LIVE and steady.
+        g.steadySource = when {
+            sceneCard != null || g.fading || cameraLostShown -> null
+            extFresh -> ext!!.cadence
+            phoneDrawn && cam.phase == CameraPhase.LIVE && cam.switchingSinceNs == 0L -> cam.cadence
+            else -> null
+        }
         val allowAlerts = SceneRules.alertsAllowed(if (cameraLostShown) Slates.Card.CAMERA_LOST else sceneCard)
         alertsAllowed = allowAlerts
         pendingAlert.getAndSet(null)?.let { a -> guarded("alert upload", Unit) { g.alert.offer(a.graphic, a.atNs) } }
@@ -549,7 +782,9 @@ class Compositor(
         fun drawLayers() {
             if (!layersAllowed) return
             val b = g.browser
-            if (b != null && b.hasFrame) g.programOes.draw(b.texture, b.texMatrix, premultiplied = true)
+            val still = g.browserStill
+            if (still != null) g.program2d.draw(still.texture, premultiplied = true) // until the reopened page paints
+            else if (b != null && b.hasFrame) g.programOes.draw(b.texture, b.texMatrix, premultiplied = true)
             if (g.overlayTex != 0) g.program2d.draw(g.overlayTex, GlUtil.FLIP_V, premultiplied = true)
         }
         /** The alert goes over every layer, on Live and the full-frame BRB / Starting soon / Ending cards alike. */
@@ -560,6 +795,7 @@ class Compositor(
         drawAlert(config.width, config.height)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         pruneBackdrops(g, now)
+        if (sceneCard == null && !g.fading) guarded("card warm-up", Unit) { rewarmCards(g) }
 
         // 3. Encoder: swap in a recovered instance, then feed this tick
         pendingEncoder.getAndSet(null)?.let { fresh ->
@@ -610,9 +846,11 @@ class Compositor(
             }
         }
 
-        // 4. Preview (only when it asks; it draws on its own thread). Paused at thermal rung 3.
+        // 4. Preview (only when it asks; it draws on its own thread). Every other tick from thermal rung 1 unless the
+        // screen is being touched, paused at rung 3, and not fed at all while suppressed (pocket screen).
         val pr = g.preview
-        if (!previewPaused && pr.wantsFrame.get() && !previewDetach) {
+        val previewDue = clock.tick % ThermalCadence.previewEvery(thermalRung, previewHalving, previewTouchBoost) == 0L
+        if (!previewPaused && !previewSuppressed && previewDue && pr.wantsFrame.get() && !previewDetach) {
             g.egl.makeCurrent(g.egl.idleSurface)
             g.previewFbo.bind()
             if (phoneDrawn && cam.facing == Facing.FRONT) {
@@ -749,7 +987,8 @@ class Compositor(
                 b.gifFailed = true
             } else {
                 gif.minIntervalMs = if (thermalRung >= 2) GifPlan.HOT_INTERVAL_MS else GifPlan.MIN_INTERVAL_MS
-                gifReady = guarded("card background upload", false) { gif.update() }
+                Trace.beginSection("GifBackground.update")
+                gifReady = try { guarded("card background upload", false) { gif.update() } } finally { Trace.endSection() }
                 if (gif.state == GifBackground.State.FAILED) {
                     b.gifFailed = true
                     gifReady = false
@@ -807,6 +1046,8 @@ class Compositor(
         val i = c.ordinal * CardLayer.entries.size + CardLayer.FOREGROUND.ordinal
         g.cardTex[i]?.let { runCatching { GLES30.glDeleteTextures(1, intArrayOf(it.tex), 0) } }
         g.cardTex[i] = null
+        g.cardReady.getAndSet(i, null)?.bitmap?.recycle()
+        g.cardQueuedVersion[i] = -1
     }
 
     /** Closes a card page the same way as the overlay page: the GL side goes once the main thread has closed it. */
@@ -816,19 +1057,198 @@ class Compositor(
         if (cardPageRef === w.browser) cardPageRef = null
     }
 
+    /**
+     * Render thread: a camera frame into the main FBO at [alpha], through the detail rung's smaller framebuffer when
+     * [detailScale] is below 1. Leaves the main FBO bound. If the filter can't run on this phone, it's full detail
+     * for the rest of the stream (counted once in [renderErrors]).
+     */
+    private fun drawCameraFrame(g: Gpu, tex: Int, texMatrix: FloatArray, pos: FloatArray, alpha: Float) {
+        val scale = if (g.detailFailed) 1f else DetailScale.snap(detailScale)
+        if (scale >= 1f) {
+            if (g.detail != null) freeDetail(g)
+            g.programOes.draw(tex, texMatrix, pos, alpha)
+            return
+        }
+        val small = try {
+            val d = g.downscaler ?: DetailDownscaler().also { g.downscaler = it }
+            if (g.detail == null || g.detailScaleInUse != scale) {
+                g.detail?.release()
+                g.detail = null
+                val size = DetailScale.size(config.width, config.height, scale)
+                g.detail = Fbo(size[0], size[1])
+                g.detailScaleInUse = scale
+            }
+            val f = g.detail!!
+            f.bind()
+            // Transparent around the picture (the filter writes it opaque): a letterboxed camera's bars must not
+            // blend black over a card during a crossfade, any more than the full-detail path does.
+            GLES30.glClearColor(0f, 0f, 0f, 0f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+            d.draw(tex, texMatrix, pos, f.width, f.height)
+            f
+        } catch (t: Throwable) {
+            g.detailFailed = true
+            renderErrors++
+            logError("detail rung (full detail from now on)", t)
+            freeDetail(g)
+            null
+        }
+        g.main.bind()
+        // GL_LINEAR back up to full size, always blended so the transparent bars leave what's under them. At full
+        // alpha that's the premultiplied blend (the picture is opaque, the bars are 0,0,0,0); a fade's alpha blends.
+        if (small != null) g.program2d.draw(small.texture, alpha = alpha, premultiplied = alpha >= 1f)
+        else g.programOes.draw(tex, texMatrix, pos, alpha)
+    }
+
+    private fun freeDetail(g: Gpu) {
+        g.detail?.let { runCatching { it.release() } }
+        g.detail = null
+        g.detailScaleInUse = 1f
+    }
+
+    /**
+     * Render thread: copies the overlay page's current frame into [Gpu.browserStill] (premultiplied, as drawn), to
+     * stand in for the page while it's closed for heat.
+     */
+    private fun keepBrowserStill(g: Gpu, b: BrowserSource, content: BrowserSource.Content) {
+        val f = g.browserStill ?: Fbo(browserW, browserH).also { g.browserStill = it }
+        f.bind()
+        GLES30.glClearColor(0f, 0f, 0f, 0f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        g.programOes.draw(b.texture, b.texMatrix, premultiplied = true)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        g.browserStillFor = content
+    }
+
+    private fun freeBrowserStill(g: Gpu) {
+        g.browserStill?.let { runCatching { it.release() } }
+        g.browserStill = null
+        g.browserStillFor = null
+    }
+
     /** [c]'s texture for [layer] with the footer's audio as it is now; an outdated copy in the same slot is freed. */
     private fun card(g: Gpu, c: Slates.Card, layer: CardLayer): Int {
+        Trace.beginSection("card")
+        try {
+            return cardTexture(g, c, layer)
+        } finally {
+            Trace.endSection()
+        }
+    }
+
+    /**
+     * A slot that already has a texture is never drawn on the render thread: while it's outdated (the footer's audio
+     * or the style changed) the old texture keeps showing and the new bitmap is drawn on [cardExecutor], then uploaded
+     * into the same texture on a later tick. Only a slot with no texture at all is drawn here and now.
+     */
+    private fun cardTexture(g: Gpu, c: Slates.Card, layer: CardLayer): Int {
         val audio = Slates.shownAudio(c, slateAudio)
         val v = Slates.version
         val i = c.ordinal * CardLayer.entries.size + layer.ordinal
         val cached = g.cardTex[i]
         if (cached != null && cached.audio == audio && cached.version == v) return cached.tex
-        if (cached != null) GLES30.glDeleteTextures(1, intArrayOf(cached.tex), 0)
-        g.cardTex[i] = null
-        val bmp = Slates.bitmap(config.width, config.height, c, config.channelLogin, audio, style = Slates.style(c), layer = layer)
+        if (cached != null) {
+            if (takeReadyCard(g, i, audio, v)) return g.cardTex[i]!!.tex
+            queueCardRaster(g, i, c, layer, audio, v)
+            return cached.tex
+        }
+        val ready = g.cardReady.getAndSet(i, null) // one may have finished for this slot after it was freed
+        val bmp = if (ready != null && ready.audio == audio && ready.version == v) {
+            ready.bitmap
+        } else {
+            ready?.bitmap?.recycle()
+            Slates.bitmap(config.width, config.height, c, config.channelLogin, audio, style = Slates.style(c), layer = layer)
+        }
         val tex = try { GlUtil.textureFromBitmap(bmp) } finally { bmp.recycle() }
         g.cardTex[i] = CardTex(audio, v, tex)
         return tex
+    }
+
+    /**
+     * Render thread: if slot [i]'s background bitmap for ([audio], [version]) is ready, uploads it into the slot's
+     * texture and returns true. At most one upload per tick, and none during a crossfade (an 8 MB upload mid-fade is
+     * where a late frame would show most). A bitmap drawn for an older state is thrown away.
+     */
+    private fun takeReadyCard(g: Gpu, i: Int, audio: SlateAudio, version: Int): Boolean {
+        val ready = g.cardReady.get(i) ?: return false
+        if (ready.audio != audio || ready.version != version) {
+            if (g.cardReady.compareAndSet(i, ready, null)) ready.bitmap.recycle()
+            return false
+        }
+        if (g.fading || g.cardUploadTick == g.tickIndex) return false
+        if (!g.cardReady.compareAndSet(i, ready, null)) return false // a newer one just landed: next tick
+        val b = ready.bitmap
+        try {
+            val cached = g.cardTex[i]
+            val tex = if (cached == null) {
+                GlUtil.textureFromBitmap(b)
+            } else {
+                GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, cached.tex)
+                if (b.width == config.width && b.height == config.height) GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, b)
+                else GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, b, 0)
+                cached.tex
+            }
+            g.cardTex[i] = CardTex(audio, version, tex)
+        } finally {
+            b.recycle()
+        }
+        g.cardUploadTick = g.tickIndex
+        return true
+    }
+
+    /** Render thread: has slot [i] drawn for ([audio], [version]) on [cardExecutor], once per state. */
+    private fun queueCardRaster(g: Gpu, i: Int, c: Slates.Card, layer: CardLayer, audio: SlateAudio, version: Int) {
+        if (g.cardQueuedAudio[i] == audio && g.cardQueuedVersion[i] == version) {
+            // Already queued for this state. Only a failed draw (out of memory, say) is queued again, a few times: a
+            // slot with a texture never misses, so it would otherwise show the old footer until the next change.
+            if (g.cardFailed.getAndSet(i, 0) == 0 || g.cardRetries[i] >= CARD_RETRIES) return
+            g.cardRetries[i]++
+        } else {
+            g.cardFailed.set(i, 0)
+            g.cardRetries[i] = 0
+        }
+        g.cardQueuedAudio[i] = audio
+        g.cardQueuedVersion[i] = version
+        val w = config.width
+        val h = config.height
+        val channel = config.channelLogin
+        try {
+            cardExecutor.execute {
+                try {
+                    val bmp = Slates.bitmap(w, h, c, channel, audio, style = Slates.style(c), layer = layer)
+                    g.cardReady.getAndSet(i, CardRaster(bmp, audio, version))?.bitmap?.recycle()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "card $c couldn't be drawn in the background; trying again", t)
+                    g.cardFailed.set(i, 1)
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            g.cardQueuedVersion[i] = -1 // stopping
+        }
+    }
+
+    /**
+     * Render thread, before the first tick: draws the cards most likely to cut in without warning (BRB and Camera lost)
+     * for the current audio state, so their first frame isn't a late one.
+     */
+    private fun warmCards(g: Gpu) {
+        for (c in WARM_CARDS) guarded("card warm-up", Unit) { card(g, c, CardLayer.FULL) }
+    }
+
+    /**
+     * Render thread, on ticks with no card on air: keeps the warmed cards current. A mute or style change queues a
+     * redraw in the background, and the result is uploaded on a later idle tick, so the card is right the moment it
+     * cuts in.
+     */
+    private fun rewarmCards(g: Gpu) {
+        val v = Slates.version
+        for (c in WARM_CARDS) {
+            val i = c.ordinal * CardLayer.entries.size + CardLayer.FULL.ordinal
+            val cached = g.cardTex[i] ?: continue
+            val audio = Slates.shownAudio(c, slateAudio)
+            if (cached.audio == audio && cached.version == v) continue
+            if (!takeReadyCard(g, i, audio, v)) queueCardRaster(g, i, c, CardLayer.FULL, audio, v)
+        }
     }
 
     /** The overlay texture: re-specified only on first use or a size change, else updated in place. */
@@ -854,7 +1274,7 @@ class Compositor(
     private fun retireBrowser(g: Gpu, b: BrowserSource) {
         runCatching { b.retire() }
         g.retiring += b
-        if (g.browser === b) { g.browser = null; browserRef = null }
+        if (g.browser === b) { g.browser = null; g.browserFor = null; browserRef = null }
     }
 
     /** Replaces a failed encoder off the render thread, retrying with backoff (250 ms up to 5 s) while streaming. */
@@ -927,6 +1347,9 @@ class Compositor(
             runCatching { b?.web?.browser?.release(wait = false) }
         }
         cardPageRef = null
+        cardExecutor.shutdownNow()
+        runCatching { cardExecutor.awaitTermination(1, TimeUnit.SECONDS) }
+        for (i in 0 until g.cardReady.length()) g.cardReady.getAndSet(i, null)?.bitmap?.recycle()
         val cardTextures = g.cardTex.filterNotNull().map { it.tex }.toIntArray()
         runCatching { if (cardTextures.isNotEmpty()) GLES30.glDeleteTextures(cardTextures.size, cardTextures, 0) }
         runCatching { g.layered?.release() }
@@ -938,6 +1361,9 @@ class Compositor(
         for (b in g.retiring) runCatching { b.release(wait = false) }
         browserRef = null
         pendingOverlay.getAndSet(null)?.bitmap?.recycle()
+        runCatching { g.browserStill?.release() }
+        runCatching { g.detail?.release() }
+        runCatching { g.downscaler?.release() }
         runCatching { g.main.release() }
         runCatching { g.previewFbo.release() }
         runCatching { egl.release() }
@@ -953,27 +1379,35 @@ class Compositor(
     private val cssW = if (portraitOut) 1080 else 1920
     private val cssH = if (portraitOut) 1920 else 1080
 
-    private companion object {
-        const val TAG = "Engine"
-        const val START_TIMEOUT_S = 5L
-        const val HOLD_NS = 500_000_000L
-        const val FLIP_HOLD_NS = 2_000_000_000L
-        const val STALL_MS = 1_500L
-        const val STARTUP_STALL_MS = 3_000L
-        const val PHONE_OPEN_AFTER_NS = 1_000_000_000L
-        const val PHONE_CLOSE_AFTER_NS = 10_000_000_000L
-        const val EXT_HOLD_NS = 3_000_000_000L
+    companion object {
+        /** How often [cadenceSnapshot] is refreshed (the session log snapshots every 5 s too). */
+        const val CADENCE_WINDOW_NS = 5_000_000_000L
+        private const val TAG = "Engine"
+        private const val START_TIMEOUT_S = 5L
+        private const val HOLD_NS = 500_000_000L
+        private const val FLIP_HOLD_NS = 2_000_000_000L
+        private const val STALL_MS = 1_500L
+        private const val STARTUP_STALL_MS = 3_000L
+        private const val PHONE_OPEN_AFTER_NS = SceneRules.PHONE_OPEN_AFTER_NS
+        private const val PHONE_CLOSE_AFTER_NS = 10_000_000_000L
+        private const val EXT_HOLD_NS = SceneRules.EXT_HOLD_NS
+        /** The external camera's usual frame interval (30 fps), for its gap counter. */
+        private const val EXT_NOMINAL_INTERVAL_NS = 33_333_333L
         /** Thermal rung 2+: overlay uploads (8 MB each at 1080p) at most this often; the newest bitmap waits. */
-        const val OVERLAY_HOT_INTERVAL_NS = 5_000_000_000L
+        private const val OVERLAY_HOT_INTERVAL_NS = 5_000_000_000L
         /** How long after a scene change overlay uploads skip the hot-phone throttle. */
-        const val SCENE_OVERLAY_GRACE_NS = 2_000_000_000L
+        private const val SCENE_OVERLAY_GRACE_NS = 2_000_000_000L
         /**
          * A card's GIF and page are kept this long after it was last drawn, so a card that blinks off and on (Camera
          * lost for a moment, a quick BRB) doesn't restart them, and let go after so they hold no memory off screen.
          */
-        const val BACKDROP_GRACE_NS = 1_000_000_000L
+        private const val BACKDROP_GRACE_NS = 1_000_000_000L
         /** GIFs (and, separately, card pages) open at once: the two cards of a crossfade. */
-        const val MAX_LIVE_BACKDROPS = 2
+        private const val MAX_LIVE_BACKDROPS = 2
+        /** Drawn before the first tick and kept current: the cards that can cut in at any moment. */
+        private val WARM_CARDS = arrayOf(Slates.Card.BRB, Slates.Card.CAMERA_LOST)
+        /** A failed background card draw is retried this many times per state, then left until the state changes. */
+        private const val CARD_RETRIES = 2
     }
 }
 
@@ -1084,6 +1518,27 @@ internal object SceneRules {
         if (from == to || thermalRung >= 2) return false
         if (from?.family == Slates.Family.AUTOMATIC || to?.family == Slates.Family.AUTOMATIC) return false
         return to != Slates.Card.PRIVACY
+    }
+
+    /** The external camera's last frame is held this long at most before the phone camera or a card takes over. */
+    const val EXT_HOLD_NS = 3_000_000_000L
+    /** Silence from the external camera before the phone camera may take over (and is opened). */
+    const val PHONE_OPEN_AFTER_NS = 1_000_000_000L
+    /** After the external camera's clock anchors, its last frame is held (not the phone camera shown) this long. */
+    const val ANCHOR_HOLD_NS = 2_000_000_000L
+
+    /**
+     * Whether the external camera's last frame (from [lastFrameNs], 0 if none) stays on screen at [nowNs] rather than
+     * the phone camera: while more of its frames are on the way ([queuedFrames] waiting for the decoder), just after
+     * its clock anchored at [anchoredAtNs] (a planned delay step: ~0.6 s with no new frame), or for
+     * [PHONE_OPEN_AFTER_NS] of plain silence; never past [EXT_HOLD_NS]. That stops the phone camera flashing up at
+     * every reconnect's anchoring.
+     */
+    fun holdExternal(nowNs: Long, lastFrameNs: Long, queuedFrames: Int, anchoredAtNs: Long): Boolean {
+        if (lastFrameNs == 0L) return false
+        val quiet = nowNs - lastFrameNs
+        if (quiet > EXT_HOLD_NS) return false
+        return quiet <= PHONE_OPEN_AFTER_NS || queuedFrames > 0 || anchoredAtNs != 0L && nowNs - anchoredAtNs <= ANCHOR_HOLD_NS
     }
 
     /**

@@ -15,15 +15,20 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.opengl.GLES11Ext
 import android.opengl.GLES30
 import android.opengl.Matrix
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
+import android.util.Size
 import android.view.Surface
 import app.irlsupreme.engine.CameraPhase
 import app.irlsupreme.engine.Facing
@@ -32,7 +37,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.LockSupport
 
 private const val TAG = "Engine"
 
@@ -42,39 +46,6 @@ private const val TAG = "Engine"
  * session is LIVE the old camera can't be producing any more, so frames are the new camera's.
  */
 internal fun cameraFrameUsable(switching: Boolean, phase: CameraPhase): Boolean = !switching || phase == CameraPhase.LIVE
-
-/**
- * Fixed-rate clock on System.nanoTime() (CLOCK_MONOTONIC). Not Choreographer/vsync, so it keeps ticking with the
- * screen off. If the render thread falls more than a period behind, ticks are skipped so output timestamps
- * show the real gap instead of bunching up.
- */
-class FrameClock(fps: Int) {
-    val periodNs = 1_000_000_000L / fps
-    private val t0 = System.nanoTime()
-    var tick = 0L
-        private set
-
-    fun tickTimeNs(): Long = t0 + tick * periodNs
-
-    /** Sleeps until the current tick; returns how many ticks were skipped because we were late. */
-    fun awaitTick(): Long {
-        val target = tickTimeNs()
-        while (true) {
-            val now = System.nanoTime()
-            if (now >= target) break
-            LockSupport.parkNanos(target - now)
-        }
-        val late = System.nanoTime() - target
-        if (late > periodNs) {
-            val skipped = late / periodNs
-            tick += skipped
-            return skipped
-        }
-        return 0
-    }
-
-    fun advance() { tick++ }
-}
 
 /**
  * Camera2 phone camera (back or front) -> SurfaceTexture (OES). Camera callbacks run on their own thread; the render
@@ -91,6 +62,11 @@ class FrameClock(fps: Int) {
  * Every open and close bumps a generation number on the camera thread. A callback from an older generation (a camera
  * that finished opening after it was closed, flipped or restarted) closes its device and does nothing else, so the
  * camera can never end up running when nobody wants it (Pocket mode closes it to save heat and battery).
+ *
+ * Timing: each latched frame feeds [cadence] (repeats, gaps, how long frames wait) and, from its capture timestamp
+ * converted to the System.nanoTime clock, [cameraLatencyNs]: how far the picture lags the sound. Stabilisation is
+ * chosen once ([StabilizationMode]) and never changed by the thermal ladder; the ladder may lower the frame rate
+ * instead ([setFrameRateCap]).
  */
 class CameraSource(
     private val ctx: Context,
@@ -98,6 +74,7 @@ class CameraSource(
     private val height: Int,
     private val fps: Int,
     initialFacing: Facing = Facing.BACK,
+    stabilization: StabilizationMode = StabilizationMode.STANDARD,
 ) {
     private val thread = HandlerThread("engine-camera").apply { start() }
     private val handler = Handler(thread.looper)
@@ -106,6 +83,20 @@ class CameraSource(
     private val st = SurfaceTexture(texture).apply { setDefaultBufferSize(maxOf(width, height), minOf(width, height)) }
     private val surface = Surface(st)
     private val frameAvailable = AtomicBoolean(false)
+    /** Frame timing, for the session log (see [CadenceMeter]). */
+    val cadence = CadenceMeter(1_000_000_000L / fps)
+    /** Capture-to-tick latency of latched frames. Written on the render thread. */
+    private val latency = CameraLatencyEstimator()
+    /** The clock this camera says its timestamps are on: set at each open (camera thread), read on the render thread. */
+    @Volatile private var timeBase = CaptureTimeBase.UNKNOWN
+    /** Render thread: which clock the timestamps are really on, checked against the frames ([TimeBaseVote]). */
+    private val timeVote = TimeBaseVote()
+    private var unresolvedFrames = 0
+    /** Render thread: elapsedRealtimeNanos - nanoTime, for reading boot-clock timestamps, and when it was sampled. */
+    private var bootMinusMonoNs = 0L
+    private var bootSampledAtNs = 0L
+    /** Set when the camera pipeline changed (open, flip, stabilisation): the render thread starts measuring afresh. */
+    @Volatile private var measureAfresh = true
     private val stMatrix = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
     /** Upright + centre-crop transform; replaced whole (never mutated) so the render thread never sees half of one. */
     @Volatile private var transform = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
@@ -131,10 +122,18 @@ class CameraSource(
     private val retry = Runnable { openNow() }
     private var wantedFacing = initialFacing
     private var fpsRange: Range<Int>? = null
-    /** Stabilisation modes this camera lists; ON is only asked for when it's one of them. */
-    private var eisSupported = false
-    /** The thermal ladder turns stabilisation off at its second rung ([setStabilizationAllowed]). */
-    private var eisAllowed = true
+    /** This camera's fixed [n, n] AE ranges, for the thermal step-down ([setFrameRateCap]). */
+    private var exactRanges: List<Range<Int>> = emptyList()
+    /** The thermal ladder's lower rate (0: none), applied when this camera offers it exactly. */
+    private var fpsCap = 0
+    private var wantedStabilization = stabilization
+    /** Stabilisation modes this camera lists (CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES). */
+    private var stabListed: Set<Int> = emptySet()
+    /** The mode asked for: [wantedStabilization] as far as this camera lists it, stepped down if it was refused. */
+    private var stabMode = CameraPolicy.VIDEO_STAB_OFF
+    private var oisListed = false
+    /** The AE range is a session parameter on this camera (set at configure time above 30 fps). */
+    private var aeRangeIsSessionKey = false
     private var zoomRange: Range<Float>? = null
     private var zoom = 1f
 
@@ -154,9 +153,69 @@ class CameraSource(
     /** System.nanoTime of the last flip, until the new camera's first frame arrives (0 otherwise). */
     @Volatile var switchingSinceNs = 0L
         private set
+    /** The rate the camera runs at uncapped: [fps], or 30 if it can't hold [fps] exactly (known once it has opened). */
+    @Volatile var cameraFps = fps
+        private set
+    /** The fixed lower rate this camera offers for the thermal step-down (0: none); known once it has opened. */
+    @Volatile var reducedFpsOffered = 0
+        private set
+    /** The capped rate the camera is actually running at now (0: its normal rate). */
+    @Volatile var fpsCapInUse = 0
+        private set
+    /** The stabilisation mode asked of the camera now (Camera2 value; see [captureStats] for what it reports doing). */
+    @Volatile var stabilizationRequested = CameraPolicy.VIDEO_STAB_OFF
+        private set
+
+    /** Median capture-to-tick latency (ns) of the phone camera's frames; null until measured or if unknowable. */
+    val cameraLatencyNs: Long? get() = latency.medianNs
+    val cameraLatencyP95Ns: Long? get() = latency.p95Ns
+
+    // What the camera reports doing, sampled about once a second from its capture results (camera thread writes).
+    @Volatile private var resultStab = -1
+    @Volatile private var resultOis = -1
+    @Volatile private var sensorFps = 0f
+    @Volatile private var exposureNs = 0L
+
+    /** What the camera last reported doing (null before its first report). */
+    val captureStats: CaptureStats?
+        get() = if (resultStab < 0 && sensorFps == 0f) null else CaptureStats(resultStab, resultOis, sensorFps, exposureNs)
+
+    /**
+     * Samples the capture results about once a second, storing only numbers: the stabilisation modes the camera says
+     * it applied (so a field log shows whether EIS really runs on this phone's stream), the actual sensor rate (from
+     * the frame numbers and SENSOR_TIMESTAMP between samples: catches auto-exposure slowing down in the dark) and the
+     * exposure time.
+     */
+    private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+        private var lastSampleNs = 0L
+        private var lastSensorTs = 0L
+        private var lastFrameNumber = 0L
+        private var loggedStab = Int.MIN_VALUE
+
+        override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            val now = System.nanoTime()
+            if (now - lastSampleNs < CAPTURE_SAMPLE_NS) return
+            lastSampleNs = now
+            val n = result.frameNumber
+            val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L
+            if (lastSensorTs != 0L && n > lastFrameNumber && ts > lastSensorTs) {
+                sensorFps = (n - lastFrameNumber) * 1e9f / (ts - lastSensorTs)
+            }
+            lastSensorTs = ts
+            lastFrameNumber = n
+            val stab = result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE) ?: -1
+            resultOis = result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE) ?: -1
+            exposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+            resultStab = stab
+            if (stab != loggedStab) {
+                loggedStab = stab
+                Log.i(TAG, "phone camera ($facing) reports stabilisation $stab (asked $stabMode), OIS $resultOis, ~${"%.1f".format(sensorFps)} fps")
+            }
+        }
+    }
 
     init {
-        st.setOnFrameAvailableListener({ frameAvailable.set(true) }, handler)
+        st.setOnFrameAvailableListener({ cadence.onArrival(System.nanoTime()); frameAvailable.set(true) }, handler)
         updateTransform("start")
     }
 
@@ -168,12 +227,22 @@ class CameraSource(
      * touching the matrices or [lastFrameNs], so the picture already on screen holds under the flip hold.
      */
     fun update(nowNs: Long): Boolean {
+        if (measureAfresh) {
+            measureAfresh = false
+            latency.reset()
+            timeVote.reset(timeBase)
+            unresolvedFrames = 0
+            cadence.restartRun()
+        }
         if (!frameAvailable.getAndSet(false)) return false
         st.updateTexImage()
         if (!cameraFrameUsable(switchingSinceNs != 0L, phase)) return false
         st.getTransformMatrix(stMatrix)
         Matrix.multiplyMM(texMatrix, 0, stMatrix, 0, transform, 0)
         Matrix.multiplyMM(previewTexMatrix, 0, stMatrix, 0, previewTransform, 0)
+        val sensorTs = st.timestamp
+        cadence.onLatch(nowNs, sensorTs, cadence.lastArrivalNs)
+        recordLatency(nowNs, sensorTs)
         lastFrameNs = nowNs
         switchingSinceNs = 0L
         dumpPending?.let { why ->
@@ -182,6 +251,26 @@ class CameraSource(
             handler.post { writeDebug(why, m) }
         }
         return true
+    }
+
+    /** Render thread: one latched frame's capture-to-tick latency, once this camera's clock is known. */
+    private fun recordLatency(nowNs: Long, sensorTs: Long) {
+        if (bootSampledAtNs == 0L || nowNs - bootSampledAtNs > BOOT_RESAMPLE_NS) {
+            bootMinusMonoNs = CaptureClock.bootMinusMono(mono = { System.nanoTime() }, boot = { SystemClock.elapsedRealtimeNanos() })
+            bootSampledAtNs = nowNs
+        }
+        // Plain longs here (not CaptureClock.toMonotonicNs's Long?), so a latched frame allocates nothing.
+        val captureNs = when (timeVote.observe(sensorTs, nowNs, bootMinusMonoNs)) {
+            CaptureTimeBase.MONOTONIC -> sensorTs
+            CaptureTimeBase.REALTIME -> sensorTs - bootMinusMonoNs
+            else -> {
+                // Not known (yet). A camera whose frames never settle it doesn't keep the last camera's value for good.
+                if (++unresolvedFrames > UNRESOLVED_CLEAR_FRAMES && latency.hasValue) latency.clear()
+                return
+            }
+        }
+        unresolvedFrames = 0
+        latency.record(nowNs, nowNs - captureNs)
     }
 
     /** Degrees the live screen is rotated (Surface.ROTATION_* x 90); call on every change, including 180° flips. */
@@ -244,6 +333,7 @@ class CameraSource(
             zoomRatio = 1f
             if (!wanted) { facing = f; return@post } // closed (Pocket mode): opens on this side next time
             switchingSinceNs = System.nanoTime()
+            measureAfresh = true
             closeNow()
             retryDelayMs = 500
             openNow()
@@ -258,14 +348,35 @@ class CameraSource(
         }
     }
 
-    /** The thermal ladder's second rung turns video stabilisation off (it costs heat); back on when it cools. */
-    fun setStabilizationAllowed(allowed: Boolean) {
+    /**
+     * The stabilisation mode. Meant to be set before the stream (it changes the crop, so changing it mid-shot jumps
+     * the picture); the latency measurement starts afresh after a change.
+     */
+    fun setStabilization(mode: StabilizationMode) {
         handler.post {
-            if (eisAllowed == allowed) return@post
-            eisAllowed = allowed
-            if (eisSupported) applyRequest(if (allowed) "stabilisation back on" else "stabilisation off (heat)")
+            if (wantedStabilization == mode) return@post
+            wantedStabilization = mode
+            stabMode = CameraPolicy.videoStabilization(mode, stabListed, Build.VERSION.SDK_INT)
+            measureAfresh = true
+            applyRequest("stabilisation $mode")
         }
     }
+
+    /**
+     * The thermal ladder's lower frame rate: [capFps] (0 for none) is used only if this camera offers exactly
+     * [capFps, capFps]; [fpsCapInUse] says once it has taken effect. Stabilisation is left as it is.
+     */
+    fun setFrameRateCap(capFps: Int) {
+        handler.post {
+            if (fpsCap == capFps) return@post
+            fpsCap = capFps
+            if (session == null) return@post // applied when the camera next opens
+            applyRequest(if (capFps > 0) "frame rate $capFps (heat)" else "frame rate back to normal")
+        }
+    }
+
+    /** Camera thread: the [n, n] range for the thermal cap, or null when uncapped or not offered. */
+    private fun cappedRange(): Range<Int>? = if (fpsCap <= 0) null else exactRanges.firstOrNull { it.lower == fpsCap }
 
     @SuppressLint("MissingPermission") // the app only starts the engine after CAMERA is granted
     private fun openNow() {
@@ -283,19 +394,37 @@ class CameraSource(
             if (facing != wantedFacing) Log.w(TAG, "no $wantedFacing camera; using the $facing one")
             sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             // Ask for a size the camera really produces (an unsupported one is rounded to who-knows-what aspect).
-            val offered = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                ?.getOutputSizes(SurfaceTexture::class.java)?.map { it.width to it.height }.orEmpty()
-            val (w, h) = CameraGeometry.chooseBufferSize(offered, width, height)
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val offered = map?.getOutputSizes(SurfaceTexture::class.java)?.map { it.width to it.height }.orEmpty()
+            // Above 30 fps, sizes the camera can't produce that fast are left out.
+            val (w, h) = if (map == null || fps <= 30) CameraGeometry.chooseBufferSize(offered, width, height)
+            else CameraGeometry.chooseBufferSize(offered, width, height, fps) { sz ->
+                runCatching { map.getOutputMinFrameDuration(SurfaceTexture::class.java, Size(sz.first, sz.second)) }.getOrDefault(0L)
+            }
             bufW = w; bufH = h
             st.setDefaultBufferSize(w, h)
             updateTransform("camera opened")
             val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
-            fpsRange = ranges.firstOrNull { it.lower == fps && it.upper == fps }
-                ?: ranges.filter { it.upper == fps }.maxByOrNull { it.lower }
-            // Forcing ON where it isn't listed costs heat and crop on mid-tier phones, and a HAL that rejects it sends
-            // the camera into its retry loop.
-            eisSupported = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-                ?.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true
+            val pairs = ranges.map { it.lower to it.upper }
+            val chosen = CameraPolicy.aeRange(pairs, fps) ?: CameraPolicy.aeRange(pairs, CameraPolicy.fpsFallback(pairs, fps))
+            fpsRange = chosen?.let { c -> ranges.first { it.lower == c.first && it.upper == c.second } }
+            cameraFps = chosen?.second ?: fps
+            if (cameraFps != fps) Log.w(TAG, "phone camera can't hold $fps fps exactly; running it at $cameraFps")
+            exactRanges = ranges.filter { it.lower == it.upper }
+            reducedFpsOffered = ThermalCadence.reducedCameraFps(cameraFps, CameraPolicy.exactRates(pairs))
+            stabListed = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)?.toSet().orEmpty()
+            stabMode = CameraPolicy.videoStabilization(wantedStabilization, stabListed, Build.VERSION.SDK_INT)
+            oisListed = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+            aeRangeIsSessionKey = chars.availableSessionKeys?.contains(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE) == true
+            // The camera says which clock its timestamps use; "unknown" is worked out from the frames (TimeBaseVote).
+            // The output keeps the default timestamp base on purpose: see CaptureTimeBase.
+            timeBase = when {
+                chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) == CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME ->
+                    CaptureTimeBase.REALTIME
+                else -> CaptureTimeBase.UNKNOWN
+            }
+            measureAfresh = true
             zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
             phase = CameraPhase.OPENING
             val gen = ++generation
@@ -329,8 +458,9 @@ class CameraSource(
     }
 
     private fun startSession(d: CameraDevice, gen: Int) {
+        val output = OutputConfiguration(surface)
         val cfg = SessionConfiguration(
-            SessionConfiguration.SESSION_REGULAR, listOf(OutputConfiguration(surface)), executor,
+            SessionConfiguration.SESSION_REGULAR, listOf(output), executor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
                     if (gen != generation || !wanted || device !== d) {
@@ -339,7 +469,7 @@ class CameraSource(
                     }
                     session = s
                     try {
-                        s.setRepeatingRequest(buildRequest(d), null, handler)
+                        startRepeating(d, s, "start")
                         phase = CameraPhase.LIVE
                         retryDelayMs = 500
                     } catch (e: Exception) {
@@ -349,6 +479,14 @@ class CameraSource(
                 override fun onConfigureFailed(s: CameraCaptureSession) = lost(d, gen, "configure failed")
             },
         )
+        // Above 30 fps the AE range is also a session parameter where the camera takes it as one, so the HAL can
+        // set up for the high rate at configure time instead of reconfiguring on the first request.
+        val range = fpsRange
+        if (cameraFps > 30 && aeRangeIsSessionKey && range != null) runCatching {
+            cfg.sessionParameters = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+            }.build()
+        }
         try {
             d.createCaptureSession(cfg)
         } catch (e: Exception) {
@@ -359,24 +497,43 @@ class CameraSource(
     /** Camera thread: the repeating request for the current fps, stabilisation and zoom. */
     private fun buildRequest(d: CameraDevice): CaptureRequest = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
         addTarget(surface)
-        fpsRange?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
-        val eis = eisSupported && eisAllowed
-        set(
-            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-            if (eis) CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON else CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
-        )
+        (cappedRange() ?: fpsRange)?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+        set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, stabMode)
+        // Most RECORD templates already turn optical stabilisation on; say so where the lens has it.
+        if (oisListed) set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
         val range = zoomRange
         val z = if (range == null) 1f else zoom.coerceIn(range.lower, range.upper)
         if (range != null) set(CaptureRequest.CONTROL_ZOOM_RATIO, z)
         zoomRatio = z
     }.build()
 
+    /**
+     * Camera thread: issues the repeating request. If the camera refuses it as invalid while stabilisation is on, the
+     * mode steps down (PREVIEW, then ON, then OFF) and it tries again, rather than going round the reopen loop.
+     * Throws whatever the plainest request still threw.
+     */
+    private fun startRepeating(d: CameraDevice, s: CameraCaptureSession, why: String) {
+        while (true) {
+            try {
+                s.setRepeatingRequest(buildRequest(d), captureCallback, handler)
+                fpsCapInUse = if (cappedRange() != null) fpsCap else 0
+                stabilizationRequested = stabMode
+                return
+            } catch (e: IllegalArgumentException) {
+                if (stabMode == CameraPolicy.VIDEO_STAB_OFF) throw e
+                val next = CameraPolicy.stepDown(stabMode, stabListed)
+                Log.w(TAG, "camera refused stabilisation mode $stabMode ($why); trying $next", e)
+                stabMode = next
+            }
+        }
+    }
+
     /** Camera thread: re-issues the repeating request after a setting changed (no-op while the camera isn't up). */
     private fun applyRequest(why: String) {
         val d = device ?: return
         val s = session ?: return
         try {
-            s.setRepeatingRequest(buildRequest(d), null, handler)
+            startRepeating(d, s, why)
         } catch (e: Exception) {
             Log.w(TAG, "camera request ($why) failed", e)
         }
@@ -408,6 +565,7 @@ class CameraSource(
         runCatching { device?.close() }
         session = null; device = null
         phase = CameraPhase.OFF
+        fpsCapInUse = 0
     }
 
     fun close() {
@@ -430,8 +588,20 @@ class CameraSource(
 
     private companion object {
         const val OPEN_TIMEOUT_MS = 5_000L
+        /** Capture results are sampled this often. */
+        const val CAPTURE_SAMPLE_NS = 1_000_000_000L
+        /** The boot-minus-monotonic offset is re-read this often (it grows whenever the phone sleeps). */
+        const val BOOT_RESAMPLE_NS = 5_000_000_000L
+        /** Latched frames (about 4 s) with the camera's clock still unknown before a held latency is withdrawn. */
+        const val UNRESOLVED_CLEAR_FRAMES = 120
     }
 }
+
+/**
+ * What the phone camera reported doing at its last sample: the stabilisation modes it applied (Camera2 values, -1
+ * if it didn't say), the sensor's real frame rate and the exposure time.
+ */
+data class CaptureStats(val videoStabilizationMode: Int, val opticalStabilizationMode: Int, val sensorFps: Float, val exposureNs: Long)
 
 
 /** What a scene card's footer says about the stream's sound, drawn as the state really is. */

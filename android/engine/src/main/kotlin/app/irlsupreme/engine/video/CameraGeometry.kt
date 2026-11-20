@@ -72,6 +72,23 @@ object CameraGeometry {
     }
 
     /**
+     * [chooseBufferSize] for a [fps] stream: sizes the camera can't produce that fast (their minimum frame duration,
+     * [minFrameNs], is over a frame period) are left out, so 60 fps never picks a size capped at 30. If that leaves
+     * nothing, the choice is made from every size (the camera then runs slower, which beats no picture).
+     */
+    fun chooseBufferSize(
+        offered: List<Pair<Int, Int>>,
+        outW: Int,
+        outH: Int,
+        fps: Int,
+        minFrameNs: (Pair<Int, Int>) -> Long,
+    ): Pair<Int, Int> {
+        val periodNs = 1_000_000_000L / fps
+        val fastEnough = offered.filter { minFrameNs(it) <= periodNs }
+        return chooseBufferSize(fastEnough.ifEmpty { offered }, outW, outH)
+    }
+
+    /**
      * Texture-coordinate transform (column-major 4x4) applied BEFORE the SurfaceTexture's own matrix: it samples a
      * [srcW]x[srcH] source rotated [rotation] degrees clockwise and centre-cropped to fill an [outW]x[outH] output.
      * Output UV -> scale about the centre (crop) -> rotate about the centre -> [mirror] (front camera: undo the
