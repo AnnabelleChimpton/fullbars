@@ -24,7 +24,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +56,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.irlsupreme.engine.audio.MicDsp
 import app.irlsupreme.engine.audio.MicLevel
 import app.irlsupreme.engine.audio.PcmClip
+import app.irlsupreme.engine.audio.unprocessedSupported
+import app.irlsupreme.service.MicSettings
 import app.irlsupreme.service.SoundPlayer
 import app.irlsupreme.service.gainText
 import app.irlsupreme.ui.theme.FbHaptics
@@ -483,6 +487,117 @@ internal fun ClampNotice(
     }
 }
 
+// --- Clipping before Fullbars (pure) ----------------------------------------------------------------------------------
+
+/**
+ * Notices the voice arriving already clipped, before Fullbars' gain ([MicLevel.inClipped]): over the last
+ * [ClampWatch.WINDOW_S] seconds, with at least [MIN_VOICE_S] of them having a voice in, [SHARE] or more of the voiced
+ * readings (and at least [MIN_CLIPPED]) had clipped samples. A single clipped shout isn't worth a notice; clipping on every few words is: the
+ * phone's own processing (or the camera's mic) is distorting the voice, and no level here can undo it. The verdict
+ * holds for [HOLD_MS]. Pure, fed with times, for tests.
+ *
+ * Kept apart from [ClampWatch] on purpose: that one reads the limiter, which never sees this (the clipped audio can
+ * arrive well under full scale after the phone's own gain), and its fix, turning down, can't help here.
+ */
+internal class InputClipWatch {
+    private val second = LongArray(ClampWatch.WINDOW_S) { Long.MIN_VALUE }
+    private val voiced = IntArray(ClampWatch.WINDOW_S)
+    private val clipped = IntArray(ClampWatch.WINDOW_S)
+    private var holdUntilMs = Long.MIN_VALUE
+
+    fun update(level: MicLevel, nowMs: Long): Boolean {
+        val w = ClampWatch.WINDOW_S
+        val sec = Math.floorDiv(nowMs, 1000L)
+        val i = Math.floorMod(sec, w.toLong()).toInt()
+        if (second[i] != sec) { second[i] = sec; voiced[i] = 0; clipped[i] = 0 }
+        // A voice is there if the output says so, or the input peaks high (a clipped input turned well down).
+        if (level.rmsDb > ClampWatch.VOICE_DB || level.inPeakDb > VOICED_IN_PEAK_DB) {
+            voiced[i]++
+            if (level.inClipped > 0) clipped[i]++
+        }
+        var v = 0
+        var c = 0
+        var voicedSeconds = 0
+        for (k in 0 until w) {
+            if (second[k] <= sec - w || second[k] > sec) continue
+            v += voiced[k]
+            c += clipped[k]
+            if (voiced[k] > 0) voicedSeconds++
+        }
+        if (voicedSeconds >= MIN_VOICE_S && c >= MIN_CLIPPED && c >= SHARE * v) holdUntilMs = nowMs + HOLD_MS
+        return nowMs <= holdUntilMs
+    }
+
+    companion object {
+        const val MIN_VOICE_S = 3
+        const val SHARE = 0.01f
+        /** At least this many clipped readings, so one shout at the start of the window doesn't make 1% on its own. */
+        const val MIN_CLIPPED = 3
+        const val HOLD_MS = 8_000L
+        const val VOICED_IN_PEAK_DB = -20f
+    }
+}
+
+/** What to say and offer when the voice arrives clipped. Never "turn down": it can't help. */
+internal data class InputClipAdvice(val text: String, val offerAutoLevelOff: Boolean)
+
+/**
+ * The advice for [source] with the phone's auto level off ([raw]) or on, on a phone that has ([unprocessedOk]) a truly
+ * unprocessed mic source. Turning auto level off is offered only where that source exists: elsewhere "raw" falls back
+ * to sources that may still process the voice, and it might not help.
+ */
+internal fun inputClipAdvice(source: VoiceSource, raw: Boolean, unprocessedOk: Boolean): InputClipAdvice {
+    val why = "so turning the level down here won't fix it."
+    return when {
+        source == VoiceSource.CAMERA -> InputClipAdvice(
+            "The camera's audio is clipping before it reaches Fullbars, $why Turn the mic level down on the camera, or on your DJI Mic.",
+            offerAutoLevelOff = false,
+        )
+        !raw && unprocessedOk -> InputClipAdvice(
+            "Your phone's mic is clipping before Fullbars, $why Turn the phone's auto level off: it's what pushes the mic this hard.",
+            offerAutoLevelOff = true,
+        )
+        !raw -> InputClipAdvice(
+            "Your phone's mic is clipping before Fullbars, $why Hold the phone a little further from your mouth or the noise.",
+            offerAutoLevelOff = false,
+        )
+        else -> InputClipAdvice(
+            "The mic itself is overloading, $why Hold it a little further from your mouth, or out of the wind.",
+            offerAutoLevelOff = false,
+        )
+    }
+}
+
+/**
+ * Says so when the voice keeps arriving clipped, with the fix as a button where there is one. With the phone's auto
+ * level on, the offer to turn it off is made once: "Not now" puts it away for good (the setting is never changed
+ * without asking). Starts afresh when the source or the auto level changes.
+ */
+@Composable
+internal fun InputClipNotice(level: MicLevel, source: VoiceSource, raw: Boolean, onRaw: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    val unprocessedOk = remember { unprocessedSupported(ctx) }
+    var dismissed by remember { mutableStateOf(MicSettings.inputClipPromptDismissed(ctx)) }
+    val watch = remember(source, raw) { InputClipWatch() }
+    val clipping = remember(watch, level) { watch.update(level, System.currentTimeMillis()) }
+    val advice = inputClipAdvice(source, raw, unprocessedOk)
+    if (!clipping || (advice.offerAutoLevelOff && dismissed)) return
+    val c = LocalFbColors.current
+    Column(modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        Text(
+            "Your mic is clipping", style = FbType.row, color = c.text,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+        )
+        Text(advice.text, style = FbType.help, color = c.text2, modifier = Modifier.padding(top = 2.dp))
+        if (advice.offerAutoLevelOff) {
+            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                FbButton("Turn auto level off", { onRaw(true) }, kind = FbButtonKind.Secondary)
+                FbButton("Not now", { MicSettings.dismissInputClipPrompt(ctx); dismissed = true }, kind = FbButtonKind.Text)
+            }
+        }
+    }
+}
+
 // --- Playing a recording back ------------------------------------------------------------------------------------------
 
 /** A player for this screen: stops when the app goes to the background or the screen leaves, so nothing plays on. */
@@ -547,6 +662,7 @@ internal fun MicPanel(
 ) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         MicMeter(level, muted)
+        InputClipNotice(level, source, raw, onRaw)
         ClampNotice(level, source, raw, gainDb, onGain, onRaw)
         MicFader(gainDb, onGain)
         AutoLevelRow(raw, onRaw)

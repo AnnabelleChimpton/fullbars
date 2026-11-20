@@ -27,8 +27,8 @@ class ChunkClockTest {
         val start = 20L * 60 * rate // 20 minutes of frames without a good timestamp
         val now = 5_000_000_000_000L
         assertEquals(now - chunkNs, c.fallback(now, start))
-        // Later failures stay evenly spaced on that anchor, whatever the read time.
-        assertTrue(abs(c.fallback(now + 123, start + chunkFrames) - now) < 1_000)
+        // Later failures stay evenly spaced on that anchor, whatever small wobble the read time has.
+        assertTrue(abs(c.fallback(now + chunkNs + 123, start + chunkFrames) - now) < 1_000)
     }
 
     @Test fun `a failure on the first chunk dates it one chunk before the read, as before`() {
@@ -41,5 +41,39 @@ class ChunkClockTest {
         c.fromTimestamp(1_000_000_000L, 0, 0)
         c.reset()
         assertEquals(9_000_000_000L - chunkNs, c.fallback(9_000_000_000L, 0))
+    }
+
+    @Test fun `a long run of failures follows the read times instead of free-running`() {
+        // The mic's clock runs 200 ppm slow against the monotonic clock: reads land later and later than the nominal
+        // rate says. The fallback must follow them, not drift away by the clock error.
+        val c = ChunkClock(rate, chunkNs)
+        val t0 = 1_000_000_000_000L
+        var out = 0L
+        var read = 0L
+        for (n in 0 until 30_000) { // ~10 minutes
+            read = t0 + ((n + 1) * chunkNs * 1.0002).toLong()
+            out = c.fallback(read, n * chunkFrames)
+        }
+        assertTrue("off by ${read - chunkNs - out} ns", abs(read - chunkNs - out) < 2_000_000)
+        assertEquals(30_000L, c.fallbackChunks)
+    }
+
+    @Test fun `timestamps coming back after fallback ease in rather than stepping`() {
+        val c = ChunkClock(rate, chunkNs)
+        val open = 2_000_000_000L
+        val latency = 30_000_000L // reads land 30 ms after the audio was captured
+        var prev = Long.MIN_VALUE
+        var worst = 0L
+        var last = 0L
+        for (n in 0 until 400) {
+            val start = n * chunkFrames
+            val truth = open + framesNs(start)
+            val t = if (n < 100) c.fallback(truth + chunkNs + latency, start) else c.fromTimestamp(truth - framesNs(240), start - 240, start)
+            if (prev != Long.MIN_VALUE) worst = maxOf(worst, abs(t - prev - chunkNs))
+            prev = t
+            last = t - truth
+        }
+        assertTrue("spacing off by $worst ns", worst <= 1_000_000)
+        assertTrue("still ${last} ns off the real timeline", abs(last) < 1_000_000)
     }
 }

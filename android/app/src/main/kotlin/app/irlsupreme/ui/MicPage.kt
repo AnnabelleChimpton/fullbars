@@ -6,11 +6,13 @@ import android.content.pm.PackageManager
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -31,9 +33,16 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import app.irlsupreme.engine.audio.InputChoice
+import app.irlsupreme.engine.audio.InputClass
+import app.irlsupreme.engine.audio.LowCut
+import app.irlsupreme.engine.audio.MicAvailability
 import app.irlsupreme.engine.audio.MicCheck
 import app.irlsupreme.engine.audio.PcmClip
+import app.irlsupreme.engine.audio.externalInputs
 import app.irlsupreme.service.MicSettings
+import app.irlsupreme.service.STREAM_USES_MIC_OPTIONS
+import app.irlsupreme.service.lowCutText
 import app.irlsupreme.service.SoundPlayer
 import app.irlsupreme.ui.theme.FbType
 import app.irlsupreme.ui.theme.LocalFbColors
@@ -72,9 +81,16 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
     var take by remember { mutableStateOf<PcmClip?>(null) }
     var noTake by remember { mutableStateOf(false) }
 
+    // The options a stream doesn't use yet stay hidden, and the check runs without them, as a stream does.
+    val options = STREAM_USES_MIC_OPTIONS
     LaunchedEffect(prefs) {
         check.gainDb = prefs.gainDb.toFloat()
         check.rawGainDb = prefs.rawGainDb.toFloat()
+        check.externalGainDb = if (options) prefs.externalGainDb.toFloat() else null
+        check.inputChoice = if (options) prefs.input else InputChoice.AUTO
+        check.lowCut = if (options) prefs.lowCut else LowCut.AUTO
+        check.voiceLeveler = options && prefs.voiceLeveler
+        check.monoVoice = options && prefs.monoVoice
         check.raw = prefs.raw
     }
     DisposableEffect(allowed, lifecycle) {
@@ -107,7 +123,14 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
         view.announceForAccessibility(if (clip != null) "Recorded. Play it back to hear yourself." else "Nothing was recorded.")
     }
     val level by check.level.collectAsState()
-    val unavailable by check.unavailable.collectAsState()
+    val availability by check.availability.collectAsState()
+    // No mic, or Android feeding it silence because another app (a call, the assistant) has it: either way the
+    // check can't hear you, and a recording would be silence.
+    val unavailable = availability != MicAvailability.OK
+    val input by check.input.collectAsState()
+    val external = options && input?.inputClass == InputClass.EXTERNAL
+    // Re-listed when the mic in use changes (plugging one in moves the recording to it).
+    val plugged = remember(input, allowed) { if (options) externalInputs(ctx) else emptyList() }
 
     SectionHeader("Check your level", top = 8.dp)
     if (!allowed) {
@@ -119,17 +142,63 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
         MicMeter(level, muted = false)
         if (unavailable) InlineError("Another app is using the mic. Close it to check your level.", modifier = Modifier.padding(top = 8.dp))
         // The mic check is always the phone's own mic: a camera's audio only joins a running stream.
+        InputClipNotice(level, VoiceSource.PHONE, prefs.raw, onRaw = { MicSettings.setRaw(ctx, it) }, modifier = Modifier.padding(top = 16.dp))
         ClampNotice(
-            level, VoiceSource.PHONE, prefs.raw, prefs.activeGainDb,
-            onGain = { MicSettings.setGain(ctx, it) }, onRaw = { MicSettings.setRaw(ctx, it) },
+            level, VoiceSource.PHONE, prefs.raw, prefs.gainFor(external),
+            onGain = { MicSettings.setGain(ctx, it, external) }, onRaw = { MicSettings.setRaw(ctx, it) },
             modifier = Modifier.padding(top = 16.dp),
         )
     }
 
-    SectionHeader("Level")
-    MicFader(prefs.activeGainDb, { MicSettings.setGain(ctx, it) })
+    SectionHeader("Level", trailing = if (external) input?.name else null)
+    MicFader(prefs.gainFor(external), { MicSettings.setGain(ctx, it, external) })
+    if (external) HelpText("This level is kept for plugged-in mics. The phone's own mic keeps its own.")
     Spacer(Modifier.height(8.dp))
     AutoLevelRow(prefs.raw) { MicSettings.setRaw(ctx, it) }
+    if (options && prefs.raw) {
+        SwitchRow(
+            "Even out my level",
+            supporting = "Turns you up a little when you're far from the phone and down when you shout, slowly, never between words.",
+            checked = prefs.voiceLeveler,
+            onCheckedChange = { MicSettings.setVoiceLeveler(ctx, it) },
+        )
+    }
+
+    if (options) {
+        SectionHeader("Input")
+        Column(Modifier.selectableGroup()) {
+            RadioRow(
+                "Automatic", supporting = "A plugged-in USB or wired mic when there is one, otherwise the phone's.",
+                selected = prefs.input == InputChoice.AUTO, onClick = { MicSettings.setInput(ctx, InputChoice.AUTO) },
+            )
+            RadioRow("Phone mic", selected = prefs.input == InputChoice.PHONE, onClick = { MicSettings.setInput(ctx, InputChoice.PHONE) })
+            RadioRow(
+                plugged.firstOrNull()?.name ?: "USB or wired mic",
+                supporting = if (plugged.isEmpty()) "Plug one in to use it. Bluetooth mics aren't used: they sound like a phone call." else null,
+                selected = prefs.input == InputChoice.EXTERNAL,
+                enabled = plugged.isNotEmpty() || prefs.input == InputChoice.EXTERNAL,
+                onClick = { MicSettings.setInput(ctx, InputChoice.EXTERNAL) },
+            )
+        }
+
+        SectionHeader("Low cut", trailing = lowCutText(prefs.lowCut, prefs.raw))
+        HelpText("Takes out rumble from wind, handling and traffic, under your voice.")
+        Column(Modifier.selectableGroup()) {
+            RadioRow(
+                "Automatic", supporting = "On with the phone's auto level off; the phone filters it otherwise.",
+                selected = prefs.lowCut == LowCut.AUTO, onClick = { MicSettings.setLowCut(ctx, LowCut.AUTO) },
+            )
+            RadioRow("80 Hz", selected = prefs.lowCut == LowCut.NORMAL, onClick = { MicSettings.setLowCut(ctx, LowCut.NORMAL) })
+            RadioRow("120 Hz", supporting = "For wind.", selected = prefs.lowCut == LowCut.WIND, onClick = { MicSettings.setLowCut(ctx, LowCut.WIND) })
+            RadioRow("Off", selected = prefs.lowCut == LowCut.OFF, onClick = { MicSettings.setLowCut(ctx, LowCut.OFF) })
+        }
+        SwitchRow(
+            "Mono voice",
+            supporting = "The same voice on both sides. Try it if you sound off to one side.",
+            checked = prefs.monoVoice,
+            onCheckedChange = { MicSettings.setMonoVoice(ctx, it) },
+        )
+    }
 
     if (allowed) {
         SectionHeader("Sound check")

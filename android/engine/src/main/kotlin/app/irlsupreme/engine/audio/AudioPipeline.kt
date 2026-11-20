@@ -1,7 +1,11 @@
 package app.irlsupreme.engine.audio
 
+import android.content.Context
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRouting
 import android.media.AudioRecordingConfiguration
 import android.media.AudioTimestamp
 import android.media.MediaCodec
@@ -41,10 +45,27 @@ class AudioPipeline(
     private val onLevel: (MicLevel) -> Unit = {},
     /** Gets every chunk of the final mix (after mute and alert sounds), exactly as it's handed to the encoder. */
     private val mix: PcmRing? = null,
+    /**
+     * How late the picture is against the sound, ns (the camera's capture-to-draw latency for the source on screen);
+     * the audio is delayed by this much plus [userAvOffsetNs], 0..400 ms in all, changing by at most 0.5 ms per chunk
+     * ([AvDelayLine]). Asked once per chunk on the capture thread, so it must be cheap (a volatile read). Default: no
+     * delay, as before.
+     */
+    private val videoDelayNs: DelaySource = DelaySource { 0L },
+    /** The user's own A/V offset, ns (+: audio later). See [videoDelayNs]. */
+    private val userAvOffsetNs: DelaySource = DelaySource { 0L },
+    /**
+     * For watching the phone's audio inputs come and go (a USB mic plugged in or out) and for [inputChoice]. Without
+     * it the pipeline still notices its own recording being rerouted, but can't pick a device.
+     */
+    private val context: Context? = null,
+    /**
+     * The mic in use changed ([activeInput]); with a message for the streamer when it changed kind ("External mic
+     * disconnected", "Using <name>"), else null. On the capture thread: hand it off, don't block.
+     */
+    private val onInputChange: (ActiveInput, String?) -> Unit = { _, _ -> },
 ) {
     @Volatile var muted = false
-    /** Where the mute ramp is: 1 = heard, 0 = muted (capture thread). */
-    private var muteGain = 1f
 
     /**
      * The phone's own auto level off: the raw mic, levelled only by [micGainDb] and the limiter ([micSources]). Changing
@@ -52,30 +73,20 @@ class AudioPipeline(
      */
     @Volatile var rawMic = false
 
-    /** Sounds mixed into the stream (alert chimes), one after another; never played on the phone. */
-    private class Effect(val samples: ShortArray, val startAtNs: Long)
-    private val effects = java.util.concurrent.ConcurrentLinkedQueue<Effect>()
-    private var effect: ShortArray? = null
-    private var effectPos = 0
-
     /**
      * Queues [samples] (16-bit PCM in the stream's channel layout) to be mixed into the stream, starting no earlier
      * than [startAtNs] on the System.nanoTime clock (0: as soon as it's its turn). Audio and video timestamps share
      * that clock, so a chime started at the moment an alert finishes its wipe lands on that frame for viewers.
      */
-    fun playEffect(samples: ShortArray, startAtNs: Long = 0L) {
-        if (effects.size < 8) effects.add(Effect(samples, startAtNs))
-    }
+    fun playEffect(samples: ShortArray, startAtNs: Long = 0L) = stage.playEffect(samples, startAtNs)
+
     /**
      * An RTMP camera's audio (Pocket 3 / DJI Mic). When set, each mic chunk is replaced by the camera's samples for
      * the same moment whenever the camera has them; the mic stays the clock and the fallback.
      */
     @Volatile var camera: CameraAudio? = null
     /** Whether the last chunk came from the camera. */
-    @Volatile var usingCamera = false
-        private set
-    private var camHits = 0
-    private var camMisses = 0
+    val usingCamera: Boolean get() = stage.usingCamera
     private val camScratch by lazy { ByteArray(chunkFrames * bytesPerFrame) }
     @Volatile private var running = false
     private var capture: Thread? = null
@@ -96,6 +107,25 @@ class AudioPipeline(
         private set
     @Volatile var heavyLimitChunks = 0
         private set
+    /** Chunks of silence encoded to fill a gap in the mic's timeline (an overrun, or a mic that came back late). */
+    @Volatile var gapFillChunks = 0
+        private set
+    /** Samples of the final mix at full scale: should stay 0 (the limiter covers alert sounds too). */
+    val postMixClips: Long get() = stage.postMixClips
+    /** Chunks whose voice arrived clipped (in the phone or camera, before any gain), and the clipped samples in them. */
+    val inputClipChunks: Long get() = stage.inputClipChunks
+    val inputClips: Long get() = stage.inputClips
+    /** Chunks timed without an AudioRecord timestamp (extrapolated), across every record of this stream. */
+    @Volatile var fallbackChunks = 0L
+        private set
+    /** How far chunk timestamps landed from one chunk after the last: <0.5, <1, <2, <5, >=5 ms. A copy. */
+    fun ptsJitter(): LongArray = ptsJitterCounts.copyOf()
+    private val ptsJitterCounts = LongArray(AudioPts.JITTER_BUCKETS)
+    /** The lip-sync delay applied to the audio right now, ns. */
+    @Volatile var avDelayNs = 0L
+        private set
+    /** The voice leveler's gain now, dB (0 when it's off). */
+    val levelerDb: Float get() = dsp.levelerDb
 
     /** Everything worth counting for the session log, the camera's playout included. */
     fun counters(): AudioCounters {
@@ -129,12 +159,42 @@ class AudioPipeline(
 
     private val channels = if (stereo) 2 else 1
     private val dsp = MicDsp(sampleRate, channels)
+    private val stage = MixStage(sampleRate, channels, dsp)
 
     /**
      * The level for the raw mic. Picked per chunk by the source actually open, so switching modes changes source and
      * level together, never a chunk of one at the other's level.
      */
     @Volatile var rawMicGainDb = 20f
+
+    /** The phone mic's low cut. [LowCut.AUTO] (the default): 80 Hz on the raw mic, off with the phone's auto level. */
+    @Volatile var lowCut = LowCut.AUTO
+
+    /**
+     * The voice leveler on the raw mic (the "Voice" preset; off is "Flat", the level stays where the fader puts it).
+     * Off by default, as streams have always sounded; it only acts while the mic is open raw.
+     */
+    @Volatile var voiceLeveler = false
+
+    /** Fold the phone mic to mono ((L+R)/2 on both channels). Off by default; the stream stays stereo either way. */
+    @Volatile var monoVoice = false
+
+    /**
+     * Which mic to record from. Changing it reopens the mic between two chunks (the old one fades out). Needs
+     * [context]; without one, Android picks as it always has.
+     */
+    @Volatile var inputChoice = InputChoice.AUTO
+
+    /**
+     * The level for a USB or wired mic, dB, used while one is the mic in use ([activeInput]). Null (the default): the
+     * same level as the phone's own mic, as before. An external mic arrives at its own level, so it should get its own
+     * (0 dB to start with, never the raw phone mic's +20).
+     */
+    @Volatile var externalGainDb: Float? = null
+
+    /** The mic the recording is really using (null before one opens). */
+    @Volatile var activeInput: ActiveInput? = null
+        private set
 
     /** The user's mic level, -20..+30 dB; applies from the next chunk, gliding so it doesn't click. */
     var micGainDb: Float
@@ -143,11 +203,14 @@ class AudioPipeline(
     private val bytesPerFrame = 2 * channels
     private val chunkFrames = CHUNK_FRAMES
     private val chunkNs = chunkFrames * 1_000_000_000L / sampleRate
+    private val avDelay = AvDelayLine(chunkNs, chunkFrames * bytesPerFrame)
+    private val toEncoder = AvDelayLine.Emit { b, p -> encode(b, p) }
     private var codecRetryAtNs = 0L
     private var codecBackoffMs = CODEC_RETRY_MIN_MS
 
     fun start() {
         running = true
+        watchInputs()
         capture = Thread(::captureLoop, "engine-audio-capture").apply { start() }
     }
 
@@ -155,6 +218,38 @@ class AudioPipeline(
         running = false
         capture?.join(2_000)
         stopCodec()
+        unwatchInputs()
+    }
+
+    /** Set when the route may have changed (a callback, on any thread); the capture thread re-reads it. */
+    @Volatile private var routingDirty = false
+    /** Set when the mic should reopen to pick a device again (one plugged in or out while a choice is set). */
+    @Volatile private var reopenWanted = false
+    private var deviceCallback: AudioDeviceCallback? = null
+    @Volatile private var externalIds: Set<Int>? = null
+
+    private fun watchInputs() {
+        val am = context?.getSystemService(AudioManager::class.java) ?: return
+        val cb = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = changed()
+            override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = changed()
+            private fun changed() {
+                routingDirty = true
+                val ids = runCatching { am.getDevices(AudioManager.GET_DEVICES_INPUTS) }.getOrNull()
+                    ?.filter { inputClassOf(it.type) == InputClass.EXTERNAL }?.map { it.id }?.toSet() ?: return
+                val before = externalIds
+                externalIds = ids
+                // The first call lists what's there already; after that, a change with a choice set means pick again.
+                if (before != null && before != ids && inputChoice != InputChoice.AUTO) reopenWanted = true
+            }
+        }
+        if (runCatching { am.registerAudioDeviceCallback(cb, null) }.isSuccess) deviceCallback = cb
+    }
+
+    private fun unwatchInputs() {
+        val cb = deviceCallback ?: return
+        deviceCallback = null
+        runCatching { context?.getSystemService(AudioManager::class.java)?.unregisterAudioDeviceCallback(cb) }
     }
 
     /** Capture thread. False (with [codecError] set) if the encoder couldn't start; the caller retries later. */
@@ -164,6 +259,8 @@ class AudioPipeline(
             c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
             configureAac(c, sampleRate, stereo, bitrate)
             c.start()
+            if (encoderName != c.name) Log.i(TAG, "audio encoder ${c.name}")
+            encoderName = c.name
             codecFailed = false
             codec = c
             drain = Thread({ drainLoop(c) }, "engine-aenc-drain").apply { start() }
@@ -191,14 +288,22 @@ class AudioPipeline(
     /** The open mic and whether it was opened raw, so a change of [rawMic] can reopen it. */
     private var mic: OpenMic? = null
     private var openedRaw = false
+    private var openedChoice = InputChoice.AUTO
+    private val routingListener = AudioRouting.OnRoutingChangedListener { routingDirty = true }
 
     /** Opens the mic ([micSources]) and watches whether the system silences it. Null if no source will record. */
     private fun openRecord(): AudioRecord? {
         val raw = rawMic
-        val m = openMic(sampleRate, stereo, chunkFrames * bytesPerFrame, raw, unprocessedOk) ?: return null
+        val choice = inputChoice
+        reopenWanted = false
+        val preferred = context?.let { runCatching { preferredInput(it, choice) }.getOrNull() }
+        val m = openMic(sampleRate, stereo, chunkFrames * bytesPerFrame, raw, unprocessedOk, preferred) ?: return null
         mic = m
         openedRaw = raw
+        openedChoice = choice
         val r = m.record
+        runCatching { r.addOnRoutingChangedListener(routingListener, null) }
+        routingDirty = true
         // Another app (a call, the system) can silence this client while it keeps "recording" zeros.
         val cb = recordingCallback(r)
         if (runCatching { r.registerAudioRecordingCallback(directExecutor, cb) }.isSuccess) recordCallback = cb
@@ -219,6 +324,7 @@ class AudioPipeline(
     private var recordCallback: AudioManager.AudioRecordingCallback? = null
 
     private fun closeRecord(r: AudioRecord) {
+        runCatching { r.removeOnRoutingChangedListener(routingListener) }
         recordCallback?.let { cb -> runCatching { r.unregisterAudioRecordingCallback(cb) } }
         recordCallback = null
         val m = mic
@@ -255,7 +361,7 @@ class AudioPipeline(
         // Before anything that can fail: the output connects only once it knows the audio format.
         sink.onAudioConfig(sampleRate, stereo)
         startCodec()
-        muteGain = if (muted) 0f else 1f // a stream that starts muted mustn't leak its first few ms
+        stage.start(muted)
         val pcm = ByteArray(chunkFrames * bytesPerFrame)
         val ts = AudioTimestamp()
         val pts = AudioPts(chunkNs)
@@ -264,19 +370,20 @@ class AudioPipeline(
         var recordFrames = 0L
         val clock = ChunkClock(sampleRate, chunkNs)
         val overruns = OverrunDetector(chunkNs)
-        // The limiter's lookahead: each chunk comes out of the level stage this much later than it went in.
-        val dspLatencyNs = dsp.latencyFrames * 1_000_000_000L / sampleRate
         var openAtNs = 0L
         var openBackoffMs = OPEN_RETRY_MIN_MS
         var goodChunks = 0
-        var micFadeIn = false
         var silenceNextNs = 0L
+        var closeAfter = false
+        val silent = ByteArray(chunkFrames * bytesPerFrame)
         try {
             while (running) {
-                // The user switched the phone's auto level: reopen with the other source, at once.
+                // The user switched the phone's auto level: reopen with the other source, at once (the last chunk of
+                // the old one has faded out).
                 record?.let { cur ->
-                    if (openedRaw != rawMic) {
-                        Log.i(TAG, "mic: phone auto level ${if (rawMic) "off" else "on"}, reopening")
+                    if (closeAfter || wantsReopen()) {
+                        closeAfter = false
+                        Log.i(TAG, "mic: phone auto level ${if (rawMic) "off" else "on"}, input ${inputChoice.name.lowercase()}, reopening")
                         closeRecord(cur)
                         record = null
                         openAtNs = 0L
@@ -291,7 +398,7 @@ class AudioPipeline(
                         recordFrames = 0
                         clock.reset()
                         overruns.reset()
-                        micFadeIn = true
+                        stage.micOpened()
                         silenceNextNs = 0
                         goodChunks = 0
                         pts.sourceChanged()
@@ -317,8 +424,6 @@ class AudioPipeline(
                         continue
                     }
                     if (!running) break
-                    // A mic that just (re)opened starts mid-sound after silence or another source: fade it in.
-                    if (micFadeIn) { crossfade(null, pcm, pcm, chunkFrames, channels, SWITCH_FADE_FRAMES); micFadeIn = false }
                     val chunkStartFrame = recordFrames
                     recordFrames += chunkFrames
                     // ~1 s of good reads: this record works, so a later failure starts the backoff from the bottom.
@@ -337,6 +442,11 @@ class AudioPipeline(
                         clock.fallback(System.nanoTime(), chunkStartFrame)
                     }
                     ptsNs = pts.next(raw)
+                    // About to switch source: fade this chunk out, so the cut doesn't click.
+                    closeAfter = wantsReopen()
+                    // A USB mic plugged in or out, or Android moved the recording: see what it uses now.
+                    if (routingDirty) checkRoute(r)
+                    if (stereo) stereoProbe.add(pcm, chunkFrames)
                 } else {
                     // No mic: one chunk of silence per chunk of real time, on the same clock as the video.
                     if (silenceNextNs == 0L) { silenceNextNs = System.nanoTime(); pts.sourceChanged() }
@@ -351,54 +461,26 @@ class AudioPipeline(
                     ptsNs = pts.next(silenceNextNs)
                     silenceNextNs = due
                 }
+                fallbackChunks = clock.fallbackChunks
+                pts.jitter.copyInto(ptsJitterCounts)
 
-                // Hysteresis: switching microphones is audible (different room sound), so only switch on a clear
-                // change. On the camera, a momentary miss is a short faded silence (the camera's playout fades it)
-                // instead of the phone mic. The camera is pulled every chunk, used or not, so its playout keeps time.
-                val cam = camera
-                val wasCamera = usingCamera
-                if (cam != null) {
-                    val covered = cam.fill(ptsNs, chunkFrames, camScratch)
-                    if (covered) { camHits++; camMisses = 0 } else { camMisses++; camHits = 0 }
-                    if (!usingCamera && camHits >= CAM_SWITCH_ON) { usingCamera = true; Log.i(TAG, "audio: camera") }
-                    else if (usingCamera && camMisses >= CAM_SWITCH_OFF) { usingCamera = false; Log.i(TAG, "audio: phone mic") }
-                } else usingCamera = false
-                // A switch crossfades over a few ms: cutting from one source to the other mid-wave is a click.
-                when {
-                    usingCamera && wasCamera -> camScratch.copyInto(pcm)
-                    usingCamera -> crossfade(pcm, camScratch, pcm, chunkFrames, channels, SWITCH_FADE_FRAMES)
-                    wasCamera -> crossfade(if (cam != null) camScratch else null, pcm, pcm, chunkFrames, channels, SWITCH_FADE_FRAMES)
+                // A gap in the timeline (audio lost to an overrun, or a mic that came back late): encode that many
+                // chunks of silence first, through the whole mix (a chime or the camera carries on through them),
+                // then fade the real chunk in. The cut at the start of the gap can't be faded: it's already encoded.
+                val rawOpen = record != null && openedRaw
+                val gainDb = micGainFor(activeInput, rawOpen)
+                if (pts.fillChunks > 0) {
+                    for (k in 0 until pts.fillChunks) {
+                        silent.fill(0)
+                        mixAndEncode(silent, pts.fillFromNs + k * chunkNs, gainDb, rawOpen, micPresent = false, fadeOut = false)
+                    }
+                    gapFillChunks += pts.fillChunks
+                    stage.micFadeInNext()
                 }
-                // Level and limiter on whatever the voice is (phone mic or camera), metered before the mute so the
-                // mic sheet still shows the mic working while viewers hear nothing. The user's gain is set for the
-                // phone mic (up to +30 dB for the quiet raw source); a camera's audio already arrives at a normal
-                // level, so it gets 0 dB (limiter and meter still run). The DSP's glide smooths the switch.
-                val level = dsp.process(pcm, chunkFrames, when { usingCamera -> 0f; record != null && openedRaw -> rawMicGainDb; else -> null })
+                val level = mixAndEncode(pcm, ptsNs, gainDb, rawOpen, micPresent = r != null, fadeOut = closeAfter)
                 chunks++
                 if (level.reductionDb > HEAVY_LIMIT_DB) heavyLimitChunks++
                 onLevel(level)
-                // What comes out of the level stage started its lookahead earlier than what went in.
-                val outPtsNs = ptsNs - dspLatencyNs
-                // Alert sounds go into the stream, but not while the mic is off. Chimes that come up while muted are
-                // dropped, not held: their alert cards have already played (plain Mute doesn't hold alerts; Privacy
-                // holds them before any chime is queued), so holding them would play a string of chimes on unmute.
-                // One still playing as the mute starts fades out with the voice rather than stopping dead.
-                if (muted && muteGain == 0f) { effects.clear(); effect = null }
-                // A scheduled one starts at its own sample inside the chunk that contains its start time.
-                var pcmFrom = 0
-                if (effect == null && !muted) effects.peek()?.let { next ->
-                    val frame = AlertSounds.startFrame(outPtsNs, chunkFrames, sampleRate, next.startAtNs)
-                    if (frame >= 0) { effects.poll(); effect = next.samples; effectPos = 0; pcmFrom = frame * bytesPerFrame }
-                }
-                effect?.let { e ->
-                    effectPos = AlertSounds.mixInto(pcm, e, effectPos, pcmFrom)
-                    if (effectPos >= e.size) effect = null
-                }
-                // Mute and unmute ramp over ~10 ms: a hard cut mid-word clicks.
-                muteGain = applyRamp(pcm, chunkFrames, channels, muteGain, if (muted) 0f else 1f, MUTE_RAMP_FRAMES)
-
-                mix?.write(pcm, chunkFrames)
-                encode(pcm, outPtsNs)
             }
         } catch (t: Throwable) {
             // Nothing above should throw; if something does, end this thread quietly rather than the whole app.
@@ -408,6 +490,83 @@ class AudioPipeline(
         } finally {
             record?.let { closeRecord(it) }
         }
+    }
+
+    private fun wantsReopen() = openedRaw != rawMic || openedChoice != inputChoice || reopenWanted
+
+    /** Probes the phone mic's channels over the first 10 s of the stream (stereo only). */
+    private val stereoProbe = StereoProbe(sampleRate)
+
+    /** The level for the mic in use: an external mic's own (once one is set), the raw mic's, or the user's. */
+    private fun micGainFor(input: ActiveInput?, rawOpen: Boolean): Float? {
+        val ext = externalGainDb
+        return when {
+            ext != null && input?.inputClass == InputClass.EXTERNAL -> ext
+            rawOpen -> rawMicGainDb
+            else -> null
+        }
+    }
+
+    /** Re-reads the device [r] records from; on a change, tells [onInputChange]. The level follows within a glide. */
+    private fun checkRoute(r: AudioRecord) {
+        routingDirty = false
+        val d = runCatching { r.routedDevice }.getOrNull() ?: return
+        val now = activeInputOf(d)
+        val before = activeInput
+        if (now == before) return
+        activeInput = now
+        val msg = inputChangeMessage(before, now)
+        Log.i(TAG, "mic input: ${describe(d)}${msg?.let { " ($it)" } ?: ""}")
+        runCatching { onInputChange(now, msg) }
+    }
+
+    /** Everything finer than [counters], for the session log. */
+    fun diagnostics(): AudioDiagnostics = AudioDiagnostics(
+        inputClipChunks = inputClipChunks,
+        inputClips = inputClips,
+        postMixClips = postMixClips,
+        gapFillChunks = gapFillChunks,
+        fallbackChunks = fallbackChunks,
+        ptsJitter = ptsJitter().toList(),
+        levelerDb = levelerDb,
+        avDelayNs = avDelayNs,
+        stereo = if (stereo) stereoProbe.stats() else null,
+        encoderName = encoderName,
+        encoderFormat = encoderFormat,
+        encoderDelayFrames = encoderDelayFrames,
+        activeInput = activeInput,
+    )
+
+    /** The AAC encoder in use, its output format, and its priming delay (frames; -1 if it didn't say). */
+    @Volatile var encoderName: String? = null
+        private set
+    @Volatile var encoderFormat: String? = null
+        private set
+    @Volatile var encoderDelayFrames = -1
+        private set
+
+    /**
+     * Mixes one chunk ([MixStage]) and sends it on: to the playback ring, then through the lip-sync delay to the
+     * encoder. Capture thread.
+     */
+    private fun mixAndEncode(pcm: ByteArray, ptsNs: Long, micGainDb: Float?, rawOpen: Boolean, micPresent: Boolean, fadeOut: Boolean): MicLevel {
+        // The camera is pulled every chunk, used or not, so its playout keeps time.
+        val cam = camera
+        val covered = cam != null && cam.fill(ptsNs, chunkFrames, camScratch)
+        val wasCamera = stage.usingCamera
+        stage.lowCutHz = lowCutHz(lowCut, rawOpen)
+        stage.leveler = voiceLeveler && rawOpen
+        stage.monoVoice = monoVoice
+        stage.clockOffsetNs = avDelay.appliedNs
+        val level = stage.process(
+            pcm, chunkFrames, ptsNs, if (cam != null) camScratch else null, covered, micGainDb,
+            muted = muted, micPresent = micPresent, micFadeOut = fadeOut,
+        )
+        if (stage.usingCamera != wasCamera) Log.i(TAG, if (stage.usingCamera) "audio: camera" else "audio: phone mic")
+        mix?.write(pcm, chunkFrames)
+        avDelay.push(pcm, stage.outPtsNs(ptsNs), videoDelayNs.ns() + userAvOffsetNs.ns(), toEncoder)
+        avDelayNs = avDelay.appliedNs
+        return level
     }
 
     /** Chunks waiting for an encoder input buffer, oldest first, and spare arrays for them (capture thread only). */
@@ -420,7 +579,7 @@ class AudioPipeline(
      * Never waits for the encoder. It used to wait up to 20 ms for an input buffer and then drop the chunk: a chunk is
      * 21 ms, so a busy encoder both cut a hole in the audio and held this thread off the mic long enough to overrun
      * it. Now a chunk with no buffer free waits in a short queue and goes in with the next one; only a queue that
-     * stays full for [MAX_QUEUED_CHUNKS] chunks drops its oldest.
+     * stays over [MAX_QUEUED_CHUNKS] chunks drops its oldest.
      */
     private fun encode(pcm: ByteArray, ptsNs: Long) {
         if (codecFailed) {
@@ -471,7 +630,12 @@ class AudioPipeline(
         try {
             while (codec === c) {
                 val idx = c.dequeueOutputBuffer(info, 10_000)
-                if (idx >= 0) {
+                if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val f = c.outputFormat
+                    encoderFormat = f.toString()
+                    encoderDelayFrames = if (f.containsKey(MediaFormat.KEY_ENCODER_DELAY)) f.getInteger(MediaFormat.KEY_ENCODER_DELAY) else -1
+                    Log.i(TAG, "audio encoder output: $f")
+                } else if (idx >= 0) {
                     val buf = c.getOutputBuffer(idx)
                     val config = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
                     if (buf != null && !config && info.size > 0) {
@@ -491,20 +655,18 @@ class AudioPipeline(
 
     companion object {
         private const val TAG = "Engine"
-        /** Consecutive chunks (~21 ms each) before switching to / away from the camera's audio. */
-        private const val CAM_SWITCH_ON = 94 // ~2 s: the Pocket's stream settles for 2-3 s after it starts
-        private const val CAM_SWITCH_OFF = 10
         private const val OPEN_RETRY_MIN_MS = 200L
         private const val OPEN_RETRY_MAX_MS = 2_000L
         private const val CODEC_RETRY_MIN_MS = 500L
         private const val CODEC_RETRY_MAX_MS = 5_000L
         private const val GOOD_CHUNKS_TO_RESET = 47
-        /** ~5 ms crossfade between the camera's audio and the phone mic. */
-        private const val SWITCH_FADE_FRAMES = 240
-        /** ~10 ms mute/unmute ramp. */
-        private const val MUTE_RAMP_FRAMES = 480
-        /** ~250 ms of chunks may wait for the encoder before the oldest is dropped. */
-        private const val MAX_QUEUED_CHUNKS = 12
+        /**
+         * Chunks that may wait for the encoder before the oldest is dropped: ~250 ms of normal backlog, plus room for
+         * the longest gap fill, which encodes up to [AudioPts.MAX_FILL_CHUNKS] chunks of silence and the real chunk
+         * in one go. Without that room an encoder with few input buffers would drop the start of the very fill that
+         * was meant to close the hole.
+         */
+        internal const val MAX_QUEUED_CHUNKS = 12 + AudioPts.MAX_FILL_CHUNKS + 1
         /** More gain reduction than this in a chunk counts as the limiter working hard (level set too hot). */
         private const val HEAVY_LIMIT_DB = 6f
         private val directExecutor = Executor { it.run() }
@@ -530,53 +692,159 @@ class AudioPipeline(
  * or, if none has worked on this record yet, anchored at the failing chunk's own read time. Anchoring the fallback at
  * the record's opening (chunk 0) instead would put a first failure N minutes into a record N minutes in the future,
  * and [AudioPts] would then pin every later chunk to one timestamp until real time caught up.
+ *
+ * While timestamps keep failing, the extrapolation is steered gently (1/256 of the difference per chunk) towards the
+ * read times, so it follows the monotonic clock instead of free-running at the nominal rate and drifting by the mic's
+ * clock error. When timestamps come back, the timeline eases over to them (at most [EASE_STEP_NS] per chunk) instead
+ * of stepping: the fallback is anchored at read time, which is late by the record's buffering, so the real timestamp
+ * would otherwise jump the audio back by that much.
  */
 internal class ChunkClock(private val sampleRate: Int, private val chunkNs: Long) {
     /** Monotonic time of the record's frame 0; 0 = not known yet (monotonic times are never 0). */
     private var baseNs = 0L
+    private var lastWasFallback = false
+    /** What's left of the step between the fallback timeline and the real one, still being eased out. */
+    private var easeNs = 0L
+
+    /** Chunks timed without a timestamp, since this clock was made. */
+    var fallbackChunks = 0L
+        private set
 
     /** A new record: frame counts start again from 0. */
-    fun reset() { baseNs = 0L }
+    fun reset() { baseNs = 0L; lastWasFallback = false; easeNs = 0L }
 
     /** From a good AudioRecord timestamp ([tsNanoTime] at frame [tsFramePosition]). */
-    fun fromTimestamp(tsNanoTime: Long, tsFramePosition: Long, chunkStartFrame: Long): Long =
-        (tsNanoTime + (chunkStartFrame - tsFramePosition) * 1_000_000_000L / sampleRate)
-            .also { baseNs = it - framesNs(chunkStartFrame) }
+    fun fromTimestamp(tsNanoTime: Long, tsFramePosition: Long, chunkStartFrame: Long): Long {
+        val t = tsNanoTime + (chunkStartFrame - tsFramePosition) * 1_000_000_000L / sampleRate
+        if (lastWasFallback && baseNs != 0L) {
+            val d = baseNs + framesNs(chunkStartFrame) - t
+            easeNs = if (d > -MAX_EASE_NS && d < MAX_EASE_NS) d else 0L
+        }
+        lastWasFallback = false
+        baseNs = t - framesNs(chunkStartFrame)
+        if (easeNs != 0L) {
+            val step = (easeNs / 64).coerceIn(-EASE_STEP_NS, EASE_STEP_NS).let { if (it == 0L) easeNs else it }
+            easeNs -= step
+        }
+        return t + easeNs
+    }
 
     /** No timestamp for this chunk; [nowNs] is just after it was read. */
     fun fallback(nowNs: Long, chunkStartFrame: Long): Long {
-        if (baseNs == 0L) baseNs = nowNs - chunkNs - framesNs(chunkStartFrame)
+        fallbackChunks++
+        // Carry on from where an ease left the timeline, not from the bare timestamps.
+        if (easeNs != 0L) { baseNs += easeNs; easeNs = 0L }
+        val target = nowNs - chunkNs - framesNs(chunkStartFrame)
+        baseNs = if (baseNs == 0L) target else baseNs + (target - baseNs) / 256
+        lastWasFallback = true
         return baseNs + framesNs(chunkStartFrame)
     }
 
     private fun framesNs(frames: Long) = frames * 1_000_000_000L / sampleRate
+
+    private companion object {
+        /** Easing moves the timeline at most this much per chunk (spacing stays within 0.5 ms of a chunk). */
+        const val EASE_STEP_NS = 500_000L
+        /** A bigger step than this isn't a handover to ease: something else is wrong, let [AudioPts] deal with it. */
+        const val MAX_EASE_NS = 500_000_000L
+    }
 }
 
 /**
- * Keeps audio timestamps strictly increasing across mic rebuilds and silence fill (pure, unit-tested). Each source
- * (an AudioRecord, or the silence clock) has its own timeline; a new one can start slightly before the last chunk of
- * the old one (the mic's buffer latency vs. the silence clock). On the first chunk after [sourceChanged], the new
- * timeline is shifted just enough to follow on, and that offset is kept for the rest of that source so its chunks stay
- * evenly spaced. Within a source, jitter can never take a timestamp backwards.
+ * Turns each chunk's own time into the PTS the encoder gets (pure, unit-tested): strictly increasing across mic
+ * rebuilds and silence fill, evenly spaced within a source, and with no holes the encoder could fill itself.
+ *
+ * Each source (an AudioRecord, or the silence clock) has its own timeline; a new one can start slightly before the
+ * last chunk of the old one (the mic's buffer latency vs. the silence clock). On the first chunk after
+ * [sourceChanged], the new timeline is shifted just enough to follow on, and that offset is kept for the rest of that
+ * source.
+ *
+ * Within a source each chunk is expected one chunk after the last. A timestamp within [TOLERANCE_NS] of that is
+ * jitter: the PTS moves only 1/64 of the way towards it, which smooths the jitter out but still follows the real
+ * clock (no long-run drift).
+ *
+ * A chunk a whole chunk or more late is a real gap (an overrun lost audio, or a mic came back late): it keeps its
+ * time, and [fillChunks] says how many whole chunks of silence to encode before it, from [fillFromNs], so the AAC
+ * timeline has no hole (the server would otherwise splice across it or a player would stutter). A chunk late by less
+ * than that is only believed when the next one is late by the same amount: phones' timestamps spike now and then,
+ * and taking a lone spike as a gap would leave a hole and, once the next chunk came back, a backwards step.
+ *
+ * A chunk [TOLERANCE_NS] or more early (the clock re-anchored backwards, or a forward spike just ended) is eased
+ * towards, at most [EASE_STEP_NS] per chunk, rather than pinned a run of chunks 1 µs apart or rebased for good. Easing
+ * keeps the PTS on the capture clock: a rebase that stays would leave every later chunk late by the jump (a lasting
+ * lip-sync error), and a spike would add its size to that each time. Only a jump back of more than [MAX_EASE_NS]
+ * (a clock reset, not jitter) rebases at once.
  */
-internal class AudioPts(private val chunkNs: Long) {
+internal class AudioPts(private val chunkNs: Long, private val maxFillChunks: Int = MAX_FILL_CHUNKS) {
     private var last = Long.MIN_VALUE
     private var offset = 0L
     private var rebase = true
+    /** A sub-chunk forward jump seen on the last chunk and not yet confirmed (0: none). */
+    private var pendingNs = 0L
+
+    /** Whole chunks of silence to encode just before the chunk [next] last stamped (0: none), the first at [fillFromNs]. */
+    var fillChunks = 0
+        private set
+    var fillFromNs = 0L
+        private set
+
+    /** How far chunks landed from where they were expected, in buckets: <0.5, <1, <2, <5 and >=5 ms. */
+    val jitter = LongArray(JITTER_BUCKETS)
 
     /** The next chunk comes from a new source (a reopened mic, or silence). */
     fun sourceChanged() { rebase = true }
 
     /** The PTS (ns) to use for a chunk whose own clock says [rawNs]. */
     fun next(rawNs: Long): Long {
+        fillChunks = 0
+        if (last == Long.MIN_VALUE) {
+            rebase = false
+            offset = 0L
+            pendingNs = 0L
+            last = rawNs
+            return rawNs
+        }
         if (rebase) {
             rebase = false
-            offset = if (last != Long.MIN_VALUE && rawNs < last + chunkNs) last + chunkNs - rawNs else 0L
+            pendingNs = 0L
+            offset = if (rawNs < last + chunkNs) last + chunkNs - rawNs else 0L
         }
-        var p = rawNs + offset
-        if (last != Long.MIN_VALUE && p <= last) p = last + 1_000 // 1 µs: the codec's unit
-        last = p
-        return p
+        val p = rawNs + offset
+        val expected = last + chunkNs
+        val err = p - expected
+        val wasPending = pendingNs
+        pendingNs = 0L
+        val out = when {
+            err >= chunkNs -> {
+                val n = err / chunkNs
+                if (n <= maxFillChunks) { fillChunks = n.toInt(); fillFromNs = expected }
+                p // what's left (under a chunk) stays a short gap
+            }
+            err >= TOLERANCE_NS -> {
+                // Late by part of a chunk: a gap only if the last chunk was late by about as much.
+                val d = err - wasPending
+                if (wasPending != 0L && d > -TOLERANCE_NS && d < TOLERANCE_NS) p
+                else { pendingNs = err; expected + TOLERANCE_NS / 64 }
+            }
+            err <= -MAX_EASE_NS -> { offset -= err; expected }
+            err <= -TOLERANCE_NS -> expected - EASE_STEP_NS
+            else -> expected + err / 64
+        }
+        val a = if (err < 0) -err else err
+        jitter[when { a < 500_000 -> 0; a < 1_000_000 -> 1; a < 2_000_000 -> 2; a < TOLERANCE_NS -> 3; else -> 4 }]++
+        last = out
+        return out
+    }
+
+    companion object {
+        const val TOLERANCE_NS = 5_000_000L
+        /** Easing back moves the PTS at most this much per chunk: frames overlap by at most 0.5 ms meanwhile. */
+        const val EASE_STEP_NS = 500_000L
+        /** A step back bigger than this is a clock reset, not something to ease out over minutes: rebase. */
+        const val MAX_EASE_NS = 500_000_000L
+        /** Gaps up to ~213 ms are filled; longer ones are left for the server. */
+        const val MAX_FILL_CHUNKS = 10
+        const val JITTER_BUCKETS = 5
     }
 }
 
