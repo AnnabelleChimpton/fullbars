@@ -14,8 +14,12 @@ import kotlin.test.assertTrue
 private class Recorder : SrtlaOutput {
     val toLinks = mutableListOf<Pair<Int, ByteArray>>()
     val toClient = mutableListOf<ByteArray>()
-    override fun toLink(linkId: Int, buf: ByteArray, off: Int, len: Int) {
+    /** Links whose socket is "full": they refuse every packet. */
+    val refusing = mutableSetOf<Int>()
+    override fun toLink(linkId: Int, buf: ByteArray, off: Int, len: Int): Boolean {
+        if (linkId in refusing) return false
         toLinks += linkId to buf.copyOfRange(off, off + len)
+        return true
     }
     override fun toClient(buf: ByteArray, off: Int, len: Int) {
         toClient += buf.copyOfRange(off, off + len)
@@ -346,5 +350,64 @@ class SrtlaCoreTest {
         now += 42
         feed(0, ka)
         assertEquals(42, core.stats(now).links[0].rttMs)
+    }
+
+    @Test
+    fun `a link whose socket refuses a packet hands it to the next link and is never charged with it`() {
+        register(2)
+        out.refusing += 0
+        for (s in 0 until 10) core.onClientPacket(dataPkt(s), 1316, now, out)
+        val data = out.toLinks.filter { it.second.size == 1316 }
+        assertEquals(10, data.size, "nothing lost")
+        assertTrue(data.all { it.first == 1 }, "all on link 1: ${data.map { it.first }}")
+        val st = core.stats(now).links
+        assertEquals(0, st[0].ownInFlight, "link 0's send log untouched")
+        assertEquals(0, st[0].packetsSent)
+        assertTrue(st[0].localDrops >= 1, "${st[0]}")
+        assertEquals(0L, core.stats(now).droppedLocal)
+    }
+
+    @Test
+    fun `when every socket refuses the packet is counted as dropped, not as sent`() {
+        register(2)
+        out.refusing += setOf(0, 1)
+        core.onClientPacket(dataPkt(1), 1316, now, out)
+        val st = core.stats(now)
+        assertEquals(1L, st.droppedLocal)
+        assertEquals(0L, st.packetsSent)
+        assertEquals(2L, st.localDrops)
+        assertTrue(st.links.all { it.ownInFlight == 0 })
+        // The hold is short: once the sockets drain, link 0 is used again.
+        out.refusing.clear()
+        now += 10
+        core.onClientPacket(dataPkt(2), 1316, now, out)
+        assertEquals(1L, core.stats(now).packetsSent)
+    }
+
+    @Test
+    fun `an SRT ACK echoed on every link walks the in-flight logs once`() {
+        register(3)
+        for (s in 0 until 30) core.onClientPacket(dataPkt(s), 1316, now, out)
+        val ack = ByteArray(44).also { Bytes.writeU16(it, 0, Srt.TYPE_ACK); Bytes.writeInt(it, 16, 30) }
+        repeat(3) { feed(it, ack) }
+        assertEquals(1L, core.srtAckWalks)
+        assertEquals(0, core.stats(now).links.sumOf { it.inFlight })
+    }
+
+    @Test
+    fun `retransmissions out of sequence order are still cleared by the cumulative ACK`() {
+        register(1)
+        for (s in 0 until 20) core.onClientPacket(dataPkt(s), 1316, now, out)
+        core.onClientPacket(dataPkt(3), 1316, now, out) // a resend re-enters at the tail
+        core.onClientPacket(dataPkt(20), 1316, now, out)
+        val ack = { n: Int -> ByteArray(44).also { Bytes.writeU16(it, 0, Srt.TYPE_ACK); Bytes.writeInt(it, 4, n); Bytes.writeInt(it, 16, n) } }
+        feed(0, ack(10))
+        assertEquals(11, core.stats(now).links[0].inFlight, "10..20 left, the resent 3 cleared too")
+        feed(0, ack(21))
+        assertEquals(0, core.stats(now).links[0].inFlight)
+        // In order again: the fast path clears from the head.
+        for (s in 21 until 31) core.onClientPacket(dataPkt(s), 1316, now, out)
+        feed(0, ack(26))
+        assertEquals(5, core.stats(now).links[0].inFlight)
     }
 }
