@@ -132,6 +132,13 @@ class ThermalCadenceTest {
         assertEquals(15, ThermalCadence.outputFps(30, 3, false, 0))
     }
 
+    @Test fun aPhoneCameraThatCantHoldTheRateSetsItEvenly() {
+        assertEquals(30, ThermalCadence.baseFps(60, phoneOnAir = true, cameraFps = 30))
+        assertEquals(60, ThermalCadence.baseFps(60, phoneOnAir = false, cameraFps = 30)) // external camera: unchanged
+        assertEquals(60, ThermalCadence.baseFps(60, phoneOnAir = true, cameraFps = 60))
+        assertEquals(30, ThermalCadence.baseFps(30, phoneOnAir = true, cameraFps = 24)) // 24 doesn't divide 30: keep 30
+    }
+
     @Test fun overlayAndPreviewRates() {
         assertEquals(listOf(1, 2, 4, 4), (0..3).map { ThermalCadence.browserLatchEvery(it) })
         assertEquals(1, ThermalCadence.previewEvery(0, touched = false))

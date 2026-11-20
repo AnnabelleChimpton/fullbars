@@ -28,6 +28,14 @@ internal object ThermalCadence {
     }
 
     /**
+     * The full output rate: [fps], unless the phone camera is on air and can't hold it exactly ([cameraFps], e.g. 30
+     * for a 60 fps stream on a phone with no [60, 60] range), when the output runs at the camera's rate if that divides
+     * evenly, so frames aren't shown twice in an uneven pattern.
+     */
+    fun baseFps(fps: Int, phoneOnAir: Boolean, cameraFps: Int): Int =
+        if (phoneOnAir && cameraFps in 1 until fps && fps % cameraFps == 0) cameraFps else fps
+
+    /**
      * The output rate for a [fps] stream at thermal [rung]. [phoneOnAir]: the phone camera is what's on stream;
      * [cameraFpsInUse]: the reduced rate the phone camera has actually switched to (0 if it hasn't, or can't).
      */

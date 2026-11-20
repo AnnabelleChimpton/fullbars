@@ -505,8 +505,7 @@ class Compositor(
         if (cap != g.camCapAsked) { g.camCapAsked = cap; cam.setFrameRateCap(cap) }
         val phoneOnAir = activeSource == "phone"
         val camFps = cam.cameraFps
-        // A phone camera that can't hold the configured rate (60 asked, 30 offered): run at its rate, evenly.
-        val base = if (phoneOnAir && camFps in 1 until config.fps && config.fps % camFps == 0) camFps else config.fps
+        val base = ThermalCadence.baseFps(config.fps, phoneOnAir, camFps)
         val fps = ThermalCadence.outputFps(base, rung, phoneOnAir, cam.fpsCapInUse)
         val reduced = fps < config.fps
 
@@ -701,8 +700,8 @@ class Compositor(
                 renderErrors++
                 logError("overlay upload", t)
             } finally {
-                u.bitmap?.recycle()
                 Trace.endSection()
+                u.bitmap?.recycle()
             }
         }
         g.main.bind()
@@ -726,12 +725,7 @@ class Compositor(
         }
         var phoneDrawn = false
         fun drawCard(c: Slates.Card, alpha: Float) = drawCardScene(g, c, now, clock.tick, gop, alpha)
-        // The external camera's last frame is kept over the phone camera while more of its frames are on the way (queued
-        // for the decoder), just after its clock anchored (a planned delay step, ~0.6 s with no new frame), or for
-        // PHONE_OPEN_AFTER_NS of plain silence. That stops the phone camera flashing up at every reconnect's anchoring.
-        val extHeld = !extFresh && ext != null && ext.lastFrameNs != 0L && now - ext.lastFrameNs <= EXT_HOLD_NS &&
-            (now - ext.lastFrameNs <= PHONE_OPEN_AFTER_NS || ext.queuedFrames > 0 ||
-                ext.anchoredAtNs != 0L && now - ext.anchoredAtNs <= ANCHOR_HOLD_NS)
+        val extHeld = !extFresh && ext != null && SceneRules.holdExternal(now, ext.lastFrameNs, ext.queuedFrames, ext.anchoredAtNs)
         /** The camera, its held last frame, or the Camera lost card (returned true), at [alpha]. */
         fun drawCamera(alpha: Float): Boolean {
             when {
@@ -1365,11 +1359,9 @@ class Compositor(
         private const val FLIP_HOLD_NS = 2_000_000_000L
         private const val STALL_MS = 1_500L
         private const val STARTUP_STALL_MS = 3_000L
-        private const val PHONE_OPEN_AFTER_NS = 1_000_000_000L
+        private const val PHONE_OPEN_AFTER_NS = SceneRules.PHONE_OPEN_AFTER_NS
         private const val PHONE_CLOSE_AFTER_NS = 10_000_000_000L
-        private const val EXT_HOLD_NS = 3_000_000_000L
-        /** After the external camera's clock anchors, its last frame is held (not the phone camera shown) this long. */
-        private const val ANCHOR_HOLD_NS = 2_000_000_000L
+        private const val EXT_HOLD_NS = SceneRules.EXT_HOLD_NS
         /** The external camera's usual frame interval (30 fps), for its gap counter. */
         private const val EXT_NOMINAL_INTERVAL_NS = 33_333_333L
         /** Thermal rung 2+: overlay uploads (8 MB each at 1080p) at most this often; the newest bitmap waits. */
@@ -1495,6 +1487,27 @@ internal object SceneRules {
         if (from == to || thermalRung >= 2) return false
         if (from?.family == Slates.Family.AUTOMATIC || to?.family == Slates.Family.AUTOMATIC) return false
         return to != Slates.Card.PRIVACY
+    }
+
+    /** The external camera's last frame is held this long at most before the phone camera or a card takes over. */
+    const val EXT_HOLD_NS = 3_000_000_000L
+    /** Silence from the external camera before the phone camera may take over (and is opened). */
+    const val PHONE_OPEN_AFTER_NS = 1_000_000_000L
+    /** After the external camera's clock anchors, its last frame is held (not the phone camera shown) this long. */
+    const val ANCHOR_HOLD_NS = 2_000_000_000L
+
+    /**
+     * Whether the external camera's last frame (from [lastFrameNs], 0 if none) stays on screen at [nowNs] rather than
+     * the phone camera: while more of its frames are on the way ([queuedFrames] waiting for the decoder), just after
+     * its clock anchored at [anchoredAtNs] (a planned delay step: ~0.6 s with no new frame), or for
+     * [PHONE_OPEN_AFTER_NS] of plain silence; never past [EXT_HOLD_NS]. That stops the phone camera flashing up at
+     * every reconnect's anchoring.
+     */
+    fun holdExternal(nowNs: Long, lastFrameNs: Long, queuedFrames: Int, anchoredAtNs: Long): Boolean {
+        if (lastFrameNs == 0L) return false
+        val quiet = nowNs - lastFrameNs
+        if (quiet > EXT_HOLD_NS) return false
+        return quiet <= PHONE_OPEN_AFTER_NS || queuedFrames > 0 || anchoredAtNs != 0L && nowNs - anchoredAtNs <= ANCHOR_HOLD_NS
     }
 
     /**
