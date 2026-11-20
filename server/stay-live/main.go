@@ -108,6 +108,15 @@ func main() {
 	// control API reports (state.json), so the app and the mod remote see the keeper's state without parsing logs.
 	var evMu sync.Mutex
 	var air airTracker
+	writeState := func(now time.Time) { // with evMu held
+		if *dataDir == "" {
+			return
+		}
+		st := air.state()
+		st.At = now.UTC()
+		b, _ := json.Marshal(st)
+		_ = writeFileAtomic(filepath.Join(*dataDir, stateFile), b, 0o644)
+	}
 	events := func(msg string) {
 		evMu.Lock()
 		defer evMu.Unlock()
@@ -117,11 +126,8 @@ func main() {
 			b, _ := json.Marshal(map[string]any{"t": now.Sub(t0).Seconds(), "at": now.UTC().Format(time.RFC3339Nano), "event": msg})
 			fmt.Fprintln(evf, string(b))
 		}
-		if air.add(msg) && *dataDir != "" {
-			st := air.state()
-			st.At = now.UTC()
-			b, _ := json.Marshal(st)
-			_ = writeFileAtomic(filepath.Join(*dataDir, stateFile), b, 0o644)
+		if air.add(msg) {
+			writeState(now)
 		}
 	}
 	// fatal records why the keeper stopped where the app and `docker logs` can see it, then exits.
@@ -134,9 +140,10 @@ func main() {
 	if err != nil {
 		fatal("slate: %v", err)
 	}
+	defaultSlate, saved := slate, false
 	if *phoneSlate != "" {
 		if ps, err := loadSlate(*phoneSlate); err == nil {
-			slate = ps
+			slate, saved = ps, true
 			events("using the phone's slate from its last stream")
 		} else if !errors.Is(err, os.ErrNotExist) {
 			events(fmt.Sprintf("phone slate unusable (%v); using the default", err))
@@ -167,9 +174,20 @@ func main() {
 		}
 		writeStats(*dataDir, nil)
 	}
+	// -fps is only the fallback frame length: the slates' and the live sessions' own timestamps say what it is.
 	k, err := newKeeper(newTSOut(dst), slate, int64(90000 / *fps), *stall, *hold, events)
 	if err != nil {
 		fatal("slate: %v", err)
+	}
+	if saved {
+		k.useSavedSlate(defaultSlate)
+	}
+	k.status = func(ks keeperStatus) {
+		evMu.Lock()
+		defer evMu.Unlock()
+		if air.setKeeper(ks) {
+			writeState(time.Now())
+		}
 	}
 	if *phoneSlate != "" {
 		if ws, err := loadSlate(weakSlatePath(*phoneSlate)); err == nil {
@@ -457,7 +475,7 @@ func receiveSlate(ctx context.Context, conn srt.Conn, weak bool, slates chan sla
 	var aus []*au
 	err = demuxAUs(ctx, bytes.NewReader(ts), func(a *au) { aus = append(aus, a) })
 	if err == nil {
-		_, _, _, err = prepareSlate(aus, 3000)
+		_, _, _, err = prepareSlate(aus, defaultFrameDur) // the frame length only matters for a one-frame slate
 	}
 	if err == nil {
 		var st srt.Statistics
@@ -520,6 +538,9 @@ func weakSlatePath(store string) string {
 }
 
 const maxSlateBytes = 8 << 20
+
+// defaultFrameDur is the frame length (90 kHz) assumed when nothing measured says otherwise: 30 fps.
+const defaultFrameDur = 3000
 
 func loadSlate(path string) ([]*au, error) {
 	f, err := os.Open(path)
