@@ -28,12 +28,15 @@ class CameraPlayoutTest {
         val dueCamNs: LongArray,
         val firstPlayed: Int,
         val playout: CameraPlayout,
+        /** The playout's resyncs up to the chunk at which the clock anchored (-1: it never did). */
+        val resyncsBeforeAnchor: Int = -1,
     )
 
     /**
      * Runs [seconds] of camera time. [arrivalDelayNs] gives each packet's network delay from its camera time (s);
      * [driftPpm]: the camera's clock runs fast by this much. [dropBlock] loses an audio block; [camShiftMs] adds a jump
-     * to the camera's timestamps from a camera time on.
+     * to the camera's timestamps from a camera time on. [provisional]: play during the clock's warm-up on its
+     * provisional mapping, as [CameraAudio] does.
      */
     private fun run(
         seconds: Double,
@@ -42,6 +45,7 @@ class CameraPlayoutTest {
         driftPpm: Double = 0.0,
         dropBlock: (Int) -> Boolean = { false },
         camShiftMs: (Double) -> Long = { 0L },
+        provisional: Boolean = false,
         arrivalDelayNs: (Double) -> Long,
     ): Result {
         class Ev(val atNs: Long, val video: Boolean, val camMs: Long, val pcm: ShortArray?)
@@ -75,6 +79,7 @@ class CameraPlayoutTest {
         val due = LongArray(chunks * block) { Long.MIN_VALUE }
         var next = 0
         var firstPlayed = -1
+        var resyncsBeforeAnchor = -1
         val tmp = ShortArray(block)
         for (c in 0 until chunks) {
             val pts = 1_000_000_000L + c * chunkNs // the mic chunk's first sample
@@ -83,14 +88,16 @@ class CameraPlayoutTest {
                 val e = evs[next++]
                 if (e.video) clock.onFrame(e.camMs, e.atNs) else playout.push(e.camMs * 1_000_000L, e.pcm!!)
             }
-            val target = clock.toLocalNs(0)?.let { pts - it }
+            if (resyncsBeforeAnchor < 0 && clock.isAnchored) resyncsBeforeAnchor = playout.resyncs
+            val zero = if (provisional) clock.toLocalNsProvisional(0) else clock.toLocalNs(0)
+            val target = zero?.let { pts - it }
             val n = playout.pull(tmp, block, target)
             if (n > 0 && firstPlayed < 0) firstPlayed = c * block
             tmp.copyInto(out, c * block)
             if (target != null) for (m in 0 until block) due[c * block + m] = target + m * 1_000_000_000L / rate
         }
         assertTrue("the camera never played", firstPlayed >= 0)
-        return Result(out, due, firstPlayed, playout)
+        return Result(out, due, firstPlayed, playout, resyncsBeforeAnchor)
     }
 
     /** The biggest second difference: a skipped, repeated or zeroed sample shows up here, a smooth fade doesn't. */
@@ -205,6 +212,46 @@ class CameraPlayoutTest {
         assertTrue("resyncs ${p.resyncs}", p.resyncs + p.underruns >= 1)
         assertTrue("kink ${maxKink(r.out, r.firstPlayed)}", maxKink(r.out, r.firstPlayed) < 200)
         assertTrue(longestSilence(r.out, r.out.size - 5 * rate) <= 2)
+    }
+
+    @Test fun `camera audio starts during the warm-up and realigns once at the anchoring`() {
+        val rnd = Random(4)
+        val r = run(30.0, hz = 440.0, provisional = true) { (0.1e9 + rnd.nextDouble() * 30e6).toLong() }
+        val p = r.playout
+        // Within ~2 s of the first packet (local 1.1 s here), not after the 8 s warm-up.
+        assertTrue("first played at ${r.firstPlayed / rate.toDouble()} s", r.firstPlayed < 3 * rate)
+        assertTrue(r.resyncsBeforeAnchor >= 0)
+        // A steady camera never catches up, so the warm-up's headroom stays until the anchoring takes it away: one
+        // realignment there (a 5 ms fade, the rest of that chunk silent), and nothing else.
+        assertEquals(0, r.resyncsBeforeAnchor)
+        assertEquals("resyncs", 1, p.resyncs)
+        assertEquals(0, p.underruns)
+        assertTrue("kink ${maxKink(r.out, r.firstPlayed)}", maxKink(r.out, r.firstPlayed) < 200)
+        assertTrue("silence ${longestSilence(r.out, r.firstPlayed)}", longestSilence(r.out, r.firstPlayed) <= block)
+        // And in sync with the picture once anchored.
+        val end = r.out.size
+        assertTrue(abs(lagMs(r, 440.0, end - rate, end)) < 3.0)
+    }
+
+    @Test fun `a Pocket start-up plays through its rising delay without running dry`() {
+        // 2 s of start-up delay rising by [rise] over 6 s, then caught up in a burst to 0.5 s (see IngestClockTest).
+        // The project's figure for a Pocket 3 is a 0.5-1 s rise.
+        for (rise in listOf(0.5, 0.75, 1.0)) {
+            val pocket = { t: Double -> (if (t < 6.0) 2.0 + rise * t / 6.0 else maxOf(0.5, 2.0 + rise - 0.9 * (t - 6.0))) }
+            val r = run(30.0, hz = 440.0, provisional = true) { t -> (pocket(t) * 1e9).toLong() }
+            val p = r.playout
+            assertTrue("rise $rise first played at ${r.firstPlayed / rate.toDouble()} s", r.firstPlayed < 5 * rate)
+            // Never dry: a dropout during the warm-up would hand the stream back to the phone mic for seconds.
+            assertEquals("rise $rise underruns", 0, p.underruns)
+            // One realignment, at the catch-up (a 5 ms fade, the rest of that chunk silent, then the newer audio),
+            // and none at the anchoring: by then the provisional mapping is the anchored one.
+            assertTrue(r.resyncsBeforeAnchor >= 0)
+            assertEquals("rise $rise resyncs", 1, p.resyncs)
+            assertEquals("rise $rise resyncs after anchoring", r.resyncsBeforeAnchor, p.resyncs)
+            val silence = longestSilence(r.out, r.firstPlayed)
+            assertTrue("rise $rise silence $silence", silence <= block)
+            assertTrue("rise $rise kink ${maxKink(r.out, r.firstPlayed)}", maxKink(r.out, r.firstPlayed) < 200)
+        }
     }
 
     @Test fun `nothing plays before the clock anchors, and memory stays bounded`() {
