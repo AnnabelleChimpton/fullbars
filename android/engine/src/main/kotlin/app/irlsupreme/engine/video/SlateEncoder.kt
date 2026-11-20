@@ -54,7 +54,7 @@ object SlateEncoder {
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         var egl: EglCore? = null
         try {
-            VideoEncoder.configureAvc(codec, config.width, config.height, config.fps, config.videoBitrate, config.keyframeIntervalSec)
+            val setup = VideoEncoder.configureAvc(codec, config.width, config.height, config.fps, config.videoBitrate, config.keyframeIntervalSec)
             val input = codec.createInputSurface()
             codec.start()
             val frames = ArrayList<EncodedFrame>(count)
@@ -112,6 +112,8 @@ object SlateEncoder {
             check(s != null && p != null) { "encoder gave no SPS/PPS" }
             check(frames.isNotEmpty() && frames[0].key) { "slate must start with an IDR (got ${frames.size} frames)" }
             if (frames.size < count) Log.w(TAG, "slate: encoder returned ${frames.size}/$count frames")
+            // Same format as the live encoder's own line, so a slate the server rejects can be compared at a glance.
+            Log.i(TAG, "slate encoder ${setup.copy(sps = SpsInfo.parse(ByteBuffer.wrap(s))).describe()}")
             // Live keyframes carry SPS/PPS in-band (AUD, SPS, PPS, IDR on the wire); a fresh encoder hands them over
             // only as csd-0/csd-1. Put them in front of the slate's IDR too, so every loop is decodable on its own
             // and the server can check them byte for byte against the live stream.
