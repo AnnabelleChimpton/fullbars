@@ -165,8 +165,10 @@ class BitrateControllerTest {
         while (now - start < 1_500) {
             now += 250
             q += 150 // the queue keeps growing
-            // The bond now delivers 1.8 Mbps of link bytes; the encoder follows the target ~0.5 s late.
-            c.update(now, stats(L(0, 3_000_000, 900_000, q), L(1, 3_000_000, 900_000, q)), media)
+            // The bond now delivers 1.8 Mbps of link bytes; the encoder follows the target ~0.5 s late, and the
+            // links carry what it sends (plus the usual 15%).
+            val tx = (media * 1.15).toLong() / 2
+            c.update(now, stats(L(0, tx, 900_000, q), L(1, tx, 900_000, q)), media)
             if (now - start >= 500) media = c.targetBps.toLong()
         }
         assertTrue(c.targetBps <= 2_000_000, "within 1.5 s: ${c.targetBps} (${c.lastAction})")
@@ -390,5 +392,157 @@ class BitrateControllerTest {
         now += 250
         c.update(now, stats(L(0, 2_300_000, 0, 800), L(1, 2_300_000, 0, 800)), t.toLong())
         assertEquals(t * 0.5, c.targetBps.toDouble(), 1.0)
+    }
+
+    /** One tick where both links carry 1.15x [media] and deliver [deliveredBps] between them, queueing [queueMs]. */
+    private fun tick(c: BitrateController, queueMs: Int, deliveredBps: Long, media: Long = c.targetBps.toLong()) {
+        now += 250
+        val tx = (media * 1.15).toLong() / 2
+        c.update(now, stats(L(0, tx, deliveredBps / 2, queueMs), L(1, tx, deliveredBps / 2, queueMs)), media)
+    }
+
+    @Test
+    fun `an emergency queue still growing from the encoder's lag is not halved again while the links carry the target`() {
+        val c = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        warm(c, 2.0)
+        val before = c.targetBps
+        tick(c, 800, 2_600_000, media = before.toLong())
+        val halved = c.targetBps
+        assertEquals(before * 0.5, halved.toDouble(), 1.0)
+        // The encoder keeps sending the old rate for half a second, so the queue grows; the links deliver 2.6 Mbps,
+        // 2.26 Mbps of media, which carries the new target.
+        var q = 800
+        repeat(8) {
+            q += 60
+            tick(c, q, 2_600_000, media = if (it < 2) before.toLong() else halved.toLong())
+        }
+        assertEquals(halved, c.targetBps, c.lastAction)
+        // The same, but the links deliver only 1.6 Mbps (1.39 Mbps of media): that is a real shortfall, cut again.
+        val d = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        warm(d, 2.0)
+        tick(d, 800, 1_600_000)
+        val first = d.targetBps
+        q = 800
+        repeat(4) { q += 60; tick(d, q, 1_600_000) }
+        assertTrue(d.targetBps < first, "cut again: ${d.targetBps} (${d.lastAction})")
+    }
+
+    @Test
+    fun `just under what is asked, cuts again once a second and only while the queue grows`() {
+        val c = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        warm(c, 2.0)
+        tick(c, 300, 4_600_000)
+        val first = c.targetBps
+        // The links carry 95% of the new target (in media terms): a steady small overload.
+        val delivered = (first * 0.95 * 1.15).toLong()
+        val cuts = mutableListOf<Long>()
+        val start = now
+        var q = 300
+        var last = c.targetBps
+        while (now - start < 1_000) {
+            q += 20
+            tick(c, q, delivered)
+            if (c.targetBps < last) cuts += now - start
+            last = c.targetBps
+        }
+        assertEquals(listOf(1_000L), cuts, "one cut, a second after the first (${c.lastAction})")
+        // A flat queue with the same shortfall margin doesn't cut.
+        val d = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        warm(d, 2.0)
+        tick(d, 300, 4_600_000)
+        val dFirst = d.targetBps
+        repeat(12) { tick(d, 290, (dFirst * 0.95 * 1.15).toLong()) }
+        assertEquals(dFirst, d.targetBps, d.lastAction)
+    }
+
+    @Test
+    fun `a slow drain that outlasts the episode gap is not taken for a new cliff`() {
+        val c = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        warm(c, 2.0)
+        tick(c, 450, 4_600_000)
+        val first = c.targetBps
+        // The links deliver 5% more than the new target: the queue drains, slowly, for 8 s. A keyframe lifts it now
+        // and then.
+        var q = 450
+        repeat(32) {
+            q -= 6
+            tick(c, if (it % 8 == 7) q + 120 else q, (first * 1.05 * 1.15).toLong())
+            assertEquals(first, c.targetBps, "no cut while draining (${c.lastAction})")
+        }
+        assertEquals("hold (draining)", c.lastAction)
+    }
+
+    @Test
+    fun `delivery from links with room left can't prove a shortfall`() {
+        val c = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        warm(c, 2.0)
+        // One link queues deep; the other has room (not full, short queue). Together they deliver little, but the
+        // light link was only given little.
+        fun congested() {
+            now += 250
+            c.update(now, stats(L(0, 3_500_000, 1_000_000, 420), L(1, 1_100_000, 600_000, 20, full = false)), c.targetBps.toLong())
+        }
+        val before = c.targetBps
+        congested()
+        val first = c.targetBps
+        assertEquals(before * 0.75, first.toDouble(), 1.0)
+        repeat(8) { congested() } // the queue holds at the same level
+        assertEquals(first, c.targetBps, "no delivery-driven cut: ${c.lastAction}")
+    }
+
+    /** Wi-Fi (link 0) carries 60% of 1.15x the target, cellular the rest; [wifi] says whether Wi-Fi is up. */
+    private fun bond(c: BitrateController, wifi: Boolean) {
+        now += 250
+        val tx = (c.targetBps * 1.15).toLong()
+        val w = if (wifi) tx * 6 / 10 else 0L
+        c.update(
+            now,
+            stats(L(0, w, w, 20, connected = wifi), L(1, tx - w, tx - w, 20)),
+            c.targetBps.toLong(),
+        )
+    }
+
+    @Test
+    fun `a link that comes back soon undoes its cut, so a flapping link doesn't ratchet the target down`() {
+        val c = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        repeat(8) { bond(c, wifi = true) }
+        val first = c.targetBps
+        repeat(5) {
+            val before = c.targetBps
+            val limit = c.knownLimitBps
+            bond(c, wifi = false)
+            assertTrue(c.targetBps < before * 0.5, "cut on the tick it leaves: ${c.targetBps}")
+            repeat(11) { bond(c, wifi = false) } // 3 s away
+            bond(c, wifi = true)
+            assertTrue(c.lastAction.startsWith("up (link back"), c.lastAction)
+            assertTrue(c.targetBps >= minOf(before, (limit * 0.85).toInt()), "restored: ${c.targetBps} vs $before")
+            assertEquals(limit, c.knownLimitBps, "no cliff marked")
+            repeat(40) { bond(c, wifi = true) } // 10 s up
+        }
+        assertTrue(c.targetBps >= first, "after five flaps: ${c.targetBps} vs $first at the start")
+    }
+
+    @Test
+    fun `a link that comes back late, or after congestion, keeps the cut`() {
+        val late = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        repeat(8) { bond(late, wifi = true) }
+        bond(late, wifi = false)
+        repeat(44) { bond(late, wifi = false) } // 11 s (the survivor ramps meanwhile: it has room in this model)
+        val away = late.targetBps
+        bond(late, wifi = true)
+        assertTrue(!late.lastAction.startsWith("up (link back"), "late return isn't undone: ${late.lastAction}")
+        assertTrue(late.targetBps <= away * 1.05, "no jump on its return: ${late.targetBps} vs $away")
+
+        val congested = BitrateController(minBps = 500_000, maxBps = 6_000_000, startBps = 4_000_000)
+        repeat(8) { bond(congested, wifi = true) }
+        bond(congested, wifi = false)
+        repeat(4) { // the survivor can't even carry the reduced target
+            now += 250
+            val tx = (congested.targetBps * 1.15).toLong()
+            congested.update(now, stats(L(0, 0, 0, connected = false), L(1, tx, tx / 2, 500)), congested.targetBps.toLong())
+        }
+        val after = congested.targetBps
+        bond(congested, wifi = true)
+        assertTrue(congested.targetBps <= after, "congestion since the loss: keep it (${congested.lastAction})")
     }
 }

@@ -43,7 +43,8 @@ enum class DelayPreset(val srtLatencyMs: Int, val backOffQueueMs: Int, val rampQ
  *  - delivery: what the links' receivers confirmed per second. Once every link is full, that is what the bond can
  *    carry, so a collapse is cut to it directly instead of in x0.75 steps a second apart;
  *  - link changes: a link that leaves takes its share of the traffic with it, so the target drops by that share at
- *    once instead of waiting for the queue to show it;
+ *    once instead of waiting for the queue to show it. If it comes back within [LINK_RETURN_MS] with no congestion
+ *    in between (a flapping Wi-Fi), the cut is undone;
  *  - silence: when no link has heard anything for a while (a tunnel), ACKs are overdue because nothing gets through,
  *    not because of congestion; the controller holds rather than cutting on it.
  * NAKs: a stock receiver NAKs every gap, and on bonded links most gaps are reordering, so they mean nothing there. A
@@ -54,9 +55,11 @@ enum class DelayPreset(val srtLatencyMs: Int, val backOffQueueMs: Int, val rampQ
  *
  * Policy, AIMD with memory:
  *  - congested -> x[DECREASE_FACTOR], and the level where the episode started becomes [knownLimitBps]. Within the
- *    episode, cut again (every [DESCENT_INTERVAL_MS]) only while the links deliver less than is already asked of
- *    them, to min(x0.75, what they deliver less a margin); while they deliver more, the queue is draining and the
- *    cut is working. A queue past a third of the SRT latency is an emergency: x0.5 at once;
+ *    episode, with delivery measured since the congestion began: cut again every [DESCENT_INTERVAL_MS] while the
+ *    links deliver well under what is asked of them, to min(x0.75, what they deliver less a margin); just under it,
+ *    once a second while the queue grows; at or over it, the queue is draining and the cut is working, so hold, even
+ *    past [EPISODE_GAP_MS]. A queue past a third of the SRT latency is an emergency: x0.5, and again on the faster
+ *    beat while it grows, unless the links already carry the current target;
  *  - clear (queue < preset.rampQueueMs) for [HOLD_AFTER_DECREASE_MS] -> ramp fast up to 85% of the known limit; above
  *    that, probe slowly, and only once [SETTLE_MS] have passed since the last episode began (each probe past the cliff
  *    risks a storm). Before any congestion, probing is faster ([RAMP_STARTUP_PER_S]) so good links reach full
@@ -129,12 +132,28 @@ class BitrateController(
 
     // Delivery over the last second (the link stats update it every 500 ms; ticks are ~250 ms).
     private val deliveredRing = LongArray(DELIVERED_TICKS)
+    private val deliveredAtMs = LongArray(DELIVERED_TICKS)
+    private val fullRing = BooleanArray(DELIVERED_TICKS)
     private var deliveredIdx = 0
 
     // Each connected link's share of what was sent, as of the last tick. Fixed arrays: no allocation per tick.
     private val shareIds = IntArray(MAX_TRACKED_LINKS)
     private val shares = DoubleArray(MAX_TRACKED_LINKS)
     private var shareCount = 0
+    // Ids of the links that left in the last tick (filled by lostShare).
+    private val goneIds = IntArray(MAX_TRACKED_LINKS)
+    private var goneCount = 0
+
+    // A link-loss cut that is undone if the same links come back soon: a flapping Wi-Fi shouldn't ratchet the target
+    // down a share at a time, nor mark a new cliff on each flap.
+    private val awayIds = IntArray(MAX_TRACKED_LINKS)
+    private var awayCount = 0
+    private var awaySinceMs = Long.MIN_VALUE
+    private var awayTargetBps = 0
+    private var awayLimitBps = 0
+    private var awayEpisodeStartMs = Long.MIN_VALUE
+    private var awayEpisodeLimitBps = 0
+    private var awayLastDecreaseMs = Long.MIN_VALUE
 
     // NAK and packet deltas per tick over ~2 s.
     private val nakDeltas = LongArray(LOSS_TICKS)
@@ -169,6 +188,7 @@ class BitrateController(
         if (connected == 0) { // a tunnel: nothing to measure, keep the target
             if (noLinksSinceMs == Long.MIN_VALUE) noLinksSinceMs = nowMs
             shareCount = 0
+            awayCount = 0
             lastAction = "hold (no links)"
             return targetBps
         }
@@ -179,6 +199,7 @@ class BitrateController(
         noLinksSinceMs = Long.MIN_VALUE
         if (gapEnded || resumePending) {
             resumePending = false
+            awayCount = 0
             targetBps = min(targetBps, (knownLimitBps * RESUME_SHARE).roundToInt()).coerceIn(minBps, maxBps)
             lastDecreaseMs = nowMs
             queueAtLastCut = 0
@@ -193,6 +214,7 @@ class BitrateController(
         rememberShares(stats)
         if (lost > LINK_LOSS_MIN_SHARE) {
             val old = targetBps
+            rememberAway(nowMs)
             targetBps = max(minBps.toDouble(), targetBps * (1 - min(lost, LINK_LOSS_MAX_SHARE)) * LINK_LOSS_MARGIN)
                 .roundToInt().coerceIn(minBps, maxBps)
             startEpisode(nowMs, old)
@@ -203,7 +225,26 @@ class BitrateController(
             lastAction = "down (link lost, carried ${(lost * 100).roundToInt()}%)"
             return targetBps
         }
-        recordDelivered(stats)
+        if (awayCount > 0) {
+            if (nowMs - awaySinceMs > LINK_RETURN_MS) {
+                awayCount = 0
+            } else if (allBack(stats)) {
+                // Back before anything else went wrong: the cut was for a link that is carrying again. Return to where
+                // things were (no higher than the fast-ramp ceiling), as if it had never left.
+                val restored = min(awayTargetBps, (awayLimitBps * NEAR_LIMIT).roundToInt())
+                targetBps = max(targetBps, restored).coerceIn(minBps, maxBps)
+                knownLimitBps = awayLimitBps
+                episodeStartMs = awayEpisodeStartMs
+                episodeLimitBps = awayEpisodeLimitBps
+                lastDecreaseMs = awayLastDecreaseMs
+                congestedSinceMs = Long.MIN_VALUE
+                awayCount = 0
+                deliveredRing.fill(0) // measured without the link
+                lastAction = "up (link back, ${targetBps / 1000} kbps)"
+                return targetBps
+            }
+        }
+        recordDelivered(nowMs, stats)
         // Every link silent: overdue ACKs say nothing gets through, not that the bond is congested. Hold everything.
         if (allQuiet(stats, SILENT_MIN_MS, 3)) {
             if (silentSinceMs == Long.MIN_VALUE) silentSinceMs = nowMs
@@ -234,6 +275,7 @@ class BitrateController(
                 lastDecreaseMs = nowMs
                 queueAtLastCut = queue
                 lossHistory = 0
+                awayCount = 0
                 lastAction = "down (unrecovered loss)"
             } else {
                 lastAction = "hold (loss)"
@@ -248,13 +290,19 @@ class BitrateController(
     private fun congested(nowMs: Long, stats: SenderStats, queue: Int, mediaBps: Long, sinceDecrease: Long) {
         val emergency = queue > preset.srtLatencyMs / 3
         val newEpisode = sinceDecrease >= EPISODE_GAP_MS
-        val delivered = deliveredRing.max()
+        // Only delivery measured after the congestion began counts: a window from before it shows what the links
+        // carried then (often more, if the capacity just dropped), and would read as "draining" for a second.
+        val delivered = fullDelivered(congestedSinceMs + DELIVERY_WINDOW_MS)
         val clampedOverhead = overhead.coerceIn(OVERHEAD_CLAMP_MIN, OVERHEAD_CLAMP_MAX)
         val deliveredMedia = delivered / clampedOverhead
         // Compared with what's already asked of the encoder, not only what it still produces: after a cut it keeps
         // sending at the old rate for ~0.5 s, and that lag mustn't be read as the bond falling further behind.
         val asked = min(mediaBps, targetBps.toLong()).toDouble()
         val shortfall = delivered > 0 && deliveredMedia < asked * SHORTFALL_SHARE
+        val behind = delivered > 0 && deliveredMedia < asked
+        val growing = queue > queueAtLastCut
+        // Congested for a while already, and the links now carry at least what is asked: the queue is draining.
+        val draining = delivered > 0 && !behind
         // What the bond can carry, once congestion has lasted a delivery window and every link is full (a link with
         // room left could carry more, so its delivery says nothing about capacity).
         val anchor = if (delivered > 0 && nowMs - congestedSinceMs >= DELIVERY_WINDOW_MS && allFull(stats)) {
@@ -268,6 +316,9 @@ class BitrateController(
             allQuiet(stats, QUIET_MIN_MS, 2) -> lastAction = "hold (links quiet)"
             // The backlog a silence left behind drains by itself once the links are back, unless they carry less now.
             afterSilence && !shortfall -> lastAction = "hold (draining after silence)"
+            // Five seconds since the last cut, but still the same congestion, and the cut is working: a slow drain is
+            // not a new cliff (cutting here again is how a 10% overshoot became a halving in testing).
+            newEpisode && draining -> lastAction = "hold (draining)"
             newEpisode -> {
                 // The first cut of an episode never anchors to delivery: before congestion the links were carrying
                 // only what the encoder gave them, which says nothing about what they could carry.
@@ -275,11 +326,28 @@ class BitrateController(
                 cut(nowMs, queue, if (emergency) min((targetBps * factor).roundToInt(), anchor) else (targetBps * factor).roundToInt(), "down")
             }
             else -> {
-                // Within an episode: with a delivery figure, cut again while the bond carries less than is asked of
-                // it; without one, while the queue keeps growing.
-                val again = if (delivered > 0) shortfall else queue > queueAtLastCut
-                val interval = if (delivered > 0 || emergency) DESCENT_INTERVAL_MS else DECREASE_INTERVAL_MS
-                if (sinceDecrease >= interval && (again || (emergency && queue > queueAtLastCut))) {
+                // Within an episode. Delivering well under what is asked: the bond is falling behind, cut every half
+                // second. Just under it (the margin is within the delivery figure's noise), or with no delivery figure
+                // at all: cut once a second while the queue keeps growing. Delivering at least what is asked: the
+                // queue is draining and the cut is working.
+                var again = false
+                var interval = DECREASE_INTERVAL_MS
+                if (delivered <= 0L) {
+                    again = growing
+                    if (emergency) interval = DESCENT_INTERVAL_MS
+                } else if (shortfall) {
+                    again = true
+                    interval = DESCENT_INTERVAL_MS
+                } else if (behind) {
+                    again = growing
+                }
+                // An emergency queue that still grows cuts on the faster beat too, unless the links already carry the
+                // current target: then the growth is the encoder still sending at the old rate (it lags a cut by up
+                // to ~0.5 s), and the queue drains once the cut lands. Real overhead here, not the clamped one, so a
+                // storm's resends still count against what the links deliver.
+                val emergencyAgain = emergency && growing &&
+                    (delivered <= 0L || delivered / max(overhead, OVERHEAD_CLAMP_MIN) < targetBps)
+                if ((again && sinceDecrease >= interval) || (emergencyAgain && sinceDecrease >= DESCENT_INTERVAL_MS)) {
                     cut(nowMs, queue, min((targetBps * factor).roundToInt(), anchor), "down")
                 } else {
                     lastAction = "hold (draining)"
@@ -289,6 +357,7 @@ class BitrateController(
     }
 
     private fun cut(nowMs: Long, queue: Int, to: Int, verb: String) {
+        awayCount = 0 // congested after a link left: the lower level was real, don't undo it if the link returns
         targetBps = to.coerceIn(minBps, maxBps)
         lastDecreaseMs = nowMs
         queueAtLastCut = queue
@@ -354,14 +423,29 @@ class BitrateController(
         }
     }
 
-    private fun recordDelivered(stats: SenderStats) {
+    private fun recordDelivered(nowMs: Long, stats: SenderStats) {
         var d = 0L
         for (i in stats.links.indices) {
             val l = stats.links[i]
             if (l.phase == LinkPhase.CONNECTED) d += l.deliveredBps
         }
         deliveredRing[deliveredIdx] = d
+        deliveredAtMs[deliveredIdx] = nowMs
+        fullRing[deliveredIdx] = allFull(stats)
         deliveredIdx = (deliveredIdx + 1) % deliveredRing.size
+    }
+
+    /**
+     * The highest delivery over the last second, from ticks at or after [sinceMs] when every link was full. A tick
+     * with room left on some link (the queue had drained, or the encoder gave the links less) shows what they were
+     * given, not what they can carry, so it can neither prove nor rule out a shortfall. 0 when there is no such tick.
+     */
+    private fun fullDelivered(sinceMs: Long): Long {
+        var best = 0L
+        for (i in deliveredRing.indices) {
+            if (fullRing[i] && deliveredAtMs[i] >= sinceMs && deliveredRing[i] > best) best = deliveredRing[i]
+        }
+        return best
     }
 
     /** Every connected link has heard nothing for max([minMs], [rtts] x its base RTT). */
@@ -404,16 +488,52 @@ class BitrateController(
         }
     }
 
-    /** The summed share (as of the last tick) of links that were connected then and aren't now. */
+    /**
+     * Remembers the state before a link-loss cut (the links that left are in [goneIds]). While an earlier loss is
+     * still pending, its links are added and the state from before it is kept.
+     */
+    private fun rememberAway(nowMs: Long) {
+        if (awayCount == 0) {
+            awaySinceMs = nowMs
+            awayTargetBps = targetBps
+            awayLimitBps = knownLimitBps
+            awayEpisodeStartMs = episodeStartMs
+            awayEpisodeLimitBps = episodeLimitBps
+            awayLastDecreaseMs = lastDecreaseMs
+        }
+        for (k in 0 until goneCount) if (awayCount < MAX_TRACKED_LINKS) awayIds[awayCount++] = goneIds[k]
+    }
+
+    /** Every link of the pending link-loss cut is connected again. */
+    private fun allBack(stats: SenderStats): Boolean {
+        for (k in 0 until awayCount) {
+            var back = false
+            for (i in stats.links.indices) {
+                val l = stats.links[i]
+                if (l.id == awayIds[k] && l.phase == LinkPhase.CONNECTED) { back = true; break }
+            }
+            if (!back) return false
+        }
+        return true
+    }
+
+    /**
+     * The summed share (as of the last tick) of links that were connected then and aren't now; their ids go to
+     * [goneIds].
+     */
     private fun lostShare(stats: SenderStats): Double {
         var lost = 0.0
+        goneCount = 0
         for (k in 0 until shareCount) {
             var still = false
             for (i in stats.links.indices) {
                 val l = stats.links[i]
                 if (l.id == shareIds[k] && l.phase == LinkPhase.CONNECTED) { still = true; break }
             }
-            if (!still) lost += shares[k]
+            if (!still) {
+                lost += shares[k]
+                goneIds[goneCount++] = shareIds[k]
+            }
         }
         return lost
     }
@@ -515,6 +635,8 @@ class BitrateController(
          */
         const val LINK_LOSS_MAX_SHARE = 0.7
         const val LINK_LOSS_MARGIN = 0.9
+        /** A link back within this long of a link-loss cut, with no congestion since, undoes the cut. */
+        const val LINK_RETURN_MS = 10_000L
         private const val MAX_TRACKED_LINKS = 16
         private const val DELIVERED_TICKS = 4
         /** NAK rate above this (with a reorder-tolerant receiver) stops the ramp; it never cuts by itself. */

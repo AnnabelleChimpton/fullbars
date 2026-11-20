@@ -67,6 +67,20 @@ class AbrBenchTest {
         return if (reached < 0) 20_000.0 else reached.toDouble()
     }
 
+    /**
+     * One 6 Mbit link drops to [toBps] after a minute; returns the lowest target over the next 20 s as a share of the
+     * new knee. A cut that goes far deeper than the bond needs costs picture quality for the whole climb back.
+     */
+    private fun stepDownLow(seed: Long, toBps: Long): Double {
+        val sim = BondSim(listOf(LinkSpec(6_000_000, 50)), controller(), seed)
+        sim.run(60_000)
+        sim.setRate(0, toBps)
+        val knee = sim.kneeMediaBps().toDouble()
+        var low = Double.MAX_VALUE
+        sim.run(20_000) { low = minOf(low, it.controller.targetBps / knee) }
+        return low
+    }
+
     /** One link at 2.5 Mbit for a minute, then 6: ms until the target reaches 85% of the new knee (capped at 120 s). */
     private fun stepUp(seed: Long): Double {
         val sim = BondSim(listOf(LinkSpec(2_500_000, 50)), controller(), seed)
@@ -89,6 +103,24 @@ class AbrBenchTest {
         var reached = -1L
         sim.run(10_000) { if (reached < 0 && it.controller.targetBps <= goal) reached = it.nowMs - at }
         return if (reached < 0) 10_000.0 else reached.toDouble()
+    }
+
+    /**
+     * Wi-Fi (3 Mbit) and cellular (2 Mbit); after a minute the Wi-Fi drops out for 3 s every 15 s, for 2 minutes.
+     * Returns the mean target over those 2 minutes as a share of the knee with both links up.
+     */
+    private fun flap(seed: Long): Double {
+        val sim = BondSim(listOf(LinkSpec(3_000_000, 30), LinkSpec(2_000_000, 80)), controller(), seed)
+        sim.run(60_000)
+        val knee = sim.kneeMediaBps().toDouble()
+        val from = sim.samples.size
+        repeat(8) {
+            sim.setConnected(0, false)
+            sim.run(3_000)
+            sim.setConnected(0, true)
+            sim.run(12_000)
+        }
+        return sim.samples.drop(from).map { it.targetBps.toDouble() }.average() / knee
     }
 
     /** The steady bond seeded with a stale 6 Mbps measurement: ms until the target is back under the cliff's knee. */
@@ -126,8 +158,11 @@ class AbrBenchTest {
         record("steady.p95QueueMs", st.map { it.p95Queue })
         record("steady.cutsPerMin", st.map { it.cutsPerMin })
         record("stepDown.msToSafe", seeds.map { stepDown(it) })
+        record("stepDown.lowestTargetOverKnee", seeds.map { stepDownLow(it, 2_500_000) })
+        record("stepDown3.lowestTargetOverKnee", seeds.map { stepDownLow(it, 3_000_000) })
         record("stepUp.msTo85PctKnee", seeds.map { stepUp(it) })
         record("linkLoss.msToSafe", seeds.map { linkLoss(it) })
+        record("flap.meanTargetOverKnee", seeds.map { flap(it) })
         record("staleSeed.msUnderKnee", seeds.map { staleSeed(it) })
         val tu = seeds.map { tunnel(it) }
         record("tunnel.downsDuringBlackout", tu.map { it.downsDuring })
@@ -151,9 +186,14 @@ class AbrBenchTest {
         check(v("staleSeed.msUnderKnee", "p90") <= 2_500.0, "stale seed: under the cliff within 2.5 s")
         check(v("tunnel.downsDuringBlackout", "p90") == 0.0, "tunnel: no cuts while all links are silent")
         check(v("tunnel.targetAfter3sOverBefore", "p10") >= 0.85, "tunnel: >= 85% of the pre-tunnel target 3 s after")
-        // No regression against the committed baseline on the low tail of the steady state.
+        // No regression against the committed baseline on the low tail of the steady state, nor in how far a
+        // step-down overshoots (fast to safe must not mean deeper than needed).
         val base = baseline("steady.p10TargetOverKnee", "p10")
         if (base != null) check(v("steady.p10TargetOverKnee", "p10") >= base - 0.02, "steady p10 no worse than the baseline ($base)")
+        for (k in listOf("stepDown.lowestTargetOverKnee", "stepDown3.lowestTargetOverKnee", "flap.meanTargetOverKnee")) {
+            val b = baseline(k, "p50") ?: continue
+            check(v(k, "p50") >= b - UNDERSHOOT_TOLERANCE, "$k no deeper than the baseline ($b)")
+        }
         assertTrue(failures.isEmpty(), "bench: ${failures.joinToString("; ")}\n${json()}")
     }
 
@@ -175,5 +215,7 @@ class AbrBenchTest {
     private companion object {
         const val MIN_BPS = 1_000_000
         const val MAX_BPS = 6_000_000
+        /** Seed-to-seed spread of the lowest target is about this much; a real regression is larger. */
+        const val UNDERSHOOT_TOLERANCE = 0.03
     }
 }

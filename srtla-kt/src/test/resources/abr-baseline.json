@@ -5,8 +5,11 @@
   "steady.p95QueueMs": {"p10": 48.0000, "p50": 93.0000, "p90": 110.0000},
   "steady.cutsPerMin": {"p10": 1.2020, "p50": 1.6027, "p90": 1.6027},
   "stepDown.msToSafe": {"p10": 1250.0000, "p50": 1250.0000, "p90": 2250.0000},
+  "stepDown.lowestTargetOverKnee": {"p10": 0.6243, "p50": 0.6659, "p90": 0.7007},
+  "stepDown3.lowestTargetOverKnee": {"p10": 0.5930, "p50": 0.6531, "p90": 0.7384},
   "stepUp.msTo85PctKnee": {"p10": 55750.0000, "p50": 81750.0000, "p90": 120000.0000},
   "linkLoss.msToSafe": {"p10": 2000.0000, "p50": 2250.0000, "p90": 2500.0000},
+  "flap.meanTargetOverKnee": {"p10": 0.3606, "p50": 0.3766, "p90": 0.3867},
   "tunnel.downsDuringBlackout": {"p10": 4.0000, "p50": 4.0000, "p90": 4.0000},
   "tunnel.targetAfter3sOverBefore": {"p10": 0.3164, "p50": 0.3292, "p90": 0.3358}
 }
