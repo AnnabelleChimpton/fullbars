@@ -222,11 +222,12 @@ class FailoverTest {
             nakLoop(t + 20)
         }
 
-        override fun toLink(linkId: Int, buf: ByteArray, off: Int, len: Int) {
+        // A dead uplink still takes the packet: it leaves the phone and is lost in the network, so this is true.
+        override fun toLink(linkId: Int, buf: ByteArray, off: Int, len: Int): Boolean {
             val p = buf.copyOfRange(off, off + len)
             if (Srt.dataSeq(p, len) != null) dataSent[linkId] += now
-            if (upDead[linkId]) return
-            at(now + oneWayMs[linkId]) { atReceiver(linkId, p) }
+            if (!upDead[linkId]) at(now + oneWayMs[linkId]) { atReceiver(linkId, p) }
+            return true
         }
 
         override fun toClient(buf: ByteArray, off: Int, len: Int) {
