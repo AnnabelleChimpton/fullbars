@@ -215,9 +215,12 @@ void main() {
 }
 """
 
+// The texture coordinate is highp even where colour is mediump: on GPUs with FP16 varyings a mediump coordinate
+// has ~11 bits of mantissa, too few to land on the centre of every texel across 1920 pixels, so the 1:1 copy into
+// the encoder would sample between texels and soften the picture. ES 3.0 guarantees highp in fragment shaders.
 private const val FRAG_2D = """
 precision mediump float;
-varying vec2 vTex;
+varying highp vec2 vTex;
 uniform sampler2D sTex;
 uniform float uAlpha;
 void main() {
@@ -228,7 +231,7 @@ void main() {
 
 private const val FRAG_OES = """#extension GL_OES_EGL_image_external : require
 precision mediump float;
-varying vec2 vTex;
+varying highp vec2 vTex;
 uniform samplerExternalOES sTex;
 uniform float uAlpha;
 uniform float uTexAlpha;
