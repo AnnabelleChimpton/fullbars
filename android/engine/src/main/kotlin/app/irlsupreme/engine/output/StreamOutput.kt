@@ -16,6 +16,12 @@ interface StreamOutput {
     val lastFailure: String?
     /** Drops recovered by reconnecting (the recap's "kept you live" count). */
     val recoveredDrops: Int
+    /** How long the send backlog takes to leave, for outputs that can tell (0 otherwise). */
+    val queueDelayMs: Int get() = 0
+    /** Bits/s measured leaving the socket, for outputs that can tell (0 otherwise). */
+    val throughputBps: Long get() = 0
+    /** Frames the output dropped while live (its own drops plus the protocol client's), for outputs that count them. */
+    val droppedFrames: Long get() = 0
 
     fun setVideoConfig(sps: ByteBuffer, pps: ByteBuffer)
     fun setAudioConfig(sampleRate: Int, stereo: Boolean)
