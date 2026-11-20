@@ -9,7 +9,7 @@ only written here once it has been measured; "not measured yet" means exactly th
 | Encoder settings, rate window, SPS reading | `android/engine/src/test` (JVM) | every build |
 | Bonding behaviour when a link dies (fake clock) | `srtla-kt/src/test/kotlin/srtlakt/FailoverTest.kt` | every build |
 | Encoder cadence, bitrate tracking, slate match, AAC level, pixel-exact copy | `android/engine/src/androidTest` | by hand on a phone, before each release |
-| Bonding against real receivers over shaped links | `bench/netem` | weekly CI job, and by hand |
+| Bonding against real receivers over shaped links | `bench/netem` | on-demand CI job, and by hand |
 | A/V offset and repeated frames, end to end | `tools/avsync` | by hand with the phone, before each release |
 
 ## On-device checks (before each release)
@@ -57,9 +57,9 @@ Each run writes `result.json`. The headline numbers per scenario:
 - **resend excess** (`retransmit_excess_ratio`): resends beyond the real losses; high means reordering is mistaken for
   loss.
 
-The weekly job runs every scenario 3 times (more on demand) and posts medians and their spread next to
+The on-demand job runs every scenario 3 times by default and posts medians and their spread next to
 `bench/baseline.json`. It only reports: a difference smaller than the spread between runs is noise, and the baseline
-stays empty until a few weekly runs have shown how big that spread is.
+stays empty until a few runs have shown how big that spread is.
 
 ## A/V sync
 
@@ -96,7 +96,7 @@ link dies), not from a real network; FailoverTest prints them on every run. The 
 | Slate GOP size at 1080p | not measured yet | EncoderCadenceTest |
 | A/V offset, cases 1-6 | not measured yet | tools/avsync |
 | Repeated frames, 10 min walk | not measured yet | tools/avsync |
-| Unrecoverable packets per scenario | not measured yet | weekly netem job |
+| Unrecoverable packets per scenario | not measured yet | netem job |
 
 Known gap the simulation found: when the link that dies was added before the link that carries its resends, an
 acknowledgement for the resend is credited to the dead link. It is then refilled every few seconds and never declared

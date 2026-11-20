@@ -10,7 +10,7 @@ python3 bench/netem/report.py results/*/result.json             # medians over s
 ```
 
 Each run leaves `results/<run id>/` (git-ignored) with the raw logs, `verify.txt` and `result.json`; `verify.py`
-explains every number. `run.sh` lists the scenarios and settings at the top. The weekly GitHub job
+explains every number. `run.sh` lists the scenarios and settings at the top. The on-demand GitHub job
 (`.github/workflows/netem.yml`) runs every scenario with several seeds and compares the medians with
 `bench/baseline.json`; see [docs/BENCHMARKS.md](../../docs/BENCHMARKS.md).
 

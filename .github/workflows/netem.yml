@@ -1,11 +1,9 @@
 # The bonding bench: our sender against real SRTLA receivers over three tc-netem-shaped links (bench/netem), each
 # scenario repeated with several seeds, medians posted to the job summary next to bench/baseline.json.
-# Weekly and on demand. Report only: nothing here fails on a worse number until run-to-run noise is known.
+# On demand only. Report only: nothing here fails on a worse number until run-to-run noise is known.
 name: Bonding bench (netem)
 
 on:
-  schedule:
-    - cron: "17 3 * * 1" # Mondays, 03:17 UTC
   workflow_dispatch:
     inputs:
       seeds:

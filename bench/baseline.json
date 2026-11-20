@@ -1,4 +1,4 @@
 {
- "about": "Medians the weekly netem job compares against (bench/netem/report.py). Empty until the first runs on the CI runner have shown how noisy each number is; then copy that run's medians.json groups here in a commit of their own.",
+ "about": "Medians the netem job compares against (bench/netem/report.py). Empty until the first runs on the CI runner have shown how noisy each number is; then copy that run's medians.json groups here in a commit of their own.",
  "groups": {}
 }
