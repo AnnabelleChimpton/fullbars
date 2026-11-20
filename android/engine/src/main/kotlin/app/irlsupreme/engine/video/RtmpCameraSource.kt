@@ -139,9 +139,13 @@ class RtmpCameraSource(val clock: IngestClock) {
         }
         val feedNs = RtmpFeedScheduler.feedDueNs(due, ptsMs, dtsMs, DECODE_LEAD_NS)
         synchronized(pending) {
-            if (pending.size >= MAX_PENDING) { // seconds behind: drop the backlog, resume at the next keyframe
+            // Seconds behind in camera time (or a memory guard): drop the backlog, resume at the next keyframe. A
+            // bound in time, not frames, so a 60 fps camera's catch-up burst isn't thrown away mid-warm-up.
+            val head = pending.peekFirst()
+            if (head != null && (clock.backlogHopeless(head.ptsMs, ptsMs) || pending.size >= MAX_PENDING)) {
                 pending.clear()
                 waitingForKey = true
+                clock.noteBacklogFlush()
             }
             if (waitingForKey && !keyframe) return
             waitingForKey = false
@@ -309,8 +313,11 @@ class RtmpCameraSource(val clock: IngestClock) {
         const val TAG = "Engine"
         /** Hardware decode latency allowance: frames go in this far ahead of their presentation time. */
         const val DECODE_LEAD_NS = 40_000_000L
-        /** ~4 s at 30 fps: beyond that the camera is hopelessly behind; skip to a keyframe. */
-        const val MAX_PENDING = 120
+        /**
+         * A memory guard only (10 s at 60 fps): [IngestClock.backlogHopeless] decides when the camera is hopelessly
+         * behind, in camera time.
+         */
+        const val MAX_PENDING = 600
         /** Decoded buffers held for their presentation time; more would starve the decoder. */
         const val MAX_HELD_OUTPUTS = 3
         /** 2 MiB, or a whole uncompressed 1080p frame if that's larger. */
