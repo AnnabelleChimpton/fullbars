@@ -85,6 +85,14 @@ class SrtOutput(
 
     override fun congested(): Boolean = phase == ConnectionPhase.LIVE && runCatching { client.hasCongestion() }.getOrDefault(false)
 
+    /**
+     * Frames RootEncoder's SRT client dropped from its own send queue (it filled up: the bonder or network couldn't
+     * keep up), video and audio, since the stream started. Not part of [StreamOutput]: only this client counts them.
+     */
+    val libraryDroppedVideoFrames: Long get() = runCatching { client.droppedVideoFrames }.getOrDefault(0L)
+    val libraryDroppedAudioFrames: Long get() = runCatching { client.droppedAudioFrames }.getOrDefault(0L)
+    val libraryDroppedFrames: Long get() = libraryDroppedVideoFrames + libraryDroppedAudioFrames
+
     override fun stop() {
         stopping = true
         handler.removeCallbacksAndMessages(null)
