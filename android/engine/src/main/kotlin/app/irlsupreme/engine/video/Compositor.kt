@@ -145,6 +145,13 @@ class Compositor(
     @Volatile var stabilization = StabilizationMode.STANDARD
         set(v) { field = v; camera?.setStabilization(v) }
 
+    /**
+     * The detail rung, for the engine to set from the bitrate: 1, 0.75 or 0.5 (other values snap to the nearest; see
+     * [DetailScale]). Below 1 the camera, phone or external, is drawn at that scale with a filtered downscale and
+     * scaled back up; cards, overlays, alerts and chat stay at full resolution. The encoder's size never changes.
+     */
+    @Volatile var detailScale = 1f
+
     /** The phone camera's median capture-to-tick latency (ns), or null when it isn't known (see [CameraSource.cameraLatencyNs]). */
     val cameraLatencyNs: Long? get() = camera?.cameraLatencyNs
     /** Its 95th percentile (ns), or null. */
@@ -376,6 +383,12 @@ class Compositor(
         var browserStill: Fbo? = null
         /** The overlay content [browserStill] shows (so a different page never shows the old one's still). */
         var browserStillFor: BrowserSource.Content? = null
+        /** The detail rung's smaller framebuffer and filter, while [detailScale] is below 1. */
+        var detail: Fbo? = null
+        var detailScaleInUse = 1f
+        var downscaler: DetailDownscaler? = null
+        /** The filter failed on this phone: full detail for the rest of the stream. */
+        var detailFailed = false
 
         // This tick's facts, for the timing step after it ([pace]).
         var phoneGot = false
@@ -722,13 +735,13 @@ class Compositor(
         /** The camera, its held last frame, or the Camera lost card (returned true), at [alpha]. */
         fun drawCamera(alpha: Float): Boolean {
             when {
-                extFresh || extHeld -> { g.programOes.draw(ext!!.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera" }
+                extFresh || extHeld -> { drawCameraFrame(g, ext!!.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera" }
                 g.phoneOpen && cam.lastFrameNs != 0L && now - cam.lastFrameNs <= holdNs -> {
-                    g.programOes.draw(cam.texture, cam.texMatrix, alpha = alpha); activeSource = "phone"; phoneDrawn = true
+                    drawCameraFrame(g, cam.texture, cam.texMatrix, GlUtil.IDENTITY, alpha); activeSource = "phone"; phoneDrawn = true
                 }
                 // External camera dropped and the phone camera isn't up yet: hold its last frame rather than flash a card.
                 ext != null && ext.lastFrameNs != 0L && now - ext.lastFrameNs <= EXT_HOLD_NS -> {
-                    g.programOes.draw(ext.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera"
+                    drawCameraFrame(g, ext.texture, ext.texMatrix, extFit(ext), alpha); activeSource = "camera"
                 }
                 else -> { drawCard(Slates.Card.CAMERA_LOST, alpha); activeSource = "none"; return true }
             }
@@ -1035,6 +1048,51 @@ class Compositor(
     }
 
     /**
+     * Render thread: a camera frame into the main FBO at [alpha], through the detail rung's smaller framebuffer when
+     * [detailScale] is below 1. Leaves the main FBO bound. If the filter can't run on this phone, it's full detail
+     * for the rest of the stream (counted once in [renderErrors]).
+     */
+    private fun drawCameraFrame(g: Gpu, tex: Int, texMatrix: FloatArray, pos: FloatArray, alpha: Float) {
+        val scale = if (g.detailFailed) 1f else DetailScale.snap(detailScale)
+        if (scale >= 1f) {
+            if (g.detail != null) freeDetail(g)
+            g.programOes.draw(tex, texMatrix, pos, alpha)
+            return
+        }
+        val small = try {
+            val d = g.downscaler ?: DetailDownscaler().also { g.downscaler = it }
+            if (g.detail == null || g.detailScaleInUse != scale) {
+                g.detail?.release()
+                g.detail = null
+                val size = DetailScale.size(config.width, config.height, scale)
+                g.detail = Fbo(size[0], size[1])
+                g.detailScaleInUse = scale
+            }
+            val f = g.detail!!
+            f.bind()
+            GLES30.glClearColor(0f, 0f, 0f, 1f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+            d.draw(tex, texMatrix, pos, f.width, f.height)
+            f
+        } catch (t: Throwable) {
+            g.detailFailed = true
+            renderErrors++
+            logError("detail rung (full detail from now on)", t)
+            freeDetail(g)
+            null
+        }
+        g.main.bind()
+        if (small != null) g.program2d.draw(small.texture, alpha = alpha) // GL_LINEAR back up to full size
+        else g.programOes.draw(tex, texMatrix, pos, alpha)
+    }
+
+    private fun freeDetail(g: Gpu) {
+        g.detail?.let { runCatching { it.release() } }
+        g.detail = null
+        g.detailScaleInUse = 1f
+    }
+
+    /**
      * Render thread: copies the overlay page's current frame into [Gpu.browserStill] (premultiplied, as drawn), to
      * stand in for the page while it's closed for heat.
      */
@@ -1281,6 +1339,8 @@ class Compositor(
         browserRef = null
         pendingOverlay.getAndSet(null)?.bitmap?.recycle()
         runCatching { g.browserStill?.release() }
+        runCatching { g.detail?.release() }
+        runCatching { g.downscaler?.release() }
         runCatching { g.main.release() }
         runCatching { g.previewFbo.release() }
         runCatching { egl.release() }
