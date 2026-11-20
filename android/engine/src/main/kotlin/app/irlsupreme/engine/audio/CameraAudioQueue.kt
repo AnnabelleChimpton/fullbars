@@ -69,15 +69,29 @@ internal class AacFrameQueue(private val capacity: Int = CAPACITY) {
 
 /**
  * Feeder thread body: hands queued frames to [input] in order while [running], waiting as long as it takes for an
- * input buffer rather than dropping a frame (the queue's bound is the only place frames are lost).
+ * input buffer rather than dropping a frame (the queue's bound is the only place frames are lost to backpressure).
+ *
+ * A decoder that throws on one frame (a transient codec error) loses only that frame: [onError] hears of it and the
+ * feeder carries on with the next, so the camera's audio doesn't stop for the rest of the codec's life. At most one
+ * error per frame, so a decoder that keeps failing can't spin the thread. Exits once [running] says so.
  */
-internal fun feedDecoder(queue: AacFrameQueue, input: DecoderInput, running: () -> Boolean) {
+internal fun feedDecoder(
+    queue: AacFrameQueue,
+    input: DecoderInput,
+    running: () -> Boolean,
+    onError: (Exception) -> Unit = {},
+) {
     while (running()) {
         val aac = queue.poll(POLL_MS) ?: continue
         val ptsUs = queue.polledPtsMs * 1000
-        while (running()) {
-            val idx = input.dequeueInputBuffer(INPUT_WAIT_US)
-            if (idx >= 0) { input.queue(idx, aac, ptsUs); break }
+        try {
+            while (running()) {
+                val idx = input.dequeueInputBuffer(INPUT_WAIT_US)
+                if (idx >= 0) { input.queue(idx, aac, ptsUs); break }
+            }
+        } catch (e: Exception) {
+            if (!running()) return // stopped under us: the codec's errors mean nothing now
+            onError(e)
         }
     }
 }

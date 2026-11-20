@@ -43,8 +43,12 @@ class CameraAudio(private val clock: IngestClock, private val outRate: Int, priv
     val underruns: Int get() = playout.underruns
     /** Lost camera audio frames filled with faded silence of the same length. */
     val gapFills: Int get() = playout.gapFills
-    /** Compressed frames dropped because the decoder fell ~1 s behind (not Wi-Fi loss: that's [gapFills]). */
-    val decoderDrops: Int get() = queue.drops
+    /**
+     * Compressed frames the decoder never got: it fell ~1 s behind, or refused a frame with an error (not Wi-Fi loss:
+     * that's [gapFills]).
+     */
+    val decoderDrops: Int get() = queue.drops + inputErrors
+    @Volatile private var inputErrors = 0
     /** Times the playout aligned to the clock again (the clock or the camera's timeline jumped). */
     val resyncs: Int get() = playout.resyncs
     /** Camera audio in hand at the last chunk (ms). */
@@ -91,9 +95,11 @@ class CameraAudio(private val clock: IngestClock, private val outRate: Int, priv
         val n = inChannels
         drain = Thread({ drainLoop(c, r, n) }, "ingest-audio-decode").apply { start() }
         feeder = Thread({ feedLoop(c) }, "ingest-audio-feed").apply { start() }
-        // The camera's real rate settles whether conversion ever runs (the Pocket 3 is expected to send 48 kHz).
-        Log.i(TAG, "camera audio: AAC $inRate Hz, $inChannels ch (object type ${cfg.objectType}, ASC ${hex(asc)})" +
-            if (inRate == outRate) "" else ", converting to $outRate Hz")
+        // What the camera announces (the Pocket 3 is expected to send 48 kHz). Whether conversion runs is the decoder's
+        // say, logged when its output format arrives: with HE-AAC (SBR) it decodes at twice the announced rate.
+        val sbr = cfg.objectType == AOT_SBR || cfg.objectType == AOT_PS
+        Log.i(TAG, "camera audio: announced AAC $inRate Hz, $inChannels ch (object type ${cfg.objectType}" +
+            (if (sbr) ", SBR: decodes at twice that" else "") + ", ASC ${hex(asc)})")
     }
 
     /** RTMP read thread: queue the frame for the decoder and return at once. */
@@ -103,10 +109,12 @@ class CameraAudio(private val clock: IngestClock, private val outRate: Int, priv
     }
 
     private fun feedLoop(c: MediaCodec) {
-        try {
-            feedDecoder(queue, CodecInput(c)) { codec === c }
-        } catch (e: Exception) {
-            if (codec === c) Log.w(TAG, "camera audio decoder input failed", e)
+        var errors = 0
+        feedDecoder(queue, CodecInput(c), { codec === c }) { e ->
+            inputErrors++
+            // The first per codec in full, then a count now and then: a codec that keeps failing mustn't flood the log.
+            if (errors++ == 0) Log.w(TAG, "camera audio decoder refused a frame", e)
+            else if (errors % 100 == 0) Log.w(TAG, "camera audio decoder refused $errors frames")
         }
     }
 
@@ -210,6 +218,9 @@ class CameraAudio(private val clock: IngestClock, private val outRate: Int, priv
     internal companion object {
         const val TAG = "Engine"
         const val MIN_COVERAGE = 0.9
+        /** AAC object types that carry SBR (HE-AAC v1) and parametric stereo (HE-AAC v2). */
+        const val AOT_SBR = 5
+        const val AOT_PS = 29
         val RATES = intArrayOf(96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350)
 
         /**

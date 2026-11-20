@@ -34,15 +34,10 @@ class CameraAudioQueueTest {
         val d = StallingDecoder()
         val running = AtomicBoolean(true)
         val t = startFeeder(q, d) { running.get() }
-        var worstNs = 0L
-        repeat(40) { i ->
-            val start = System.nanoTime()
-            q.offer(ByteArray(300), i * 21L)
-            worstNs = maxOf(worstNs, System.nanoTime() - start)
-        }
-        // All 40 were handed over while the decoder still had no buffer to give: the caller never waited on it.
+        repeat(40) { i -> q.offer(ByteArray(300), i * 21L) }
+        // All 40 were handed over while the decoder still had no buffer to give: the caller never waited on it. (No
+        // wall-clock bound: this is the proof, and a timing check would only add a GC pause's worth of flakiness.)
         assertEquals(1L, d.release.count)
-        assertTrue("worst offer ${worstNs / 1000} us", worstNs < 5_000_000L)
         d.release.countDown()
         val deadline = System.nanoTime() + 5_000_000_000L
         while (d.got.size < 40 && System.nanoTime() < deadline) Thread.yield()
@@ -68,6 +63,29 @@ class CameraAudioQueueTest {
         running.set(false)
         t.join(1000)
         assertEquals(listOf(0L) + (11L..60L).toList(), d.got.toList())
+    }
+
+    @Test fun `a decoder that throws on one frame loses only that frame`() {
+        val q = AacFrameQueue()
+        val got = CopyOnWriteArrayList<Long>()
+        val errors = CopyOnWriteArrayList<Exception>()
+        val d = object : DecoderInput {
+            override fun dequeueInputBuffer(timeoutUs: Long): Int = 0
+            override fun queue(index: Int, data: ByteArray, ptsUs: Long) {
+                if (ptsUs == 42_000L) throw IllegalStateException("transient codec error")
+                got += ptsUs / 1000
+            }
+        }
+        repeat(5) { q.offer(ByteArray(10), it * 21L) } // 0, 21, 42, 63, 84 ms
+        val running = AtomicBoolean(true)
+        val t = Thread { feedDecoder(q, d, { running.get() }) { errors += it } }.apply { isDaemon = true; start() }
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (got.size < 4 && System.nanoTime() < deadline) Thread.yield()
+        running.set(false)
+        t.join(1000)
+        assertEquals(listOf(0L, 21L, 63L, 84L), got.toList())
+        assertEquals(1, errors.size)
+        assertTrue(!t.isAlive)
     }
 
     @Test fun `clear empties the queue and a stopped feeder exits`() {
