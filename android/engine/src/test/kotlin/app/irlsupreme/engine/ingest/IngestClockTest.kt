@@ -81,6 +81,9 @@ class IngestClockTest {
         val clock = IngestClock()
         val frames = run(clock, 20.0, ::pocket)
         assertNull("nothing before the first frame", frames[0].provisionalNs)
+        // From the first frame: its delay (2 s from camera time 0, sent at local 10 s) plus the allowance and the
+        // warm-up headroom, so the 1 s rise that follows never outruns the audio.
+        assertEquals(12_000_000_000L + jitterNs + IngestClock.WARMUP_AUDIO_HEADROOM_NS, frames[1].provisionalNs)
         val anchorAt = frames.indexOfFirst { it.anchored }
         val before = frames[anchorAt].provisionalNs!! // read just before the anchoring frame
         val after = clock.toLocalNs(0)!!
@@ -93,6 +96,28 @@ class IngestClockTest {
         assertEquals(2, all.distinct().size)
         // Once anchored, the provisional mapping is the anchored one.
         assertEquals(clock.toLocalNs(12_345), clock.toLocalNsProvisional(12_345))
+    }
+
+    @Test fun `a steady camera keeps the warm-up headroom until the anchoring takes it away`() {
+        val clock = IngestClock()
+        val frames = run(clock, 12.0) { 0.2 }
+        val anchorAt = frames.indexOfFirst { it.anchored }
+        val warm = frames.take(anchorAt + 1).mapNotNull { it.provisionalNs }
+        // Held through the warm-up (only the whole-ms rounding of camera timestamps can nudge it).
+        assertTrue("warm-up mapping moved", warm.max() - warm.min() <= 1_000_000)
+        val moved = warm.last() - clock.toLocalNs(0)!!
+        // Anchoring moves the audio once, earlier by the headroom (to within the whole-ms timestamps).
+        assertTrue("moved ${moved / 1_000_000} ms", abs(moved - IngestClock.WARMUP_AUDIO_HEADROOM_NS) <= 1_000_000)
+    }
+
+    @Test fun `the video backlog bound is camera time, whatever the frame rate`() {
+        val clock = IngestClock()
+        // The Pocket's warm-up at its worst: the allowance plus a 2.5 s catch-up queued, ~92 frames at 30 fps and
+        // ~184 at 60. Neither is hopeless.
+        assertFalse(clock.backlogHopeless(0, 600 + 2_500))
+        // Seconds beyond that is.
+        assertTrue(clock.backlogHopeless(0, 600 + IngestClock.MAX_BACKLOG_BEYOND_ALLOWANCE_MS + 1))
+        assertFalse(clock.backlogHopeless(1_000, 1_000)) // one frame
     }
 
     @Test fun `normal Wi-Fi jitter never re-anchors`() {

@@ -214,32 +214,44 @@ class CameraPlayoutTest {
         assertTrue(longestSilence(r.out, r.out.size - 5 * rate) <= 2)
     }
 
-    @Test fun `camera audio starts during the warm-up and plays straight through the anchoring`() {
+    @Test fun `camera audio starts during the warm-up and realigns once at the anchoring`() {
         val rnd = Random(4)
         val r = run(30.0, hz = 440.0, provisional = true) { (0.1e9 + rnd.nextDouble() * 30e6).toLong() }
         val p = r.playout
-        // Within ~1 s of the first packet (local 1.1 s here), not after the 8 s warm-up.
-        assertTrue("first played at ${r.firstPlayed / rate.toDouble()} s", r.firstPlayed < 2 * rate)
+        // Within ~2 s of the first packet (local 1.1 s here), not after the 8 s warm-up.
+        assertTrue("first played at ${r.firstPlayed / rate.toDouble()} s", r.firstPlayed < 3 * rate)
         assertTrue(r.resyncsBeforeAnchor >= 0)
-        assertTrue("resyncs ${p.resyncs}", p.resyncs - r.resyncsBeforeAnchor <= 1)
+        // A steady camera never catches up, so the warm-up's headroom stays until the anchoring takes it away: one
+        // realignment there (a 5 ms fade, the rest of that chunk silent), and nothing else.
+        assertEquals(0, r.resyncsBeforeAnchor)
+        assertEquals("resyncs", 1, p.resyncs)
         assertEquals(0, p.underruns)
         assertTrue("kink ${maxKink(r.out, r.firstPlayed)}", maxKink(r.out, r.firstPlayed) < 200)
-        assertTrue("silence ${longestSilence(r.out, r.firstPlayed)}", longestSilence(r.out, r.firstPlayed) <= 2)
+        assertTrue("silence ${longestSilence(r.out, r.firstPlayed)}", longestSilence(r.out, r.firstPlayed) <= block)
         // And in sync with the picture once anchored.
         val end = r.out.size
         assertTrue(abs(lagMs(r, 440.0, end - rate, end)) < 3.0)
     }
 
-    @Test fun `a Pocket start-up through the provisional mapping crosses the anchoring with at most one resync`() {
-        // 2 s of start-up delay rising by 1 s over 6 s, then caught up by 2.5 s in a burst (see IngestClockTest).
-        val pocket = { t: Double -> (if (t < 6.0) 2.0 + t / 6.0 else maxOf(0.5, 3.0 - 0.9 * (t - 6.0))) }
-        val r = run(30.0, hz = 440.0, provisional = true) { t -> (pocket(t) * 1e9).toLong() }
-        val p = r.playout
-        assertTrue(r.resyncsBeforeAnchor >= 0)
-        assertTrue("resyncs after anchoring ${p.resyncs - r.resyncsBeforeAnchor}", p.resyncs - r.resyncsBeforeAnchor <= 1)
-        assertTrue("kink ${maxKink(r.out, r.firstPlayed)}", maxKink(r.out, r.firstPlayed) < 200)
-        assertTrue(longestSilence(r.out, r.out.size - 5 * rate) <= 2)
-        assertTrue("first played at ${r.firstPlayed / rate.toDouble()} s", r.firstPlayed < 5 * rate)
+    @Test fun `a Pocket start-up plays through its rising delay without running dry`() {
+        // 2 s of start-up delay rising by [rise] over 6 s, then caught up in a burst to 0.5 s (see IngestClockTest).
+        // The project's figure for a Pocket 3 is a 0.5-1 s rise.
+        for (rise in listOf(0.5, 0.75, 1.0)) {
+            val pocket = { t: Double -> (if (t < 6.0) 2.0 + rise * t / 6.0 else maxOf(0.5, 2.0 + rise - 0.9 * (t - 6.0))) }
+            val r = run(30.0, hz = 440.0, provisional = true) { t -> (pocket(t) * 1e9).toLong() }
+            val p = r.playout
+            assertTrue("rise $rise first played at ${r.firstPlayed / rate.toDouble()} s", r.firstPlayed < 5 * rate)
+            // Never dry: a dropout during the warm-up would hand the stream back to the phone mic for seconds.
+            assertEquals("rise $rise underruns", 0, p.underruns)
+            // One realignment, at the catch-up (a 5 ms fade, the rest of that chunk silent, then the newer audio),
+            // and none at the anchoring: by then the provisional mapping is the anchored one.
+            assertTrue(r.resyncsBeforeAnchor >= 0)
+            assertEquals("rise $rise resyncs", 1, p.resyncs)
+            assertEquals("rise $rise resyncs after anchoring", r.resyncsBeforeAnchor, p.resyncs)
+            val silence = longestSilence(r.out, r.firstPlayed)
+            assertTrue("rise $rise silence $silence", silence <= block)
+            assertTrue("rise $rise kink ${maxKink(r.out, r.firstPlayed)}", maxKink(r.out, r.firstPlayed) < 200)
+        }
     }
 
     @Test fun `nothing plays before the clock anchors, and memory stays bounded`() {

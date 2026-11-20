@@ -36,6 +36,8 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
     private var minOffsetNs = Long.MAX_VALUE // lowest (arrival - camera time) seen late in the warm-up
     private var lowestSoFarNs = Long.MAX_VALUE // lowest (arrival - camera time) seen in the whole warm-up
     private var lowestAtNs = 0L // when that lowest arrived
+    private var provisionalBaseNs = NONE // the settled lowest delay behind the provisional mapping
+    private var firstBaseNs = NONE // the first frame's delay
     private var windowMinSlackNs = Long.MAX_VALUE
     private var windowMinArrivalNs = Long.MAX_VALUE
     private var windowFrames = 0
@@ -102,7 +104,8 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
 
     /**
      * Like [toLocalNs], but during the warm-up gives a provisional mapping instead of null, so the camera's audio can
-     * play from the start: the lowest arrival delay seen so far plus [jitterMs]. Null only before the first frame.
+     * play from the start: the lowest arrival delay seen so far plus [jitterMs], plus [WARMUP_AUDIO_HEADROOM_NS] until
+     * the camera has caught up. Null only before the first frame.
      *
      * Why the lowest and not the latest arrival: the latest moves with every frame's Wi-Fi delay, and the Pocket's
      * delay rises ~15% faster than real time for its first seconds, far more than the audio playout can follow by
@@ -110,6 +113,12 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
      * only once it has stopped moving for [SETTLE_NS], so the Pocket's catch-up (2.5 s of frames in a fraction of a
      * second) is one realignment rather than a stutter, and after it the mapping is the one anchoring will pick: the
      * same baseline plus the same allowance.
+     *
+     * Why the headroom: a mapping that only moves down can't follow the rise either, and the Pocket's delay rises by
+     * 0.5-1 s before it catches up. The jitter allowance alone covered ~0.75 s of that; past it the audio ran dry until
+     * the catch-up, seconds of the phone mic in the middle of the warm-up. The headroom covers a 1 s rise. It goes
+     * once the lowest delay has dropped by more than the headroom (the camera caught up, so the rise is over); a
+     * camera that never catches up keeps it until anchoring, which then moves the audio once, by about the headroom.
      */
     fun toLocalNsProvisional(cameraMs: Long): Long? {
         if (anchored) return cameraMs * 1_000_000L + offsetNs
@@ -127,6 +136,16 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
      */
     @Synchronized
     fun noteBacklogFlush() { backlogFlushes++ }
+
+    /**
+     * Whether a compressed video backlog from camera time [oldestMs] to [newestMs] is hopelessly behind: more than
+     * [MAX_BACKLOG_BEYOND_ALLOWANCE_MS] of camera time beyond the jitter allowance. A bound in camera time rather than
+     * a frame count, so it means the same at 60 fps as at 30: frames are held [jitterMs] after they arrive in the
+     * warm-up, and a camera's catch-up burst (the Pocket's is ~2.5 s) lands on top of that. A count sized for 30 fps
+     * would throw a 60 fps camera's catch-up away mid-warm-up and freeze the picture until the next keyframe.
+     */
+    fun backlogHopeless(oldestMs: Long, newestMs: Long): Boolean =
+        newestMs - oldestMs > jitterMs + MAX_BACKLOG_BEYOND_ALLOWANCE_MS
 
     /** Everything worth showing about ingest health, read at [nowNs]. */
     fun health(nowNs: Long): IngestHealth = IngestHealth(
@@ -149,6 +168,8 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
         firstFrameNs = 0L
         minOffsetNs = Long.MAX_VALUE
         lowestSoFarNs = Long.MAX_VALUE
+        provisionalBaseNs = NONE
+        firstBaseNs = NONE
         clearArrivalMins()
     }
 
@@ -161,11 +182,11 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
         val arrivalNs = nowNs - cameraMs * 1_000_000L // this frame's delay, as far as the camera's clock can say
         if (!anchored) {
             if (firstFrameNs == 0L) firstFrameNs = nowNs
-            val inWarmup = nowNs - firstFrameNs
-            if (inWarmup >= WARMUP_NS - BASELINE_WINDOW_NS) {
+            val sinceFirstNs = nowNs - firstFrameNs
+            if (sinceFirstNs >= WARMUP_NS - BASELINE_WINDOW_NS) {
                 if (arrivalNs < minOffsetNs) minOffsetNs = arrivalNs
             }
-            if (inWarmup < WARMUP_NS) {
+            if (sinceFirstNs < WARMUP_NS) {
                 trackProvisional(arrivalNs, nowNs)
                 presentationSpareNs = jitterNs
                 return nowNs + jitterNs
@@ -174,7 +195,7 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
             offsetNs = minOffsetNs + jitterNs
             anchored = true
             warmups++
-            warmupTotalNs += inWarmup
+            warmupTotalNs += sinceFirstNs
             lastAnchorNs = nowNs
             windowMinSlackNs = Long.MAX_VALUE
             windowMinArrivalNs = Long.MAX_VALUE
@@ -224,12 +245,20 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
         return due
     }
 
-    /** Warm-up: the audio's mapping follows the lowest delay so far, once that has settled (see [toLocalNsProvisional]). */
+    /**
+     * Warm-up: the audio's mapping follows the lowest delay so far, once that has settled, with headroom until the
+     * camera has caught up (see [toLocalNsProvisional]).
+     */
     private fun trackProvisional(arrivalNs: Long, nowNs: Long) {
         if (arrivalNs < lowestSoFarNs) { lowestSoFarNs = arrivalNs; lowestAtNs = nowNs }
-        val p = provisionalOffsetNs
-        val candidate = lowestSoFarNs + jitterNs
-        if (p == NONE || (candidate < p && nowNs - lowestAtNs >= SETTLE_NS)) provisionalOffsetNs = candidate
+        if (provisionalBaseNs == NONE) {
+            provisionalBaseNs = arrivalNs
+            firstBaseNs = arrivalNs
+        } else if (lowestSoFarNs < provisionalBaseNs && nowNs - lowestAtNs >= SETTLE_NS) {
+            provisionalBaseNs = lowestSoFarNs
+        }
+        val caughtUp = provisionalBaseNs < firstBaseNs - WARMUP_AUDIO_HEADROOM_NS
+        provisionalOffsetNs = provisionalBaseNs + jitterNs + if (caughtUp) 0L else WARMUP_AUDIO_HEADROOM_NS
     }
 
     private fun clearArrivalMins() { arrivalMinsCount = 0; arrivalMinsNext = 0 }
@@ -252,6 +281,13 @@ class IngestClock(private val jitterMs: Long = DEFAULT_JITTER_MS) {
         private const val BASELINE_WINDOW_NS = 3_000_000_000L
         /** A lower warm-up delay moves the audio's provisional mapping only after it has held this long. */
         const val SETTLE_NS = 300_000_000L
+        /**
+         * Extra delay on the audio's provisional mapping until the camera catches up: with the jitter allowance (and
+         * the playout's own 150 ms of extra lag) it covers a rise of 1 s, the most seen from a Pocket 3.
+         */
+        const val WARMUP_AUDIO_HEADROOM_NS = 500_000_000L
+        /** See [backlogHopeless]. */
+        const val MAX_BACKLOG_BEYOND_ALLOWANCE_MS = 4_000L
         private const val WINDOW_FRAMES = 30
         private const val STEP_NS = 10_000_000L
         private const val STEP_UP_LATE_NS = 20_000_000L
