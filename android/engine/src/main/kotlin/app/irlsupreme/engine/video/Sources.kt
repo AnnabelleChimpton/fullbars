@@ -32,7 +32,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.LockSupport
 
 private const val TAG = "Engine"
 
@@ -42,39 +41,6 @@ private const val TAG = "Engine"
  * session is LIVE the old camera can't be producing any more, so frames are the new camera's.
  */
 internal fun cameraFrameUsable(switching: Boolean, phase: CameraPhase): Boolean = !switching || phase == CameraPhase.LIVE
-
-/**
- * Fixed-rate clock on System.nanoTime() (CLOCK_MONOTONIC). Not Choreographer/vsync, so it keeps ticking with the
- * screen off. If the render thread falls more than a period behind, ticks are skipped so output timestamps
- * show the real gap instead of bunching up.
- */
-class FrameClock(fps: Int) {
-    val periodNs = 1_000_000_000L / fps
-    private val t0 = System.nanoTime()
-    var tick = 0L
-        private set
-
-    fun tickTimeNs(): Long = t0 + tick * periodNs
-
-    /** Sleeps until the current tick; returns how many ticks were skipped because we were late. */
-    fun awaitTick(): Long {
-        val target = tickTimeNs()
-        while (true) {
-            val now = System.nanoTime()
-            if (now >= target) break
-            LockSupport.parkNanos(target - now)
-        }
-        val late = System.nanoTime() - target
-        if (late > periodNs) {
-            val skipped = late / periodNs
-            tick += skipped
-            return skipped
-        }
-        return 0
-    }
-
-    fun advance() { tick++ }
-}
 
 /**
  * Camera2 phone camera (back or front) -> SurfaceTexture (OES). Camera callbacks run on their own thread; the render
