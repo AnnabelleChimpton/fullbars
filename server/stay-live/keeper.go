@@ -142,6 +142,9 @@ type keeper struct {
 	// appEnds: this server's app calls /v1/end when the streamer stops, so a session the phone closes is a
 	// reconnect, never the end (no cleanEndWait fallback).
 	appEnds bool
+	// endPending takes an end request the watcher hasn't passed on yet (it polls every endPoll); nil = none. The
+	// app asks before it closes its session, so a clean close can arrive first and must not put the slate on air.
+	endPending func() bool
 
 	endAsked     bool      // the app said the stream ended: finish when the live session closes
 	endAskedAt   time.Time // when it said so (endWait)
@@ -684,6 +687,17 @@ func (k *keeper) onEndRequest(now time.Time) {
 	}
 }
 
+// endRequested reports an end request that has arrived but not yet been acted on: one already passed on by the
+// watcher, or one still waiting for its next poll.
+func (k *keeper) endRequested() bool {
+	select {
+	case <-k.ends:
+		return true
+	default:
+	}
+	return k.endPending != nil && k.endPending()
+}
+
 // checkEnd runs on every tick: the deadlines of onEndRequest and of the clean-close fallback.
 func (k *keeper) checkEnd(now time.Time) {
 	switch {
@@ -728,6 +742,9 @@ func (k *keeper) onEnded(ev liveEvent, now time.Time) {
 		why = ev.err.Error()
 	case quiet >= endGrace:
 		why = fmt.Sprintf("timed out %.0fs after its last data", quiet.Seconds())
+	}
+	if !k.endAsked && ev.err == nil && quiet < endGrace && k.endRequested() {
+		k.endAsked, k.endAskedAt = true, now
 	}
 	if k.endAsked {
 		k.finish(fmt.Sprintf("the app said so; session %d closed", ev.session))

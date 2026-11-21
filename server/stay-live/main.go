@@ -222,6 +222,7 @@ func main() {
 		ends := make(chan struct{}, 1)
 		k.ends = ends
 		k.appEnds = appCallsEnd(*dataDir)
+		k.endPending = func() bool { at, ok := takeEndRequest(*dataDir); return ok && !at.Before(t0) }
 		go watchEndRequests(ctx, *dataDir, t0, ends)
 	}
 	go acceptLoop(ctx, ln, live, slates, quality, *phoneSlate, *dataDir, events)

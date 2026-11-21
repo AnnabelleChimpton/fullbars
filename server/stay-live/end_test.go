@@ -110,6 +110,39 @@ func TestEndRequestWhileLiveWaitsForTheSessionToClose(t *testing.T) {
 	f.has(t, "stream ended by the streamer (the app said so; session 1 closed)")
 }
 
+// The app asks to end (POST /v1/end) and closes its session at once, before the watcher's next poll: the close
+// must end the stream, not put the slate on air for a moment.
+func TestEndRequestNotYetPolledWhenTheSessionCloses(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		passed  bool // the watcher already passed it on (waiting in k.ends)
+		pending bool // still in the file, not yet polled
+	}{{"passed on", true, false}, {"not yet polled", false, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			f := liveKeeper(t, true)
+			ends := make(chan struct{}, 1)
+			if c.passed {
+				ends <- struct{}{}
+			}
+			f.k.ends = ends
+			pending := c.pending
+			f.k.endPending = func() bool { p := pending; pending = false; return p }
+			f.end(1, nil, f.t0.Add(200*time.Millisecond))
+			if !f.k.finished || f.k.st == stateSlate {
+				t.Fatalf("expected the stream to end without the slate, finished=%v st=%v", f.k.finished, f.k.st)
+			}
+			f.has(t, "stream ended by the streamer (the app said so; session 1 closed)")
+		})
+	}
+	// A dropout (a timeout, long after the last data) is not taken for an end, whatever is pending.
+	f := liveKeeper(t, true)
+	f.k.endPending = func() bool { t.Fatal("a timeout must not look for an end request"); return false }
+	f.end(1, nil, f.t0.Add(31*time.Second))
+	if f.k.finished {
+		t.Fatal("a timed-out session is a dropout")
+	}
+}
+
 func TestEndRequestAfterTheSessionClosedEndsAtOnce(t *testing.T) {
 	f := liveKeeper(t, false)
 	f.end(1, nil, f.t0.Add(100*time.Millisecond)) // the phone closed first: a dropout so far
