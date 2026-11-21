@@ -339,4 +339,10 @@ class SetupLogicTest {
         assertFalse(isCleanTest(summary(error = "timeout"), wasTest = true))
         assertFalse(isCleanTest(summary(liveMs = 0), wasTest = true))
     }
+
+    @Test fun `a preview closed before going live has no recap, a failed start still does`() {
+        assertTrue(cancelledPreview(summary(liveMs = 0, bytes = 0)))
+        assertFalse(cancelledPreview(summary(liveMs = 0, bytes = 0, error = "Couldn't reach Twitch")))
+        assertFalse(cancelledPreview(summary()))
+    }
 }

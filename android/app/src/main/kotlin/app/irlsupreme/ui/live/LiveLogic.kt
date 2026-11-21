@@ -174,7 +174,8 @@ internal fun micCell(muted: Boolean, input: AudioInput, batteryPercent: Int?): M
 
 internal const val TIMER_PENDING = "–:––:––"
 
-internal fun timerLabel(liveSinceMs: Long, isTest: Boolean): String = when {
+internal fun timerLabel(liveSinceMs: Long, isTest: Boolean, preview: Boolean = false): String = when {
+    preview -> "PREVIEW"
     liveSinceMs == 0L -> "CONNECTING"
     isTest -> "TEST"
     else -> "LIVE"

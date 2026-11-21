@@ -44,6 +44,8 @@ import app.irlsupreme.ui.live.noticeHeight
 import app.irlsupreme.ui.live.pillAssertive
 import app.irlsupreme.ui.live.pillGrowth
 import app.irlsupreme.ui.live.pillModel
+import app.irlsupreme.ui.live.goLiveLabel
+import app.irlsupreme.ui.live.goLiveSpoken
 import app.irlsupreme.ui.live.pillSlot
 import app.irlsupreme.ui.live.railColumnWidth
 import app.irlsupreme.ui.live.railKeyHeight
@@ -463,5 +465,21 @@ class LiveScreenLogicTest {
         assertNull(chatSheetStatus(null))
         assertNull(chatSheetStatus("Chat connected"))
         assertEquals("Chat reconnecting…", chatSheetStatus("Chat reconnecting…"))
+    }
+
+    @Test fun `the preview says nobody sees it yet, and its key says what starts`() {
+        val preview = EngineState(running = true, preview = true)
+        val pill = pillModel(preview, Health.CONNECTING, isTest = false, bonded = false, ending = false)
+        assertEquals("Preview · not live", pill.headline)
+        assertEquals("Only you can see this", pill.second)
+        assertFalse(pill.look.fullSlot)
+        // Ending wins: Cancel in the preview still says Ending.
+        assertEquals(PillLook.ENDING, pillModel(preview, Health.CONNECTING, false, false, ending = true).look)
+        assertEquals("PREVIEW", timerLabel(0, isTest = false, preview = true))
+        assertEquals("CONNECTING", timerLabel(0, isTest = false, preview = false))
+        assertEquals("GO LIVE", goLiveLabel(isTest = false))
+        assertEquals("START TEST", goLiveLabel(isTest = true))
+        assertEquals("Go live on camera", goLiveSpoken(isTest = false, startOnCard = false))
+        assertEquals("Start the test on your Starting soon screen", goLiveSpoken(isTest = true, startOnCard = true))
     }
 }

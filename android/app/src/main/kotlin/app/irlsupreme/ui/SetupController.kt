@@ -149,6 +149,9 @@ internal fun readyVerdict(blocker: Blocker?, preflight: Preflight?, quality: Qua
  * A clean test: it reached Twitch, nothing dropped, the video never had to recover and nothing failed. Only
  * then does Home hand the streamer straight on to "Go live now"; any doubt and Test stays selected.
  */
+/** A stream closed from its preview: it never went live and nothing went wrong, so there's no recap to show. */
+internal fun cancelledPreview(s: SessionSummary): Boolean = s.liveSinceMs == 0L && s.lastError == null && s.bytesSent == 0L
+
 internal fun isCleanTest(s: SessionSummary, wasTest: Boolean): Boolean =
     wasTest && s.liveDurationMs > 0 && s.recoveredDrops == 0 && s.encoderRecoveries == 0 && s.lastError == null
 
@@ -580,7 +583,8 @@ class SetupController internal constructor(private val ctx: Context, private val
      */
     internal fun refreshSession(afterStream: Boolean = false) {
         session.consumeUnexpectedEnd()?.let { unexpectedEnd = it }
-        val r = session.unseenSummary()
+        // A preview closed before going live (nothing sent, nothing wrong) has nothing to recap.
+        val r = session.unseenSummary()?.takeUnless { cancelledPreview(it) }
         recap = r
         recapLinks = when {
             !lastStartWasBonded -> 1
@@ -1236,7 +1240,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                         return@launch
                     }
                     startService(test, bonded = true) {
-                        StreamService.startBonded(ctx, p.host, p.port, "live/${p.publishId}", p.srtPassphrase, outW, outH, quality.bitrate, userId, streamFps)
+                        StreamService.startBonded(ctx, p.host, p.port, "live/${p.publishId}", p.srtPassphrase, outW, outH, quality.bitrate, userId, streamFps, preview = true)
                     }
                 } catch (e: TwitchException) {
                     onTwitchFailure(e)
@@ -1256,7 +1260,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                     val setup = withContext(Dispatchers.IO) { twitch.prepareBroadcast(bandwidthTest = testMode) }
                     channel = setup.channel
                     startService(testMode, bonded = false) {
-                        StreamService.start(ctx, setup.publishUrl.url, outW, outH, quality.bitrate, setup.user.id, streamFps)
+                        StreamService.start(ctx, setup.publishUrl.url, outW, outH, quality.bitrate, setup.user.id, streamFps, preview = true)
                     }
                 } catch (e: TwitchException) {
                     onTwitchFailure(e)
@@ -1275,7 +1279,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                 try {
                     withContext(Dispatchers.IO) { secrets.put("stream_key", k) }
                     val userId = signedInUserId()
-                    startService(testMode, bonded = false) { StreamService.start(ctx, keyUrl(k), outW, outH, quality.bitrate, userId, streamFps) }
+                    startService(testMode, bonded = false) { StreamService.start(ctx, keyUrl(k), outW, outH, quality.bitrate, userId, streamFps, preview = true) }
                 } finally {
                     busy = false
                 }

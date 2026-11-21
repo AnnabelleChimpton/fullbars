@@ -114,7 +114,8 @@ class StreamService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                goForeground() // within moments of startForegroundService, whatever happens next
+                val preview = intent.getBooleanExtra(EXTRA_PREVIEW, false)
+                goForeground(preview) // within moments of startForegroundService, whatever happens next
                 if (live) { Log.i(TAG, "already live; ignoring a second Go live"); return START_NOT_STICKY }
                 val bondHost = intent.getStringExtra(EXTRA_BOND_HOST)
                 val url = intent.getStringExtra(EXTRA_URL)
@@ -161,7 +162,7 @@ class StreamService : Service() {
                     val fps = StreamRules.fps(choices.fps, choices.camera is CameraInput.Phone) {
                         app.irlsupreme.engine.video.CameraCapabilities.supports(this, CameraPrefs.startFacing(this), choices.width, choices.height, 60)
                     }
-                    val config = StreamRules.config(target, choices, fps)
+                    val config = StreamRules.config(target, choices, fps).copy(startInPreview = preview)
                     SessionLogText.startLines(sessionStart(config, choices.fps)).forEach(log::essential)
                     // The battery as the stream starts, for the recap's battery per hour and the heat ladder's floor.
                     readBattery()
@@ -178,7 +179,7 @@ class StreamService : Service() {
                     }
                     if (started) {
                         startedTarget = config.target
-                        log.line("engine started, connecting")
+                        log.line(if (preview) "engine started, in preview: nothing is sent until Go live" else "engine started, connecting")
                     } else {
                         log.essential("start failed: ${engine.state.value.lastError ?: "no reason given"}")
                     }
@@ -199,6 +200,20 @@ class StreamService : Service() {
                 ?.let { runCatching { Scene.valueOf(it) }.getOrNull() }
                 ?.let { engine.setScene(it) }
             ACTION_MIC -> engine.setMicMuted(intent.getBooleanExtra(EXTRA_MUTED, false))
+            ACTION_GO_LIVE -> {
+                val scene = intent.getStringExtra(EXTRA_SCENE)?.let { runCatching { Scene.valueOf(it) }.getOrNull() }
+                val gen = generation
+                engineExec.execute {
+                    val went = engine.goLive(scene)
+                    main.post {
+                        if (gen != generation || destroyed) return@post
+                        if (went) {
+                            sessionLog?.essential("go live${scene?.let { " on ${it.name}" } ?: ""}")
+                            goForeground(preview = false)
+                        }
+                    }
+                }
+            }
         }
         // Not sticky: Android 14+ forbids restarting camera/mic foreground services from the background anyway.
         return START_NOT_STICKY
@@ -1020,7 +1035,8 @@ class StreamService : Service() {
         super.onDestroy()
     }
 
-    private fun goForeground() {
+    /** [preview]: the stream is in preview, not live yet; the notification says so until Go live. */
+    private fun goForeground(preview: Boolean = false) {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "Live stream", NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(
@@ -1029,8 +1045,8 @@ class StreamService : Service() {
         )
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(app.irlsupreme.R.drawable.ic_stat_fullbars)
-            .setContentTitle("You're live")
-            .setContentText("Tap to open the live screen")
+            .setContentTitle(if (preview) "Preview: not live yet" else "You're live")
+            .setContentText(if (preview) "Tap to check your shot and go live" else "Tap to open the live screen")
             .setContentIntent(open)
             .setOngoing(true)
             .setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
@@ -1077,6 +1093,10 @@ class StreamService : Service() {
         const val ACTION_STOP = "app.irlsupreme.STOP"
         const val ACTION_SCENE = "app.irlsupreme.SCENE"
         const val ACTION_MIC = "app.irlsupreme.MIC"
+        /** Ends the preview and starts sending; [EXTRA_SCENE] optionally names the scene viewers see first. */
+        const val ACTION_GO_LIVE = "app.irlsupreme.GO_LIVE"
+        /** Start in preview: nothing is sent until [ACTION_GO_LIVE]. */
+        const val EXTRA_PREVIEW = "preview"
         const val EXTRA_SCENE = "scene"
         const val EXTRA_MUTED = "muted"
         const val EXTRA_URL = "url"
@@ -1091,12 +1111,12 @@ class StreamService : Service() {
         const val EXTRA_BOND_STREAM_ID = "bond_stream_id"
         const val EXTRA_BOND_PASSPHRASE = "bond_passphrase"
 
-        fun start(ctx: Context, url: String, width: Int, height: Int, bitrate: Int, broadcasterId: String? = null, fps: Int = 30) {
+        fun start(ctx: Context, url: String, width: Int, height: Int, bitrate: Int, broadcasterId: String? = null, fps: Int = 30, preview: Boolean = false) {
             ctx.startForegroundService(
                 Intent(ctx, StreamService::class.java).setAction(ACTION_START)
                     .putExtra(EXTRA_URL, url).putExtra(EXTRA_WIDTH, width)
                     .putExtra(EXTRA_HEIGHT, height).putExtra(EXTRA_BITRATE, bitrate).putExtra(EXTRA_FPS, fps)
-                    .putExtra(EXTRA_BROADCASTER_ID, broadcasterId),
+                    .putExtra(EXTRA_BROADCASTER_ID, broadcasterId).putExtra(EXTRA_PREVIEW, preview),
             )
         }
 
@@ -1106,15 +1126,20 @@ class StreamService : Service() {
          */
         fun startBonded(
             ctx: Context, host: String, port: Int, streamId: String, passphrase: String?,
-            width: Int, height: Int, bitrate: Int, broadcasterId: String? = null, fps: Int = 30,
+            width: Int, height: Int, bitrate: Int, broadcasterId: String? = null, fps: Int = 30, preview: Boolean = false,
         ) {
             ctx.startForegroundService(
                 Intent(ctx, StreamService::class.java).setAction(ACTION_START)
                     .putExtra(EXTRA_BOND_HOST, host).putExtra(EXTRA_BOND_PORT, port).putExtra(EXTRA_BOND_STREAM_ID, streamId)
                     .putExtra(EXTRA_BOND_PASSPHRASE, passphrase)
                     .putExtra(EXTRA_WIDTH, width).putExtra(EXTRA_HEIGHT, height).putExtra(EXTRA_BITRATE, bitrate).putExtra(EXTRA_FPS, fps)
-                    .putExtra(EXTRA_BROADCASTER_ID, broadcasterId),
+                    .putExtra(EXTRA_BROADCASTER_ID, broadcasterId).putExtra(EXTRA_PREVIEW, preview),
             )
+        }
+
+        /** Ends the preview: the stream starts sending, on [scene] if given (else whatever is showing). */
+        fun goLive(ctx: Context, scene: Scene? = null) {
+            ctx.startService(Intent(ctx, StreamService::class.java).setAction(ACTION_GO_LIVE).putExtra(EXTRA_SCENE, scene?.name))
         }
 
         fun stop(ctx: Context) {

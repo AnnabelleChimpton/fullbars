@@ -133,6 +133,7 @@ import app.irlsupreme.ui.live.externalCameraNotice
 import app.irlsupreme.ui.live.msToNextSecond
 import app.irlsupreme.ui.live.NotOnCameraFrame
 import app.irlsupreme.ui.live.RailActions
+import app.irlsupreme.ui.live.PreviewPlate
 import app.irlsupreme.ui.live.RailKeys
 import app.irlsupreme.ui.live.ScenesSheet
 import app.irlsupreme.ui.live.TimerCell
@@ -332,6 +333,25 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
     }
     val onEnd: () -> Unit = { ending = true }
 
+    // The preview: nothing is sent until GO LIVE. "Start on" (remembered) picks what viewers see first.
+    val settings = remember { ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE) }
+    var startOnCard by rememberSaveable { mutableStateOf(settings.getBoolean(START_ON_CARD, false)) }
+    var goingLive by remember { mutableStateOf(false) }
+    LaunchedEffect(goingLive, state.preview) {
+        // Locked until the engine reports it's sending; unlocked again if that somehow doesn't happen.
+        if (goingLive && state.preview) { delay(5_000); goingLive = false } else goingLive = false
+    }
+    val onGoLive: () -> Unit = {
+        if (!goingLive && !ending) {
+            goingLive = true
+            StreamService.goLive(ctx, if (startOnCard) Scene.STARTING_SOON else null)
+        }
+    }
+    val onStartOn: (Boolean) -> Unit = { card ->
+        startOnCard = card
+        settings.edit().putBoolean(START_ON_CARD, card).apply()
+    }
+
     // Privacy mutes the mic. Only Back live from Privacy turns it on again (as the mods' !live does): moving from
     // Privacy to another card keeps it off, since those cards don't promise anything about the mic.
     val chooseScene: (Scene) -> Unit = { s ->
@@ -450,7 +470,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
             delay(msToNextSecond(state.liveSinceMs, now))
         }
     }
-    val timer = TimerCell(timerLabel(state.liveSinceMs, isTest), timerText(state.liveSinceMs, now), timerSpoken(state.liveSinceMs, now, isTest), state.liveSinceMs == 0L)
+    val timer = TimerCell(timerLabel(state.liveSinceMs, isTest, state.preview), timerText(state.liveSinceMs, now), timerSpoken(state.liveSinceMs, now, isTest), state.liveSinceMs == 0L)
     val links = linkCells(
         state.links, state.targetVideoBitrate, state.sentBitrate,
         weak = said == Health.WEAK || said == Health.WEAK_SCREEN,
@@ -568,7 +588,11 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                 )
             }
             val rail: @Composable (Boolean, Modifier) -> Unit = { vertical, m ->
-                RailKeys(endKey(neverLive), scenesKey(scenesOpen), muteKey(state.micMuted), brbKey(state.scene), actions, vertical, big, reduced, m)
+                if (state.preview) PreviewPlate(
+                    isTest = isTest, startOnCard = startOnCard, onStartOn = onStartOn,
+                    onCancel = onEnd, onGoLive = onGoLive, vertical = vertical, big = big,
+                    enabled = !ending && !goingLive, modifier = m,
+                ) else RailKeys(endKey(neverLive), scenesKey(scenesOpen), muteKey(state.micMuted), brbKey(state.scene), actions, vertical, big, reduced, m)
             }
             val gestureBottom = WindowInsets.systemGestures.asPaddingValues().calculateBottomPadding()
             val bottomPad = max(12.dp, gestureBottom)
@@ -808,6 +832,9 @@ private fun cameraLinkNotice(state: EngineState, pocket: PocketState?): String? 
     pocket != null && pocket !is PocketState.Streaming -> "Camera link · ${pocket.label}"
     else -> externalCameraNotice(state.externalCamera, state.activeSource)
 }
+
+/** Settings key: the preview's "Start on" choice, the Starting soon card (true) or the camera. */
+internal const val START_ON_CARD = "start_on_card"
 
 /** Highest pinch zoom asked of the engine; it clamps further to what the camera supports. */
 private const val MAX_ZOOM = 10f

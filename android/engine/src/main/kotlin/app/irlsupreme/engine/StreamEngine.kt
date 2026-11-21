@@ -17,6 +17,7 @@ import app.irlsupreme.engine.audio.LowCut
 import app.irlsupreme.engine.ingest.IngestListener
 import app.irlsupreme.engine.ingest.RtmpIngestServer
 import app.irlsupreme.engine.output.BondedOutput
+import app.irlsupreme.engine.output.PreviewOutput
 import app.irlsupreme.engine.output.RtmpOutput
 import app.irlsupreme.engine.output.StreamOutput
 import app.irlsupreme.engine.video.CadenceSnapshot
@@ -188,6 +189,8 @@ class StreamEngine(private val context: Context) {
         skippedAtLive = 0
         startedAtMs = System.currentTimeMillis()
         bytesSent.set(0)
+        videoFormat = null
+        audioFormat = null
         peakThermal = 0
         lowestBitrate = config.videoBitrate
         ladder = ThermalLadder()
@@ -213,41 +216,15 @@ class StreamEngine(private val context: Context) {
         batteryLastMs = batteryStartMs
         running = true
 
-        val onConnected = {
-            compositor?.requestKeyframe()
-            if (liveSinceMs == 0L) {
-                skippedAtLive = compositor?.skippedTicks ?: 0
-                liveSinceMs = System.currentTimeMillis()
-            }
-        }
         try {
-            val out: StreamOutput = when (val t = config.target) {
-                // With the context it reconnects as soon as a new network comes up; keyframes go straight to the encoder.
-                is OutputTarget.Rtmp -> RtmpOutput(
-                    t.url, config.width, config.height, config.fps, onConnected,
-                    context = context, onRequestKeyframe = { compositor?.requestKeyframe() },
-                )
-                is OutputTarget.Bonded -> BondedOutput(
-                    context, t.host, t.port, t.streamId, t.latencyMs, config, onConnected, t.passphrase, t.helpers,
-                    t.cellularAsSecondary,
-                ).also { b -> b.onLinkEvent = { line -> _events.tryEmit(EngineEvent.Link(line)) } }
-            }
+            abr = null
+            rtmpAbr = null
+            val out = if (config.startInPreview) PreviewOutput else openOutput(config)
             output = out
-            val t = config.target
-            abr = if (out is BondedOutput && t is OutputTarget.Bonded) BitrateController(
-                minBps = config.minVideoBitrate,
-                maxBps = config.videoBitrate,
-                // The thresholds follow the SRT latency the stream really runs with.
-                preset = DelayPreset.forLatency(t.latencyMs),
-                receiverReorderTolerant = t.receiverReorderTolerant,
-            ).also { targetBitrate = it.targetBps } else null
-            rtmpAbr = if (out is RtmpOutput) RtmpRateController(
-                minBps = config.minVideoBitrate, maxBps = config.videoBitrate, startBps = config.videoBitrate,
-            ) else null
             detail = if (config.detailRung) DetailRungPolicy.forFrame(config.width, config.height) else null
             // Configured with the stream's videoBitrate as always (the phone's BRB slate is encoded with the same settings,
             // so their SPS/PPS match); a bonded stream's starting bitrate is applied as a runtime change.
-            val comp = Compositor(context, config, videoSink(out), onEncoderRecovered = {}, initialFacing = facing, onRestartExternal = ::restartIngest)
+            val comp = Compositor(context, config, videoSink, onEncoderRecovered = {}, initialFacing = facing, onRestartExternal = ::restartIngest)
             comp.stabilization = config.stabilization // before the camera opens: it sets the crop
             comp.start() // throws EngineStartException when the video pipeline can't be built
             compositor = comp
@@ -269,7 +246,6 @@ class StreamEngine(private val context: Context) {
             _state.value = EngineState(running = false, lastError = msg, portrait = config.portrait)
             return false
         }
-        val out = output!!
         micGainDb = config.micGainDb
         rawMic = config.rawMic
         rawMicGainDb = config.rawMicGainDb
@@ -283,7 +259,7 @@ class StreamEngine(private val context: Context) {
         )
         mixRing = ring
         audio = AudioPipeline(
-            config.audioSampleRate, config.audioStereo, config.audioBitrate, audioSink(out),
+            config.audioSampleRate, config.audioStereo, config.audioBitrate, audioSink,
             unprocessedOk = app.irlsupreme.engine.audio.unprocessedSupported(context),
             onLevel = { _micLevel.value = it },
             mix = ring,
@@ -309,10 +285,96 @@ class StreamEngine(private val context: Context) {
         }
         synchronized(stateLock) {
             _state.value = EngineState(
-                running = true, connection = ConnectionPhase.CONNECTING, targetVideoBitrate = targetBitrate,
+                running = true, preview = config.startInPreview,
+                connection = if (config.startInPreview) ConnectionPhase.IDLE else ConnectionPhase.CONNECTING,
+                targetVideoBitrate = targetBitrate,
                 portrait = config.portrait, cameraFacing = facing, fps = config.fps, fpsFallback = fpsFallback,
             )
         }
+        return true
+    }
+
+    private val onConnected: () -> Unit = {
+        compositor?.requestKeyframe()
+        if (liveSinceMs == 0L) {
+            skippedAtLive = compositor?.skippedTicks ?: 0
+            liveSinceMs = System.currentTimeMillis()
+        }
+    }
+
+    /** The output for [config]'s target, and the bitrate controller that goes with it. */
+    private fun openOutput(config: StreamConfig): StreamOutput {
+        val out: StreamOutput = when (val t = config.target) {
+            // With the context it reconnects as soon as a new network comes up; keyframes go straight to the encoder.
+            is OutputTarget.Rtmp -> RtmpOutput(
+                t.url, config.width, config.height, config.fps, onConnected,
+                context = context, onRequestKeyframe = { compositor?.requestKeyframe() },
+            )
+            is OutputTarget.Bonded -> BondedOutput(
+                context, t.host, t.port, t.streamId, t.latencyMs, config, onConnected, t.passphrase, t.helpers,
+                t.cellularAsSecondary,
+            ).also { b -> b.onLinkEvent = { line -> _events.tryEmit(EngineEvent.Link(line)) } }
+        }
+        val t = config.target
+        abr = if (out is BondedOutput && t is OutputTarget.Bonded) BitrateController(
+            minBps = config.minVideoBitrate,
+            maxBps = config.videoBitrate,
+            // The thresholds follow the SRT latency the stream really runs with.
+            preset = DelayPreset.forLatency(t.latencyMs),
+            receiverReorderTolerant = t.receiverReorderTolerant,
+        ).also { targetBitrate = it.targetBps } else null
+        rtmpAbr = if (out is RtmpOutput) RtmpRateController(
+            minBps = config.minVideoBitrate, maxBps = config.videoBitrate, startBps = config.videoBitrate,
+        ) else null
+        return out
+    }
+
+    /**
+     * Ends the preview ([StreamConfig.startInPreview]) and starts sending: the output connects now, and its stream
+     * starts at 0 from here. The camera, the mic and the encoder keep running, so the first frames go out at once.
+     * False when there's no preview to end (not running, or already sending).
+     *
+     * [firstScene]: what viewers see first. It's set, and its crossfade is over, before the first frame goes out, so
+     * a stream that starts on a card never shows a frame of the camera.
+     */
+    fun goLive(firstScene: Scene? = null): Boolean {
+        if (output !== PreviewOutput) return false
+        val comp = compositor ?: return false
+        if (firstScene != null && comp.scene != firstScene) {
+            setScene(firstScene)
+            Thread.sleep(app.irlsupreme.engine.video.SceneRules.CROSSFADE_MS + FIRST_SCENE_MARGIN_MS)
+        }
+        return startSending()
+    }
+
+    @Synchronized
+    private fun startSending(): Boolean {
+        val cfg = config ?: return false
+        val comp = compositor ?: return false
+        if (!running || output !== PreviewOutput) return false
+        val previewMs = System.currentTimeMillis() - startedAtMs
+        val out = try {
+            openOutput(cfg)
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "go live failed", e)
+            abr = null
+            rtmpAbr = null
+            return false
+        }
+        // The stream's clock starts now; frames encoded before this belong to the preview and are dropped.
+        baseUs = System.nanoTime() / 1000
+        startedAtMs = System.currentTimeMillis()
+        targetBitrate = abr?.targetBps ?: cfg.videoBitrate
+        abrStarted = false
+        preLive = PreLiveRate()
+        // The encoders announced their formats during the preview: hand them to the new output before any frame.
+        videoFormat?.let { (sps, pps) -> out.setVideoConfig(sps.duplicate(), pps.duplicate()) }
+        audioFormat?.let { (rate, stereo) -> out.setAudioConfig(rate, stereo) }
+        output = out
+        comp.setBitrate(targetBitrate)
+        comp.requestKeyframe()
+        note("went live after ${previewMs / 1000} s of preview")
+        publish()
         return true
     }
 
@@ -668,26 +730,42 @@ class StreamEngine(private val context: Context) {
         return MediaCodec.BufferInfo().apply { set(info.offset, info.size, pts, info.flags) }
     }
 
+    /** The encoders' formats, kept so an output opened later ([goLive]) gets them before its first frame. */
+    @Volatile private var videoFormat: Pair<ByteBuffer, ByteBuffer>? = null
+    @Volatile private var audioFormat: Pair<Int, Boolean>? = null
+
+    private fun copyOf(b: ByteBuffer): ByteBuffer {
+        val src = b.duplicate()
+        return ByteBuffer.allocate(src.remaining()).put(src).also { it.flip() }
+    }
+
+    // Both sinks follow whichever output is current: the preview's stand-in, then the real one from goLive.
     // RtmpOutput counts what it really hands to its client (frames it gated or dropped aren't sent): see bytesSentSoFar.
-    private fun videoSink(out: StreamOutput) = object : VideoSink {
-        private val count = out !is RtmpOutput
-        override fun onVideoConfig(sps: ByteBuffer, pps: ByteBuffer) { out.setVideoConfig(sps, pps) }
+    private val videoSink = object : VideoSink {
+        override fun onVideoConfig(sps: ByteBuffer, pps: ByteBuffer) {
+            videoFormat = copyOf(sps) to copyOf(pps)
+            output?.setVideoConfig(sps, pps)
+        }
         override fun onVideoFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
+            val out = output ?: return
             val i = rebased(info) ?: return
             if (out.phase == ConnectionPhase.LIVE) {
                 out.sendVideo(buffer, i)
-                if (count) bytesSent.addAndGet(i.size.toLong())
+                if (out !is RtmpOutput) bytesSent.addAndGet(i.size.toLong())
             } else if (liveSinceMs != 0L) droppedWhileDown++ // connecting time isn't a drop: nobody was watching yet
         }
     }
 
-    private fun audioSink(out: StreamOutput) = object : AudioSink {
-        private val count = out !is RtmpOutput
-        override fun onAudioConfig(sampleRate: Int, stereo: Boolean) { out.setAudioConfig(sampleRate, stereo) }
+    private val audioSink = object : AudioSink {
+        override fun onAudioConfig(sampleRate: Int, stereo: Boolean) {
+            audioFormat = sampleRate to stereo
+            output?.setAudioConfig(sampleRate, stereo)
+        }
         override fun onAudioFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
+            val out = output ?: return
             val i = rebased(info) ?: return
             out.sendAudio(buffer, i)
-            if (count && out.phase == ConnectionPhase.LIVE) bytesSent.addAndGet(i.size.toLong())
+            if (out !is RtmpOutput && out.phase == ConnectionPhase.LIVE) bytesSent.addAndGet(i.size.toLong())
         }
     }
 
@@ -943,6 +1021,7 @@ class StreamEngine(private val context: Context) {
             if (liveSinceMs != 0L) (comp.skippedTicks - skippedAtLive).coerceAtLeast(0) else 0
         val s = EngineState(
             running = true,
+            preview = out === PreviewOutput,
             portrait = cfg.portrait,
             connection = shownPhase(out),
             reconnectAttempt = out.reconnectAttempt,
@@ -1012,6 +1091,8 @@ class StreamEngine(private val context: Context) {
     }
 
     private companion object {
+        /** After a first scene's crossfade, a frame or two more before [goLive] sends anything. */
+        private const val FIRST_SCENE_MARGIN_MS = 70L
         const val TAG = "Engine"
         const val HEADROOM_EVERY_MS = 10_000L
         const val RAMP_GRACE_MS = 20_000L

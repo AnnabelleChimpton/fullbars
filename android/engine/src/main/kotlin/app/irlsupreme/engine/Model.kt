@@ -93,6 +93,11 @@ data class HelperHosting(val password: String, val displayName: String, val serv
 /** What to stream and how. Resolution never changes mid-stream; bitrate adapts within [minVideoBitrate]..[videoBitrate]. */
 data class StreamConfig(
     val target: OutputTarget,
+    /**
+     * Start in preview: the camera (or the Pocket), the mic, the cards and the encoder all run, but nothing is sent
+     * until [StreamEngine.goLive]. The streamer checks the picture and the sound first, as in any camera app.
+     */
+    val startInPreview: Boolean = false,
     val width: Int = 1920,
     val height: Int = 1080,
     val fps: Int = 30,
@@ -199,6 +204,8 @@ enum class CameraPhase { OFF, OPENING, LIVE, LOST }
 /** One snapshot of everything the UI needs. Published ~2x per second. */
 data class EngineState(
     val running: Boolean = false,
+    /** Running in preview ([StreamConfig.startInPreview]): nothing is sent yet; [StreamEngine.goLive] starts sending. */
+    val preview: Boolean = false,
     /** The running stream is portrait (the live screen locks to portrait); false for landscape. */
     val portrait: Boolean = false,
     val connection: ConnectionPhase = ConnectionPhase.IDLE,

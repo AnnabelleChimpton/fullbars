@@ -43,6 +43,8 @@ import app.irlsupreme.ui.StreamOrientation
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_bond 1   (stream to the paired BRB server)
  *   ... --es debug_quality HD720   (with debug_url/debug_bond; default HD1080)
  *   ... --es debug_orientation portrait   (with debug_url/debug_bond: a portrait stream; default: the Settings choice)
+ *   ... --ez debug_preview true   (with debug_url/debug_bond: start in preview; nothing is sent until debug_golive)
+ *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_golive camera   (or STARTING_SOON: end the preview)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --ez debug_stop true
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_scene BRB   (or LIVE, STARTING_SOON, ...)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_mic off   (or on)
@@ -105,7 +107,7 @@ class DebugActivity : ComponentActivity() {
             notATwitchTest()
             val (w, h, bps) = streamSize(intent)
             withPermissions(listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)) {
-                StreamService.start(this, url, w, h, bps)
+                StreamService.start(this, url, w, h, bps, preview = intent.getBooleanExtra("debug_preview", false))
             }
         }
         intent.getStringExtra("debug_bond")?.let { // any value: stream to the paired BRB server (as set up in the app)
@@ -114,10 +116,13 @@ class DebugActivity : ComponentActivity() {
             val p = BrbPairingStore(SecretStore(this)).load()
             if (p == null) Log.w(TAG, "debug_bond: no paired BRB server")
             else withPermissions(listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)) {
-                StreamService.startBonded(this, p.host, p.port, "live/${p.publishId}", p.srtPassphrase, w, h, bps)
+                StreamService.startBonded(this, p.host, p.port, "live/${p.publishId}", p.srtPassphrase, w, h, bps, preview = intent.getBooleanExtra("debug_preview", false))
             }
         }
         if (intent.getBooleanExtra("debug_stop", false)) StreamService.stop(this)
+        intent.getStringExtra("debug_golive")?.let { s -> // end the preview: "camera", or a scene such as STARTING_SOON
+            StreamService.goLive(this, runCatching { Scene.valueOf(s) }.getOrNull())
+        }
         intent.getStringExtra("debug_scene")?.let { s ->
             runCatching { Scene.valueOf(s) }.getOrNull()?.let { scene -> withEngine { it.setScene(scene) } }
         }

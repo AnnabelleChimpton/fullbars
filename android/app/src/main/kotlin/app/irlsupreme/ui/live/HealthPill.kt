@@ -131,6 +131,11 @@ internal fun pillModel(state: EngineState, health: Health, isTest: Boolean, bond
         PillLook.RECONNECTING, PillGlyph.ARROWS, "Not live yet", failure ?: "Still trying to connect",
         listOfNotNull("Not live yet", failure).joinToString(". "), third = firstConnectHint(state.reconnectAttempt, bonded),
     )
+    // Preview: nothing is sent yet, so nobody sees or hears anything; the plate below says how to go live.
+    if (state.preview) return PillModel(
+        PillLook.CONNECTING, PillGlyph.EYE_OFF, "Preview · not live", "Only you can see this",
+        "Preview, not live. Only you can see this",
+    )
     return when (health) {
         Health.GREAT -> PillModel(PillLook.GREAT, PillGlyph.METER_FULL, "$live · Great", null, "$live, great")
         Health.WEAK -> PillModel(PillLook.WEAK, PillGlyph.METER_ONE, "$live · Weak signal", "Quality lowered", "$live, weak signal. Quality lowered")
