@@ -19,6 +19,11 @@ class SlateCardTest {
             Card.WEAK_SIGNAL to listOf("WEAK SIGNAL · AUTO", "Weak signal", "Picture paused to keep the stream up."),
             Card.CAMERA_LOST to listOf("CAMERA LOST · AUTO", "Camera lost", "Reconnecting the camera."),
             Card.SIGNAL_LOST to listOf("SIGNAL LOST · AUTO", "Signal lost", "The stream picks up when the connection's back."),
+            // The streamer's own scenes, before they're named: the slot's name, no line under it.
+            Card.CUSTOM_1 to listOf("SCENE 1", "Scene 1", ""),
+            Card.CUSTOM_2 to listOf("SCENE 2", "Scene 2", ""),
+            Card.CUSTOM_3 to listOf("SCENE 3", "Scene 3", ""),
+            Card.CUSTOM_4 to listOf("SCENE 4", "Scene 4", ""),
         )
         assertEquals(Card.entries.toSet(), table.keys)
         for ((card, words) in table) {
@@ -66,6 +71,10 @@ class SlateCardTest {
         assertEquals(Card.PRIVACY, Card.of(Scene.PRIVACY))
         assertEquals(Card.STARTING_SOON, Card.of(Scene.STARTING_SOON))
         assertEquals(Card.ENDING, Card.of(Scene.ENDING))
+        assertEquals(listOf(Card.CUSTOM_1, Card.CUSTOM_2, Card.CUSTOM_3, Card.CUSTOM_4), Scene.CUSTOM.map { Card.of(it) })
+        assertTrue(Scene.CUSTOM.all { it.isCustom } && Scene.entries.count { it.isCustom } == 4)
+        assertEquals(Card.entries.filter { it.isCustom }, Scene.CUSTOM.map { Card.of(it) })
+        assertTrue(Card.entries.filter { it.isCustom }.all { it.family == Slates.Family.CHOSEN && it.hasCursor && it.moves })
         assertTrue(Scene.entries.none { Card.of(it) == Card.SIGNAL_LOST })
         assertEquals(SlateAudio.NONE, Slates.shownAudio(Card.SIGNAL_LOST, SlateAudio.ON))
         assertTrue(Card.SIGNAL_LOST.hasCursor)

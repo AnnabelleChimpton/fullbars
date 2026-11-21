@@ -611,8 +611,8 @@ enum class SlateAudio { ON, MUTED, NONE }
  * The full-frame scene cards: one Canvas component in u = min(w, h) / 100, so a 1080×1920 card and a
  * 1920×1080 card are the same design. Cards differ by word, glyph and layout, never by hue; the only health hues are
  * the Weak signal amber and the Camera lost orange, on their own cards. A streamer's style ([CardStyle]) can add a
- * background, one of four [CardLayout]s and an accent from [ACCENTS] on small marks, but never touches the tag or the
- * audio footer, which stay where they are on every card.
+ * background, one of four [CardLayout]s, an accent on small marks and their own face, size and colour for the words,
+ * but never touches the tag or the audio footer, which stay where they are on every card.
  *
  * The bitmap is static. The motion that tells viewers the stream isn't frozen (grain, the once-per-loop pulse and the
  * ruler cursor) is added in GL per frame by [SlateDrawer], the same way on the phone and in the server's loop, so a
@@ -621,7 +621,7 @@ enum class SlateAudio { ON, MUTED, NONE }
 object Slates {
     /** The three layouts. They decide surface and composition; the copy decides the rest. */
     enum class Family {
-        /** BRB, Privacy: a big headline lower left on Ink. */
+        /** BRB, Privacy and the streamer's own scenes: a big headline lower left on Ink. */
         CHOSEN,
         /** Starting soon, Ending: the chosen layout, inverted to Bone so the start and end of a stream read apart. */
         BOOKEND,
@@ -646,7 +646,19 @@ object Slates {
          * to be the BRB card, which told viewers the streamer chose to step away when the signal had in fact dropped.
          */
         SIGNAL_LOST("SIGNAL LOST · AUTO", "Signal lost", "The stream picks up when the connection's back.", Family.AUTOMATIC),
+        /**
+         * The streamer's own scenes, made and named in Settings › Scene cards ("Lunch", "Q&A"). Their name
+         * ([CardStyle.title]) is both the tag and the headline unless they write one; [headline] here is the name an
+         * unnamed one goes by. No line under it until they write one.
+         */
+        CUSTOM_1("SCENE", "Scene 1", "", Family.CHOSEN),
+        CUSTOM_2("SCENE", "Scene 2", "", Family.CHOSEN),
+        CUSTOM_3("SCENE", "Scene 3", "", Family.CHOSEN),
+        CUSTOM_4("SCENE", "Scene 4", "", Family.CHOSEN),
         ;
+
+        /** One of the streamer's own scenes. */
+        val isCustom: Boolean get() = this == CUSTOM_1 || this == CUSTOM_2 || this == CUSTOM_3 || this == CUSTOM_4
 
         /** The ruler cursor steps on this card. Not on Weak signal (it must stay cheap) or Privacy (it promises stillness). */
         val hasCursor: Boolean get() = this != WEAK_SIGNAL && this != PRIVACY
@@ -664,6 +676,10 @@ object Slates {
                 app.irlsupreme.engine.Scene.PRIVACY -> PRIVACY
                 app.irlsupreme.engine.Scene.STARTING_SOON -> STARTING_SOON
                 app.irlsupreme.engine.Scene.ENDING -> ENDING
+                app.irlsupreme.engine.Scene.CUSTOM_1 -> CUSTOM_1
+                app.irlsupreme.engine.Scene.CUSTOM_2 -> CUSTOM_2
+                app.irlsupreme.engine.Scene.CUSTOM_3 -> CUSTOM_3
+                app.irlsupreme.engine.Scene.CUSTOM_4 -> CUSTOM_4
             }
         }
     }
@@ -675,9 +691,10 @@ object Slates {
     private val styleVersion = java.util.concurrent.atomic.AtomicInteger()
 
     /**
-     * The accent colours a streamer can pick: teal, azure, magenta, olive and steel.
+     * The accent presets: teal, azure, magenta, olive and steel. A streamer can also pick any colour of their own
+     * (the page warns when it could read as a warning colour); these are the ones offered first.
      *
-     * Curated, not free, because on stream colour means health: every one sits at least 30° of CIELAB hue
+     * Curated because on stream colour means health: every one sits at least 30° of CIELAB hue
      * and 25 ΔE away from the Live green, the Weak amber, the Camera lost orange, the error red (and their light-theme
      * variants) and from Twitch purple, which is kept for sign-in. All are mid-tones with at least 3:1 against
      * both Ink and Bone, so the same accent shows as a small graphic on the Ink cards and on the Bone bookends
@@ -698,13 +715,17 @@ object Slates {
     val ACCENT_NAMES: List<String> = listOf("Teal", "Azure", "Magenta", "Olive", "Steel")
 
     /**
-     * [style]'s accent if it's one of [ACCENTS], else null (the brand's own). A value from anywhere else (an old
-     * setting, a typo) is ignored rather than trusted, so no card can ever pick up a health hue this way.
+     * [style]'s accent, or null (the brand's own). [ACCENTS] are the presets, kept clear of the health hues; any other
+     * opaque colour is the streamer's own pick (the page warns when it's close to a warning colour, but it's theirs).
+     * A colour that isn't opaque is ignored rather than trusted.
      *
      * Where an accent shows: the tag's bullet, the rule on the automatic cards (not Weak signal or Camera lost, whose
      * rule is their health colour), the ruler cursor and the caption plate's edge on [CardLayout.FULL_PICTURE].
      */
-    fun accentOf(style: CardStyle): Int? = style.accent?.takeIf { it in ACCENTS }
+    fun accentOf(style: CardStyle): Int? = style.accent?.takeIf { it ushr 24 == 0xFF }
+
+    /** [style]'s own colour for the words, if opaque; null: the card's own (Bone on Ink, Ink on Bone). */
+    fun textColorOf(style: CardStyle): Int? = style.textColor?.takeIf { it ushr 24 == 0xFF }
 
     /** How much Ink lies over [style]'s background: its dim clamped to 0..0.8 (the default when it isn't a number). */
     fun dimOf(style: CardStyle): Float = if (style.dim.isNaN()) DEFAULT_DIM else style.dim.coerceIn(0f, MAX_DIM)
@@ -741,8 +762,16 @@ object Slates {
         val a = shownAudio(card, audio)
         val defaultSub = if (card == Card.BRB && a != SlateAudio.ON) "Back in a bit." else card.sub
         // The tag and the footer are never the streamer's: they say what kind of card this is and what viewers hear.
+        // Their own scenes are the exception for the tag: it's the scene's name, the kind of card it is.
+        if (card.isCustom) {
+            val name = customName(card, style)
+            return Copy(name.uppercase(java.util.Locale.ROOT), style.headline ?: name, style.sub ?: defaultSub, footerLabel(a))
+        }
         return Copy(card.tag, style.headline ?: card.headline, style.sub ?: defaultSub, footerLabel(a))
     }
+
+    /** A custom scene's name: the streamer's ([CardStyle.title]) or the slot's own ("Scene 1"). */
+    fun customName(card: Card, style: CardStyle = style(card)): String = style.title?.trim()?.ifEmpty { null } ?: card.headline
 
     /** The audio state a card shows: fixed for Privacy and Signal lost, else the real one. */
     fun shownAudio(card: Card, audio: SlateAudio): SlateAudio = when (card) {
@@ -819,7 +848,8 @@ object Slates {
     /**
      * Breaks [text] at word boundaries to fit [maxWidth], as large as possible: from [start] down to
      * [floor] it must take at most [lines] lines; failing that it takes up to [overflowLines] at [floor]; and only a
-     * text that can't fit even then shrinks below [floor]. [measure] gives a string's width at a size.
+     * text that can't fit even then shrinks below [floor]. A word too long for the line at any of those sizes shrinks
+     * until it fits, so no word is ever cut off at the edge. [measure] gives a string's width at a size.
      */
     fun fitLines(
         text: String,
@@ -852,6 +882,14 @@ object Slates {
         size = floor
         while (size > floor / 4) {
             wrap(size)?.let { if (it.size <= overflowLines) return Fit(size, it) }
+            size *= 0.95f
+        }
+        // Still too long: as large as lets the longest word fit, however many lines that takes.
+        val longest = words.maxByOrNull { measure(it, floor) } ?: return Fit(floor, emptyList())
+        val wide = measure(longest, floor)
+        size = if (wide > 0f) minOf(floor, floor * maxWidth / wide) else floor
+        while (size > 0.01f) {
+            wrap(size)?.let { return Fit(size, it) }
             size *= 0.95f
         }
         return Fit(size, listOf(text))
@@ -902,12 +940,41 @@ object Slates {
      *
      * Every layout keeps the card grid: words start on the 8u margin (or centre on the frame), stay clear of the tag
      * row and of the ruler's ticks and cursor, and headlines fit with [fitLines] (17u down to 12u on
-     * the chosen and bookend cards, 12u on the automatic ones). [CardLayout.CLASSIC] is the original card.
+     * the chosen and bookend cards, 12u on the automatic ones, all times [scale], the streamer's text size).
+     * [CardLayout.CLASSIC] is the original card. Words that would still run past the margins, into the tag row or down
+     * into the ruler (a larger size, a wide face, many long lines) are set smaller step by step until they fit.
      */
     fun plan(
         width: Int, height: Int, family: Family, layout: CardLayout, headline: String, sub: String, picW: Int, picH: Int, m: Metrics,
+        scale: Float = 1f,
     ): Plan {
-        val g = Grid(width, height, m.tagCap)
+        var s = if (scale.isNaN()) 1f else scale.coerceIn(MIN_TEXT_SCALE, MAX_TEXT_SCALE)
+        while (true) {
+            val g = Grid(width, height, m.tagCap, s)
+            val p = layOut(g, family, layout, headline, sub, picW, picH, m)
+            if (s <= MIN_TEXT_SCALE || wordsFit(p, g, m)) return p
+            s = maxOf(MIN_TEXT_SCALE, s * 0.92f)
+        }
+    }
+
+    /** The streamer's text size is kept within these shares of the card's own type. */
+    private const val MIN_TEXT_SCALE = 0.5f
+    private const val MAX_TEXT_SCALE = 1.5f
+
+    /**
+     * Whether [p]'s words sit inside [g]: within the 8u margins, the headline's caps under the tag row's clearance and
+     * the last baseline above the ruler's clearance. Half a pixel of slack for rounding.
+     */
+    private fun wordsFit(p: Plan, g: Grid, m: Metrics): Boolean {
+        val eps = 0.5f
+        for (l in p.head) if (l.x < g.left - eps || l.x + m.measureHead(l.text, p.headSize) > g.right + eps) return false
+        for (l in p.sub) if (l.x < g.left - eps || l.x + m.measureSub(l.text, p.subSize) > g.right + eps) return false
+        p.head.firstOrNull()?.let { if (it.baseline - m.headCapRatio * p.headSize < g.top - eps) return false }
+        val last = p.sub.lastOrNull()?.baseline ?: p.head.lastOrNull()?.baseline ?: return true
+        return last <= g.bottom + eps
+    }
+
+    private fun layOut(g: Grid, family: Family, layout: CardLayout, headline: String, sub: String, picW: Int, picH: Int, m: Metrics): Plan {
         val auto = family == Family.AUTOMATIC
         val hasPic = picW > 0 && picH > 0
         return when (layout) {
@@ -919,9 +986,13 @@ object Slates {
         }
     }
 
-    /** The card's grid in px: the 8u margins, the ruler, and the open area between the tag row and the ruler. */
-    private class Grid(val width: Int, val height: Int, tagCap: Float) {
+    /**
+     * The card's grid in px: the 8u margins, the ruler, and the open area between the tag row and the ruler. [typeU]
+     * is the unit the words are sized in: u times the text size.
+     */
+    private class Grid(val width: Int, val height: Int, tagCap: Float, scale: Float = 1f) {
         val u = unit(width, height)
+        val typeU = u * scale
         val left = 8f * u
         val right = width - 8f * u
         val textWidth = right - left
@@ -944,6 +1015,7 @@ object Slates {
         val height = headCap + span
     }
 
+    /** [headline] and [sub] fitted to [colW], sized in [u] (the grid's [Grid.typeU]). */
     private fun words(headline: String, sub: String, colW: Float, auto: Boolean, u: Float, m: Metrics): Words {
         val head = if (auto) fitLines(headline, colW, 12f * u, 12f * u, m.measureHead) else fitLines(headline, colW, 17f * u, 12f * u, m.measureHead)
         val s = fitLines(sub, colW, 3.8f * u, 3.8f * u, m.measureSub, lines = 2, overflowLines = 2)
@@ -979,7 +1051,7 @@ object Slates {
     /** Today's card: the headline lower left (chosen, bookend) or the glyph hero top left (automatic). */
     private fun classic(g: Grid, auto: Boolean, headline: String, sub: String, picW: Int, picH: Int, m: Metrics): Plan {
         val u = g.u
-        val w = words(headline, sub, g.textWidth, auto, u, m)
+        val w = words(headline, sub, g.textWidth, auto, g.typeU, m)
         if (!auto) {
             // The last headline baseline 30u above the ruler; the picture in the open field above, sitting on it.
             val first = g.ry - 30f * u - (w.head.lines.size - 1) * w.lead
@@ -1002,7 +1074,7 @@ object Slates {
     private fun centered(g: Grid, auto: Boolean, headline: String, sub: String, picW: Int, picH: Int, m: Metrics): Plan {
         val u = g.u
         val cx = g.width / 2f
-        val w = words(headline, sub, g.textWidth, auto, u, m)
+        val w = words(headline, sub, g.textWidth, auto, g.typeU, m)
         if (!auto) {
             val gap = 5f * u
             val maxW = minOf(g.textWidth * PICTURE_MAX_WIDTH, PICTURE_MAX_U * u * 1.6f)
@@ -1040,14 +1112,14 @@ object Slates {
             val vTop = g.top + (g.area - vh) / 2
             val visual = Box(g.left, vTop, g.left + vw, vTop + vh)
             val wx = visual.right + gap
-            val w = words(headline, sub, g.right - wx, auto, u, m)
+            val w = words(headline, sub, g.right - wx, auto, g.typeU, m)
             val blockH = if (auto) autoHeight(w, u) else w.height
             val top = g.top + ((g.area - blockH) / 2).coerceAtLeast(0f)
             if (auto) return autoPlan(g, w, wx, top, m, picture = visual.takeIf { size != null }, hero = visual.takeIf { size == null })
             val (head, subLines) = place(w, wx, top + w.headCap, m)
             return Plan(w.head.size, head, w.sub.size, subLines, picture = visual)
         }
-        val w = words(headline, sub, g.textWidth, auto, u, m)
+        val w = words(headline, sub, g.textWidth, auto, g.typeU, m)
         val blockH = if (auto) autoHeight(w, u) else w.height
         val avail = minOf(g.area - blockH - gap, g.area * STACK_PICTURE_SHARE)
         val size = if (hasPic) fitSize(picW, picH, g.textWidth, avail, 6f * u) else null
@@ -1072,7 +1144,7 @@ object Slates {
         val u = g.u
         val hasPic = picW > 0 && picH > 0
         val colW = if (g.landscape) minOf(g.textWidth, g.width * PLATE_MAX_SHARE) else g.textWidth
-        val w = words(headline, sub, colW, auto, u, m)
+        val w = words(headline, sub, colW, auto, g.typeU, m)
         val plateBottom = g.ry - 6f * u
         val first = plateBottom - PLATE_FOOT_U * u - w.span
         val textTop = first - w.headCap
@@ -1319,14 +1391,13 @@ object Slates {
         c.drawText(words.footer, right - audioW, fy, mono)
         if (login.isNotEmpty()) c.drawText(login, left, fy, mono)
 
-        // The middle: words, picture and glyph where the layout puts them.
-        val head = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = BrandType.xc800; color = primary; letterSpacing = -0.01f }
-        val sub = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = BrandType.sc500; color = secondary }
-        fun measurer(p: Paint): (String, Float) -> Float = { s, size -> p.textSize = size; p.measureText(s) }
-        head.textSize = CAP_PROBE
-        val metrics = Metrics(capH, capHeight(head) / CAP_PROBE, measurer(head), measurer(sub))
+        // The middle: words, picture and glyph where the layout puts them, in the streamer's face and size.
+        val head = headPaint(style)
+        val sub = subPaint(style)
+        val metrics = metrics(capH, head, sub)
         val plan = plan(
             width, height, card.family, style.layout, words.headline, words.sub, picture?.width ?: 0, picture?.height ?: 0, metrics,
+            style.textSize.scale,
         )
         plan.plate?.let { p ->
             val r = android.graphics.RectF(p.left, p.top, p.right, p.bottom)
@@ -1348,12 +1419,14 @@ object Slates {
             }
             c.drawRect(r.left, r.top, r.right, r.bottom, Paint().apply { this.color = color })
         }
-        // Words on the plate are always Bone on Ink, whatever the card's surface.
-        head.color = if (plan.plate != null) StreamPalette.BONE else primary
+        // The streamer's text colour, if they chose one, on both lines. Otherwise words on the plate are always Bone on
+        // Ink, whatever the card's surface.
+        val text = textColorOf(style)
+        head.color = text ?: if (plan.plate != null) StreamPalette.BONE else primary
         head.textSize = plan.headSize
         for (l in plan.head) c.drawText(l.text, l.x, l.baseline, head)
         // A free-standing sub line over imagery is Bone, not text2: it's small, and a dimmed photo can be mid-grey.
-        sub.color = when {
+        sub.color = text ?: when {
             plan.plate != null -> StreamPalette.TEXT2
             overImagery -> StreamPalette.BONE
             else -> secondary
@@ -1364,6 +1437,36 @@ object Slates {
 
     /** The size the headline face is measured at to find its cap height as a share of the size. */
     private const val CAP_PROBE = 200f
+
+    /** The headline's paint in [style]'s face ([CardFont]); size and colour are set where it's drawn. */
+    private fun headPaint(style: CardStyle) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = CardTypefaces.head(style.font); letterSpacing = style.font.headTracking
+    }
+
+    private fun subPaint(style: CardStyle) = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = CardTypefaces.sub(style.font) }
+
+    /** [plan]'s view of the type: the tag's cap height [tagCap] and the [head] and [sub] faces (their sizes get changed). */
+    private fun metrics(tagCap: Float, head: Paint, sub: Paint): Metrics {
+        fun measurer(p: Paint): (String, Float) -> Float = { s, size -> p.textSize = size; p.measureText(s) }
+        head.textSize = CAP_PROBE
+        return Metrics(tagCap, capHeight(head) / CAP_PROBE, measurer(head), measurer(sub))
+    }
+
+    /**
+     * Where [card]'s headline caps start on a [width]x[height] card in [CardLayout.CLASSIC], laid out exactly as [draw]
+     * does it (the streamer's words, face and size), for the overlay's chat column to stop above. Null when there's
+     * no headline.
+     */
+    fun classicHeadlineTop(width: Int, height: Int, card: Card, style: CardStyle = style(card)): Float? {
+        val u = unit(width, height)
+        val mono = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = BrandType.mono500; textSize = 2.4f * u; letterSpacing = 0.12f }
+        val head = headPaint(style)
+        val m = metrics(capHeight(mono), head, subPaint(style))
+        val words = copy(card, SlateAudio.ON, style)
+        val p = plan(width, height, card.family, CardLayout.CLASSIC, words.headline, words.sub, 0, 0, m, style.textSize.scale)
+        val first = p.head.firstOrNull() ?: return null
+        return first.baseline - m.headCapRatio * p.headSize
+    }
 
     /** Small Ink plates (the over-video scrim, rS) behind the frame's words when imagery is behind them. */
     private fun chip(c: Canvas, l: Float, t: Float, r: Float, b: Float, u: Float) {
@@ -1510,17 +1613,26 @@ data class CardStyle(
     val dim: Float = 0.35f,
     /** Where the words and picture sit. */
     val layout: CardLayout = CardLayout.CLASSIC,
-    /** One of [Slates.ACCENTS], or null for the brand's own; anything else is ignored ([Slates.accentOf]). */
+    /** A preset from [Slates.ACCENTS] or any opaque colour, or null for the brand's own ([Slates.accentOf]). */
     val accent: Int? = null,
     /**
      * An https page shown full-frame in place of the card, for total control (a StreamElements
      * scene, your own HTML). Phone-drawn cards only; ignored on Signal lost and Weak signal, which the server loops.
      */
     val webUrl: String? = null,
+    /** The colour of the headline and the line under it; null for the card's own ([Slates.textColorOf]). */
+    val textColor: Int? = null,
+    /** How big the words are ([CardTextSize]). */
+    val textSize: CardTextSize = CardTextSize.NORMAL,
+    /** The headline's and the line's typeface ([CardFont]). */
+    val font: CardFont = CardFont.FULLBARS,
+    /** A custom scene's name ([Slates.customName]): its tag, and its headline unless one is set. Ignored on the others. */
+    val title: String? = null,
 ) {
     val isDefault: Boolean
         get() = headline == null && sub == null && picture == null && background == null && backgroundGif == null &&
-            layout == CardLayout.CLASSIC && accent == null && webUrl == null
+            layout == CardLayout.CLASSIC && accent == null && webUrl == null && textColor == null &&
+            textSize == CardTextSize.NORMAL && font == CardFont.FULLBARS && title == null
 
     companion object {
         val DEFAULT = CardStyle()
