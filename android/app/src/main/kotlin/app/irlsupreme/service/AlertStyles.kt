@@ -130,14 +130,3 @@ object AlertStyles {
         _version.value++
     }
 }
-
-/**
- * [template] with {name} and {amount} filled in (any case), spaces tidied where an empty amount was. Pure, for tests.
- */
-fun fillAlertTemplate(template: String, name: String, amount: String?): String =
-    template.replace(Regex("\\{name\\}", RegexOption.IGNORE_CASE), name)
-        .replace(Regex("\\{amount\\}", RegexOption.IGNORE_CASE), amount.orEmpty())
-        .replace(Regex(" {2,}"), " ").trim()
-
-/** Whether [template] shows the amount itself, so the card doesn't show it twice. */
-fun templateHasAmount(template: String): Boolean = template.contains("{amount}", ignoreCase = true)
