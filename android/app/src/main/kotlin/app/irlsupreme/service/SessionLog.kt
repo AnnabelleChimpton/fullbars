@@ -1,5 +1,6 @@
 package app.irlsupreme.service
 
+import app.irlsupreme.engine.EngineEvent
 import app.irlsupreme.engine.EngineState
 import app.irlsupreme.engine.LinkInfo
 import app.irlsupreme.engine.OutputTarget
@@ -199,6 +200,8 @@ data class SessionStart(
     val mic: MicPrefs,
     val app: String,
     val device: String,
+    /** The frame rate the streamer asked for (the config holds what the engine is asked to run). */
+    val requestedFps: Int = config.fps,
 )
 
 /** The log's words, kept apart from the file handling so they can be tested. */
@@ -247,12 +250,16 @@ internal object SessionLogText {
             "quality ${kb(c.videoBitrate.toLong())} (floor ${kb(c.minVideoBitrate.toLong())}), keyframe ${c.keyframeIntervalSec} s, " +
             "audio ${c.audioSampleRate} Hz ${if (c.audioStereo) "stereo" else "mono"} ${kb(c.audioBitrate.toLong())}"
         val mic = if (s.mic.raw) "phone auto level off (raw), level ${gainText(s.mic.rawGainDb)}" else "phone auto level on, level ${gainText(s.mic.gainDb)}"
+        val fpsAsked = if (s.requestedFps != c.fps) " (asked for ${s.requestedFps}, not offered here)" else ""
         return listOf(
             "start: ${if (s.test) "TEST stream (bandwidth test, nobody watching)" else "LIVE stream"}",
             "target: $target",
             "shape: $shape",
             "camera: ${s.cameraKind}${s.pocket?.let { ", $it" } ?: ""}, phone camera starts ${s.startFacing}",
             "mic: $mic (other mode ${gainText(if (s.mic.raw) s.mic.gainDb else s.mic.rawGainDb)})",
+            "mic options: input ${c.micInput.name.lowercase()}, plugged-in mic level ${c.externalMicGainDb?.let { gainText(it.toInt()) } ?: "same as phone"}, " +
+                "low cut ${c.lowCut.name.lowercase()}, leveler ${onOff(c.voiceLeveler)}, mono voice ${onOff(c.monoVoice)}",
+            "frame rate: ${c.fps} fps$fpsAsked; lip sync: offset ${signedMs(c.avOffsetNs / 1_000_000)}, automatic ${onOff(c.autoLipSync)}",
             "weak signal screen: ${onOff(c.autoWeakSignal)}",
             "app ${s.app}, ${s.device}",
         )
@@ -262,7 +269,7 @@ internal object SessionLogText {
     private fun rtmpHost(url: String): String = runCatching { java.net.URI(url).host }.getOrNull() ?: "an RTMP server"
 
     /** The every-5-seconds line: everything the live screen knows, plus the mic over the last window. */
-    fun snapshot(st: EngineState, mic: String?, alerts: Int): String = buildString {
+    fun snapshot(st: EngineState, mic: String?, alerts: Int, screenOn: Boolean? = null, pocketScreen: Boolean = false): String = buildString {
         append("snap health=").append(st.health)
         append(" conn=").append(st.connection)
         if (st.reconnectAttempt > 0) append("#").append(st.reconnectAttempt)
@@ -285,11 +292,21 @@ internal object SessionLogText {
         if (st.micMuted) append(" micMuted")
         mic?.let { append(" ").append(it) }
         append(" alerts=").append(alerts)
+        // Next to the links' RTT: Wi-Fi power save with the screen off shows up there first.
+        screenOn?.let { append(" screen=").append(if (it) "on" else "off") }
+        if (pocketScreen) append(" pocketScreen")
         append(" links=").append(if (st.links.isEmpty()) "none" else st.links.joinToString("; ", "[", "]") { link(it) })
-        extras(st, KNOWN_STATE_FIELDS).forEach { (k, v) -> append(' ').append(k).append('=').append(v) }
+        // Everything else the engine reports, by name; a field left out is at its default (0, off, empty or unknown),
+        // which keeps a long stream's log well inside its cap.
+        extras(st, KNOWN_STATE_FIELDS, skipDefaults = true).forEach { (k, v) -> append(' ').append(k).append('=').append(v) }
         // The audio glitch counters (mic overruns, camera underruns, limiter load...): the first thing to read when a
         // stream sounded bad.
-        extras(st.audio, emptySet()).forEach { (k, v) -> append(" audio.").append(k).append('=').append(v) }
+        extras(st.audio, emptySet(), skipDefaults = true).forEach { (k, v) -> append(" audio.").append(k).append('=').append(v) }
+        // Frame timing, the external camera's clock, the mic in use and what the camera says it does.
+        extras(st.cadence, emptySet(), skipDefaults = true).forEach { (k, v) -> append(" cadence.").append(k).append('=').append(v) }
+        st.ingest?.let { i -> extras(i, emptySet(), skipDefaults = true).forEach { (k, v) -> append(" ingest.").append(k).append('=').append(v) } }
+        st.micInput?.let { append(" micInput=\"").append(it.name).append("\"/").append(it.inputClass) }
+        st.captureStats?.let { c -> extras(c, emptySet(), skipDefaults = true).forEach { (k, v) -> append(" capture.").append(k).append('=').append(v) } }
         st.lastError?.let { append(" error=\"").append(it).append('"') }
     }
 
@@ -299,6 +316,11 @@ internal object SessionLogText {
         append("up ").append(kb(l.kbps * 1000)).append(' ').append(l.rttMs?.let { "${it}ms" } ?: "rtt?")
         l.batteryPercent?.let { append(" battery ").append(it).append('%') }
         if (l.hot) append(" hot")
+        // Its queue, the server's resend requests per second, its in-flight cap and what went past it.
+        append(" q ").append(l.queueMs).append("ms")
+        append(" nak ").append(String.format(Locale.ROOT, "%.1f", l.nakRate)).append("/s")
+        append(" cap ").append(l.capPackets)
+        if (l.overCap > 0) append(" over ").append(l.overCap)
     }
 
     /**
@@ -326,11 +348,22 @@ internal object SessionLogText {
         if (p.micMuted != now.micMuted) out += if (now.micMuted) "mic muted" else "mic unmuted"
         diff("heat rung", p.thermalRung, now.thermalRung, " (thermal status ${now.thermalStatus})")
         if (now.encoderRecoveries > p.encoderRecoveries) out += "video encoder recovered (${now.encoderRecoveries} so far)"
+        // Known a frame or two in: once each, then whenever they change (an encoder restart can pick another).
+        if (now.encoder.isNotEmpty() && now.encoder != p.encoder) out += "video encoder ${now.encoder}"
+        if (now.audio.aacEncoder.isNotEmpty() && now.audio.aacEncoder != p.audio.aacEncoder) out += "audio encoder ${now.audio.aacEncoder}"
+        if (now.fpsFallback.isNotEmpty() && now.fpsFallback != p.fpsFallback) out += "frame rate ${now.fps}: ${now.fpsFallback}"
         if (p.lastError != now.lastError) out += now.lastError?.let { "error: $it" } ?: "error cleared"
         return out
     }
 
-    fun endLines(reason: String, summary: SessionSummary?, alerts: Int, zone: ZoneId): List<String> {
+    fun endLines(
+        reason: String,
+        summary: SessionSummary?,
+        alerts: Int,
+        zone: ZoneId,
+        screenOffMs: Long = 0,
+        pocketScreenMs: Long = 0,
+    ): List<String> {
         val lines = mutableListOf("end: $reason")
         if (summary == null) {
             lines += "summary: none (the engine wasn't running)"
@@ -342,17 +375,48 @@ internal object SessionLogText {
                 "sent ${String.format(Locale.ROOT, "%.2f", summary.bytesSent / 1e9)} GB, peak thermal status ${summary.peakThermalStatus}, " +
                 "lowest bitrate ${kb(summary.lowestBitrate.toLong())}, alerts shown $alerts" +
                 (summary.lastError?.let { ", last error \"$it\"" } ?: "")
+            lines += recap(summary, screenOffMs, pocketScreenMs)
         }
         return lines
+    }
+
+    /** The heat, battery and screen side of the end: minutes at each thermal rung, battery per hour, screen time. */
+    fun recap(s: SessionSummary, screenOffMs: Long, pocketScreenMs: Long): String = buildString {
+        append("recap: heat ")
+        append(
+            if (s.thermalRungMs.isEmpty()) "not measured"
+            else s.thermalRungMs.withIndex().joinToString(", ") { (i, ms) -> String.format(Locale.ROOT, "rung %d %.1f min", i, ms / 60_000.0) },
+        )
+        append("; battery ")
+        when {
+            s.batteryStartPct < 0 -> append("not read")
+            else -> {
+                append(s.batteryStartPct).append("% -> ").append(s.batteryEndPct).append('%')
+                append(s.batteryPctPerHour?.let { String.format(Locale.ROOT, ", %.1f%%/h", it) } ?: ", too short for a rate")
+            }
+        }
+        append("; screen off ").append(duration(screenOffMs))
+        append(", pocket screen ").append(duration(pocketScreenMs))
+    }
+
+    /**
+     * What the engine reported as it happened, as a log line: link events with their reasons, bitrate changes (with the
+     * controller's reason), mic input changes and notes. [EventLines] keeps the bitrate lines to one a second.
+     */
+    fun event(e: EngineEvent): String = when (e) {
+        is EngineEvent.Link -> e.line
+        is EngineEvent.Bitrate -> e.line
+        is EngineEvent.MicInput -> e.line
+        is EngineEvent.Note -> e.line
     }
 
     /**
      * The fields of [obj] this log doesn't know by name yet, as name=value: what another part of the app adds to
      * [EngineState] later (audio glitch counters, say) shows in the snapshots without this file changing first. Only
      * plain values (numbers, booleans, text, enums), and text is cut short. The app isn't minified, so names stay
-     * readable.
+     * readable. [skipDefaults] leaves out zeros, false, empty text and NaN (unknown).
      */
-    fun extras(obj: Any, known: Set<String>): List<Pair<String, String>> = runCatching {
+    fun extras(obj: Any, known: Set<String>, skipDefaults: Boolean = false): List<Pair<String, String>> = runCatching {
         obj.javaClass.declaredFields
             .filter { f -> !java.lang.reflect.Modifier.isStatic(f.modifiers) && !f.isSynthetic && f.name !in known }
             .sortedBy { it.name }
@@ -360,13 +424,17 @@ internal object SessionLogText {
                 f.isAccessible = true
                 when (val v = f.get(obj)) {
                     is Float -> f.name to String.format(Locale.ROOT, "%.1f", v)
-                    is Double -> f.name to String.format(Locale.ROOT, "%.1f", v)
+                    // Doubles carry ratios (overhead, resend rate) where the third decimal matters.
+                    is Double -> f.name to String.format(Locale.ROOT, "%.3f", v)
                     is Number, is Boolean, is Enum<*> -> f.name to v.toString()
                     is CharSequence -> f.name to "\"" + v.toString().take(80) + "\""
                     else -> null
-                }
+                }?.takeUnless { (_, v) -> skipDefaults && v in DEFAULT_VALUES }
             }
     }.getOrDefault(emptyList())
+
+    /** How [extras] prints a value at its default. */
+    private val DEFAULT_VALUES = setOf("0", "0.0", "0.000", "false", "\"\"", "NaN")
 
     /** [EngineState]'s fields the snapshot already writes by name. */
     val KNOWN_STATE_FIELDS = setOf(
@@ -385,45 +453,111 @@ internal object SessionLogText {
         else String.format(Locale.ROOT, "%dm %02ds", s / 60, s % 60)
     }
 
+    /** "+40 ms", "-20 ms", "0 ms". */
+    fun signedMs(ms: Long): String = if (ms > 0) "+$ms ms" else "$ms ms"
+
     private fun yes(b: Boolean) = if (b) "yes" else "no"
     private fun onOff(b: Boolean) = if (b) "on" else "off"
 }
 
 /**
- * The mic over one snapshot window: its loudest peak, average level and how often the limiter was pulling it down.
- * A single reading every 5 s would miss what the first stream needed to know (a hot mic clamped most of the time
- * sounds harsh), so every level the engine publishes goes through here. Thread-safe.
+ * The engine's events as log lines, with the bitrate lines held to one per [abrGapMs] (the engine limits them too;
+ * this keeps the file readable whatever it sends). Everything else is written as it comes.
+ */
+internal class EventLines(private val abrGapMs: Long = 1_000) {
+    private var lastAbrMs = Long.MIN_VALUE / 2
+
+    @Synchronized
+    fun line(nowMs: Long, e: EngineEvent): String? {
+        if (e is EngineEvent.Bitrate) {
+            if (nowMs - lastAbrMs < abrGapMs) return null
+            lastAbrMs = nowMs
+        }
+        return SessionLogText.event(e)
+    }
+}
+
+/**
+ * The mic over one snapshot window: its loudest peak, its average level (as power, so a loud second isn't averaged
+ * away by quiet ones), the average while there was a voice, how often the limiter was pulling it down, and what came
+ * in clipped before any gain. A single reading every 5 s would miss what the first stream needed to know (a hot mic
+ * clamped most of the time sounds harsh), so every level the engine publishes goes through here. Thread-safe.
  */
 internal class MicWindow {
     private var count = 0
     private var limiting = 0
     private var peak = MicLevel.FLOOR_DB
-    private var rmsSum = 0.0
+    private var powerSum = 0.0
+    private var voiced = 0
+    private var voicedPowerSum = 0.0
     private var maxReduction = 0f
+    private var inPeak = MicLevel.FLOOR_DB
+    private var clipped = 0L
+    private var leveler = 0f
 
     @Synchronized
     fun add(l: MicLevel) {
         count++
         peak = maxOf(peak, l.peakDb)
-        rmsSum += l.rmsDb
+        val power = Math.pow(10.0, l.rmsDb / 10.0)
+        powerSum += power
+        if (l.rmsDb > VOICE_DB) { voiced++; voicedPowerSum += power }
         if (l.reductionDb > LIMITING_DB) limiting++
         maxReduction = maxOf(maxReduction, l.reductionDb)
+        inPeak = maxOf(inPeak, l.inPeakDb)
+        clipped += l.inClipped
+        leveler = l.levelerDb
     }
 
-    /** "mic peak -1.0 rms -18.0 limiting 40% max 6.0dB" for the window so far, then starts a new one; null without levels. */
+    /**
+     * "mic peak -1.0 rms -18.4 voice -18.4 limiting 40% max 6.0dB in-peak -3.0 clip 0 leveler 0.0" for the window so
+     * far ("voice none" when nobody spoke), then starts a new one; null without levels.
+     */
     @Synchronized
     fun take(): String? {
         if (count == 0) return null
+        val voice = if (voiced == 0) "none" else String.format(Locale.ROOT, "%.1f", db(voicedPowerSum / voiced))
         val s = String.format(
-            Locale.ROOT, "mic peak %.1f rms %.1f limiting %d%% max %.1fdB",
-            peak, rmsSum / count, limiting * 100 / count, maxReduction,
+            Locale.ROOT, "mic peak %.1f rms %.1f voice %s limiting %d%% max %.1fdB in-peak %.1f clip %d leveler %.1f",
+            peak, db(powerSum / count), voice, limiting * 100 / count, maxReduction, inPeak, clipped, leveler,
         )
-        count = 0; limiting = 0; peak = MicLevel.FLOOR_DB; rmsSum = 0.0; maxReduction = 0f
+        count = 0; limiting = 0; peak = MicLevel.FLOOR_DB; powerSum = 0.0; voiced = 0; voicedPowerSum = 0.0
+        maxReduction = 0f; inPeak = MicLevel.FLOOR_DB; clipped = 0
         return s
     }
+
+    private fun db(power: Double): Double = if (power <= 0.0) MicLevel.FLOOR_DB.toDouble() else 10 * Math.log10(power)
 
     private companion object {
         /** Less than this is the limiter's release tail, not it holding the voice down. */
         const val LIMITING_DB = 0.5f
+        /** Louder than this counts as a voice (the mic controls' own line). */
+        const val VOICE_DB = -45f
     }
+}
+
+/** How long something has been on in total (the screen off, the Pocket screen), from changes with their times. Thread-safe. */
+internal class TimeOn {
+    private var on = false
+    private var sinceMs = 0L
+    private var totalMs = 0L
+
+    /** Starts counting afresh at [nowMs], [on] or off. */
+    @Synchronized
+    fun reset(nowMs: Long, on: Boolean) {
+        totalMs = 0
+        this.on = on
+        sinceMs = nowMs
+    }
+
+    @Synchronized
+    fun set(nowMs: Long, on: Boolean) {
+        if (on == this.on) return
+        if (this.on) totalMs += (nowMs - sinceMs).coerceAtLeast(0)
+        this.on = on
+        sinceMs = nowMs
+    }
+
+    @Synchronized
+    fun totalMs(nowMs: Long): Long = totalMs + if (on) (nowMs - sinceMs).coerceAtLeast(0) else 0
 }

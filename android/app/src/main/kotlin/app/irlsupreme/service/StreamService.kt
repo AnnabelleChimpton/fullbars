@@ -5,17 +5,22 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import android.util.Size
+import androidx.core.content.ContextCompat
+import app.irlsupreme.engine.CameraInput
 import app.irlsupreme.engine.OutputTarget
 import app.irlsupreme.engine.Scene
 import app.irlsupreme.engine.SessionSummary
@@ -33,6 +38,7 @@ import app.irlsupreme.twitch.TwitchException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -42,6 +48,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -56,8 +63,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Foreground service that owns the [StreamEngine] for the whole stream, so the stream outlives the UI, which is only
- * a thin client. Holds a partial wake lock and a low-latency Wi-Fi lock while live. Started from the visible
- * activity, as Android 14+ requires for camera/microphone foreground services.
+ * a thin client. Holds a partial wake lock and two Wi-Fi locks while live ([WifiLocks]): low latency, which only acts
+ * with the screen on and the app in front, and high performance, which keeps Wi-Fi out of power save with the screen
+ * off on Android 12 and 13. Started from the visible activity, as Android 14+ requires for camera/microphone
+ * foreground services. While live it also tells the engine the battery level and temperature every 10 s and passes on
+ * Android's thermal status changes the moment they happen.
  *
  * Starting and stopping the engine take seconds (render setup, waiting for an RTMP camera, the SRT goodbye grace,
  * thread joins), so they run on [engineExec], one at a time and in order; the main thread only flips [live] and
@@ -73,7 +83,7 @@ class StreamService : Service() {
         private set
     private val binder = LocalBinder()
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
+    private var wifiLocks: WifiLocks? = null
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e -> Log.e(TAG, "a side feature failed; the stream goes on", e) },
     )
@@ -118,6 +128,8 @@ class StreamService : Service() {
                 val log = SessionLog(SessionLog.dir(filesDir), startMs, onError = { Log.w(TAG, "session log stopped: $it") })
                     .also { sessionLog = it }
                 val broadcasterId = intent.getStringExtra(EXTRA_BROADCASTER_ID)
+                // Before the engine starts: it reports its frame-rate fallback while starting.
+                startEvents(log)
                 engineExec.execute {
                     // The scene cards as the streamer set them, read fresh: the stream and the slates sent to the BRB
                     // server draw them from here, even when no activity ran first.
@@ -125,24 +137,34 @@ class StreamService : Service() {
                     AlertStyles.apply(this)
                     // Built here: the helper password and camera settings are Keystore reads.
                     val target = if (bondHost != null) {
-                        OutputTarget.Bonded(bondHost, intent.getIntExtra(EXTRA_BOND_PORT, 5000), intent.getStringExtra(EXTRA_BOND_STREAM_ID) ?: "live",
-                            passphrase = intent.getStringExtra(EXTRA_BOND_PASSPHRASE), helpers = Helpers.hosting(this))
+                        StreamRules.bonded(
+                            bondHost, intent.getIntExtra(EXTRA_BOND_PORT, 5000), intent.getStringExtra(EXTRA_BOND_STREAM_ID) ?: "live",
+                            intent.getStringExtra(EXTRA_BOND_PASSPHRASE), StreamSettings.delay(this), Helpers.hosting(this),
+                        )
                     } else {
                         OutputTarget.Rtmp(url!!)
                     }
-                    val config = StreamConfig(
-                        target = target,
+                    val choices = StreamChoices(
                         width = intent.getIntExtra(EXTRA_WIDTH, 1920),
                         height = intent.getIntExtra(EXTRA_HEIGHT, 1080),
-                        videoBitrate = intent.getIntExtra(EXTRA_BITRATE, 6_000_000),
+                        bitrate = intent.getIntExtra(EXTRA_BITRATE, 6_000_000),
+                        fps = intent.getIntExtra(EXTRA_FPS, 30),
                         camera = ExternalCamera.input(this),
                         autoWeakSignal = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("weak_signal_screen", true),
-                        micGainDb = MicSettings.current(this).gainDb.toFloat(),
-                        rawMic = MicSettings.current(this).raw,
-                        rawMicGainDb = MicSettings.current(this).rawGainDb.toFloat(),
+                        mic = MicSettings.current(this),
+                        audio = StreamSettings.audio(this),
+                        avOffsetMs = StreamSettings.avOffsetMs(this),
+                        autoLipSync = StreamSettings.autoLipSync(this),
                         channelLogin = channelLogin(),
                     )
-                    SessionLogText.startLines(sessionStart(config)).forEach(log::essential)
+                    // 60 fps only for the phone camera, where its camera and encoder carry it (the engine checks again).
+                    val fps = StreamRules.fps(choices.fps, choices.camera is CameraInput.Phone) {
+                        app.irlsupreme.engine.video.CameraCapabilities.supports(this, CameraPrefs.startFacing(this), choices.width, choices.height, 60)
+                    }
+                    val config = StreamRules.config(target, choices, fps)
+                    SessionLogText.startLines(sessionStart(config, choices.fps)).forEach(log::essential)
+                    // The battery as the stream starts, for the recap's battery per hour and the heat ladder's floor.
+                    readBattery()
                     val started = try {
                         engine.start(config)
                     } catch (t: Throwable) {
@@ -162,6 +184,7 @@ class StreamService : Service() {
                         if (started) {
                             startSideFeatures(config, broadcasterId)
                             startLogging(log)
+                            startDeviceWatch(log)
                         } else {
                             failedStart()
                         }
@@ -214,7 +237,7 @@ class StreamService : Service() {
      * What this stream was set up as, for the session log: only settings, never the stream key, URL or passwords.
      * Engine thread (the settings are disk reads).
      */
-    private fun sessionStart(config: StreamConfig): SessionStart {
+    private fun sessionStart(config: StreamConfig, requestedFps: Int): SessionStart {
         val kind = ExternalCamera.kind(this)
         val version = runCatching {
             packageManager.getPackageInfo(packageName, 0).let { "${it.versionName} (${it.longVersionCode})" }
@@ -235,6 +258,7 @@ class StreamService : Service() {
             mic = MicSettings.current(this),
             app = version,
             device = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}",
+            requestedFps = requestedFps,
         )
     }
 
@@ -252,6 +276,7 @@ class StreamService : Service() {
     private fun startLogging(log: SessionLog) {
         logJob?.cancel()
         val mic = MicWindow()
+        val startedAt = System.currentTimeMillis()
         logJob = scope.launch {
             launch { engine.micLevel.collect { mic.add(it) } }
             launch {
@@ -261,11 +286,160 @@ class StreamService : Service() {
                     prev = st
                 }
             }
-            launch { MicSettings.state(this@StreamService).drop(1).collect { log.line("mic setting now ${micValue(it)}") } }
+            launch {
+                // Settings › Microphone and the live mic sheet write the settings; the stream follows them here, so the
+                // page, the sheet and the stream never disagree.
+                MicSettings.state(this@StreamService).drop(1).collect {
+                    log.line("mic setting now ${micValue(it)}, input ${it.input.name.lowercase()}, low cut ${it.lowCut.name.lowercase()}, " +
+                        "leveler ${if (it.voiceLeveler) "on" else "off"}, mono ${if (it.monoVoice) "on" else "off"}")
+                    applyMic(it)
+                }
+            }
             launch { PocketStatus.state.collect { s -> s?.let { log.line("pocket: ${it.label}") } } }
+            launch {
+                PocketScreen.on.drop(1).collect { on ->
+                    pocketTime.set(System.currentTimeMillis(), on)
+                    log.line(if (on) "pocket screen on" else "pocket screen off (${SessionLogText.duration(pocketTime.totalMs(System.currentTimeMillis()))} so far)")
+                }
+            }
+            var diagnosed = false
             while (isActive) {
                 delay(SNAPSHOT_EVERY_MS)
-                log.line(SessionLogText.snapshot(engine.state.value, mic.take(), alertsShown.get()))
+                log.line(SessionLogText.snapshot(engine.state.value, mic.take(), alertsShown.get(), screenOn, PocketScreen.on.value))
+                // The audio path's finer health once ~10 s in (the stereo probe has measured by then); again at the end.
+                if (!diagnosed && System.currentTimeMillis() - startedAt >= AUDIO_DIAGNOSTICS_AFTER_MS) {
+                    diagnosed = true
+                    engine.audioDiagnostics()?.let { log.line(it.line()) }
+                }
+            }
+        }
+    }
+
+    /** The mic settings into the running stream (each setter is a plain write; an unchanged one does nothing). */
+    private fun applyMic(p: MicPrefs) {
+        engine.setMicGain(p.gainDb.toFloat())
+        engine.setRawMicGain(p.rawGainDb.toFloat())
+        engine.setRawMic(p.raw)
+        if (!STREAM_USES_MIC_OPTIONS) return
+        engine.setLowCut(p.lowCut)
+        engine.setVoiceLeveler(p.voiceLeveler)
+        engine.setMonoVoice(p.monoVoice)
+        engine.setMicInput(p.input)
+        engine.setExternalMicGain(p.externalGainDb.toFloat())
+    }
+
+    private var eventsJob: Job? = null
+
+    /**
+     * The engine's events into [log] as they happen: link events with reasons, bitrate changes (at most one a second),
+     * mic input changes and notes. Subscribed at once (not when the coroutine first runs), so what the engine says
+     * while starting is kept. A mic change of kind is also shown on the live screen ([MicNotice]).
+     */
+    private fun startEvents(log: SessionLog) {
+        eventsJob?.cancel()
+        val lines = EventLines()
+        eventsJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            engine.events.collect { e ->
+                lines.line(System.currentTimeMillis(), e)?.let(log::line)
+                if (e is app.irlsupreme.engine.EngineEvent.MicInput) e.message?.let(MicNotice::post)
+            }
+        }
+    }
+
+    // Main thread only, while live.
+    private var batteryJob: Job? = null
+    private var keyframeJob: Job? = null
+    private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
+    private var screenReceiver: BroadcastReceiver? = null
+    /** The screen's state for the snapshots (any thread reads it). */
+    @Volatile private var screenOn: Boolean? = null
+    private val screenOffTime = TimeOn()
+    private val pocketTime = TimeOn()
+
+    /**
+     * The phone around the stream: battery level and temperature into the engine every [BATTERY_EVERY_MS], Android's
+     * thermal status changes straight to the ladder (it steps up at once instead of at its next tick), and the screen
+     * going on and off into [log] (Wi-Fi power save with the screen off shows in the links' RTT next to it).
+     */
+    private fun startDeviceWatch(log: SessionLog) {
+        stopDeviceWatch()
+        val now = System.currentTimeMillis()
+        val pm = getSystemService(PowerManager::class.java)
+        val interactive = pm.isInteractive
+        screenOn = interactive
+        screenOffTime.reset(now, on = !interactive)
+        pocketTime.reset(now, on = PocketScreen.on.value)
+        batteryJob = scope.launch {
+            while (isActive) {
+                readBattery()
+                delay(BATTERY_EVERY_MS)
+            }
+        }
+        thermalListener = PowerManager.OnThermalStatusChangedListener { status -> engine.onThermalStatusChanged(status) }
+            .also { l -> runCatching { pm.addThermalStatusListener(ContextCompat.getMainExecutor(this), l) } }
+        screenReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val on = intent.action == Intent.ACTION_SCREEN_ON
+                if (screenOn == on) return
+                screenOn = on
+                val t = System.currentTimeMillis()
+                screenOffTime.set(t, !on)
+                log.line(if (on) "screen on" else "screen off")
+            }
+        }.also { r ->
+            val filter = IntentFilter(Intent.ACTION_SCREEN_ON).apply { addAction(Intent.ACTION_SCREEN_OFF) }
+            ContextCompat.registerReceiver(this, r, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        }
+        if (startedTarget is OutputTarget.Bonded) startKeyframeBackstop(log)
+    }
+
+    private fun stopDeviceWatch() {
+        batteryJob?.cancel(); batteryJob = null
+        keyframeJob?.cancel(); keyframeJob = null
+        thermalListener?.let { l -> runCatching { getSystemService(PowerManager::class.java).removeThermalStatusListener(l) } }
+        thermalListener = null
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
+    }
+
+    /** The battery's level, temperature and charging into the engine. A failed read leaves them unknown. */
+    private fun readBattery() {
+        runCatching {
+            val bm = getSystemService(BatteryManager::class.java)
+            val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).takeIf { it in 0..100 } ?: -1
+            // The sticky battery broadcast: no receiver needed, just its last value.
+            val sticky = ContextCompat.registerReceiver(this, null, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+            val tenths = sticky?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+            engine.setBattery(pct, bm.isCharging, if (tenths == Int.MIN_VALUE) Float.NaN else tenths / 10f)
+        }.onFailure { Log.w(TAG, "battery read failed: ${it.javaClass.simpleName}") }
+    }
+
+    /**
+     * Combined connections: the paired server's keyframe backstop ([KeyframeBackstop]). While its slate is on air the
+     * status is polled every 400 ms, and the encoder asked for a keyframe when the server waits for one.
+     */
+    private fun startKeyframeBackstop(log: SessionLog) {
+        keyframeJob?.cancel()
+        keyframeJob = scope.launch {
+            val pairing = BrbPairingStore(SecretStore(this@StreamService)).load() ?: return@launch
+            val client = BrbClient(pairing)
+            val backstop = KeyframeBackstop()
+            var wasOnSlate = false
+            while (isActive) {
+                val st = engine.state.value
+                val now = android.os.SystemClock.elapsedRealtime()
+                backstop.phone(now, trouble = st.connection != app.irlsupreme.engine.ConnectionPhase.LIVE || st.weakSignal)
+                runCatching { client.status(timeoutMs = KEYFRAME_POLL_TIMEOUT_MS) }.getOrNull()?.let { s ->
+                    if (backstop.onStatus(android.os.SystemClock.elapsedRealtime(), s.state, s.needKeyframe)) {
+                        engine.requestKeyframe()
+                        log.line("server waits for a keyframe: asked the encoder (${backstop.requests} this stream)")
+                    }
+                    if (backstop.serverOnSlate != wasOnSlate) {
+                        wasOnSlate = backstop.serverOnSlate
+                        log.line("server ${if (wasOnSlate) "shows its ${s.state} slate" else "is back on the camera"}")
+                    }
+                }
+                delay(backstop.nextPollMs(android.os.SystemClock.elapsedRealtime()))
             }
         }
     }
@@ -725,6 +899,8 @@ class StreamService : Service() {
         twitchJob?.cancel(); twitchJob = null
         ChatFeed.clear()
         logJob?.cancel(); logJob = null
+        eventsJob?.cancel(); eventsJob = null
+        stopDeviceWatch()
     }
 
     /**
@@ -744,10 +920,14 @@ class StreamService : Service() {
         val log = sessionLog
         sessionLog = null
         log?.essential("ending: ${reason.words}")
+        engine.audioDiagnostics()?.let { log?.line(it.line()) }
+        val now = System.currentTimeMillis()
+        val screenOffMs = screenOffTime.totalMs(now)
+        val pocketMs = pocketTime.totalMs(now)
         stopSideFeatures()
         engineExec.execute {
             if (reason.deliberate) tellServerEnded(log)
-            stopEngine(markEnded, log, reason.words)
+            stopEngine(markEnded, log, reason.words, screenOffMs, pocketMs)
             main.post {
                 if (gen != generation || destroyed) return@post // a new stream started meanwhile: it owns the service
                 ending = false
@@ -763,7 +943,7 @@ class StreamService : Service() {
      * Engine thread (or onDestroy). A start that failed already cleaned up and keeps its reason in the state. Ends and
      * closes the stream's [log], if any, with [why] and the recap.
      */
-    private fun stopEngine(markEnded: Boolean, log: SessionLog? = null, why: String = "") {
+    private fun stopEngine(markEnded: Boolean, log: SessionLog? = null, why: String = "", screenOffMs: Long = 0, pocketScreenMs: Long = 0) {
         val wasRunning = engine.state.value.running
         if (wasRunning) {
             try {
@@ -777,7 +957,8 @@ class StreamService : Service() {
         startedTarget = null
         if (log != null) {
             val summary = engine.lastSession.value.takeIf { wasRunning }
-            SessionLogText.endLines(why, summary, alertsShown.get(), java.time.ZoneId.systemDefault()).forEach(log::essential)
+            SessionLogText.endLines(why, summary, alertsShown.get(), java.time.ZoneId.systemDefault(), screenOffMs, pocketScreenMs)
+                .forEach(log::essential)
             log.close()
         }
     }
@@ -827,17 +1008,14 @@ class StreamService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "irlsupreme:stream")
                 .apply { setReferenceCounted(false); acquire() }
         }
-        if (wifiLock == null) {
-            @Suppress("DEPRECATION")
-            wifiLock = getSystemService(WifiManager::class.java)
-                .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "irlsupreme:stream")
-                .apply { setReferenceCounted(false); acquire() }
+        if (wifiLocks == null) {
+            wifiLocks = WifiLocks.of(getSystemService(WifiManager::class.java)).apply { acquire("irlsupreme:stream") }
         }
     }
 
     private fun releaseLocks() {
         wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
-        wifiLock?.let { if (it.isHeld) it.release() }; wifiLock = null
+        wifiLocks?.release(); wifiLocks = null
     }
 
     companion object {
@@ -850,6 +1028,12 @@ class StreamService : Service() {
         private const val TICK_SLACK_MS = 15L
         /** How often the session log writes a full snapshot (changes are written as they happen). */
         private const val SNAPSHOT_EVERY_MS = 5_000L
+        /** How often the battery is read into the engine. */
+        private const val BATTERY_EVERY_MS = 10_000L
+        /** When the audio path's finer health first goes into the log. */
+        private const val AUDIO_DIAGNOSTICS_AFTER_MS = 10_000L
+        /** A keyframe poll gives up after this: the next one is due soon anyway. */
+        private const val KEYFRAME_POLL_TIMEOUT_MS = 1_500L
         const val ACTION_START = "app.irlsupreme.START"
         const val ACTION_STOP = "app.irlsupreme.STOP"
         const val ACTION_SCENE = "app.irlsupreme.SCENE"
@@ -860,17 +1044,19 @@ class StreamService : Service() {
         const val EXTRA_WIDTH = "w"
         const val EXTRA_HEIGHT = "h"
         const val EXTRA_BITRATE = "bps"
+        /** The frame rate asked for, 30 or 60; the service and the engine check 60 against the phone. */
+        const val EXTRA_FPS = "fps"
         const val EXTRA_BROADCASTER_ID = "broadcaster"
         const val EXTRA_BOND_HOST = "bond_host"
         const val EXTRA_BOND_PORT = "bond_port"
         const val EXTRA_BOND_STREAM_ID = "bond_stream_id"
         const val EXTRA_BOND_PASSPHRASE = "bond_passphrase"
 
-        fun start(ctx: Context, url: String, width: Int, height: Int, bitrate: Int, broadcasterId: String? = null) {
+        fun start(ctx: Context, url: String, width: Int, height: Int, bitrate: Int, broadcasterId: String? = null, fps: Int = 30) {
             ctx.startForegroundService(
                 Intent(ctx, StreamService::class.java).setAction(ACTION_START)
                     .putExtra(EXTRA_URL, url).putExtra(EXTRA_WIDTH, width)
-                    .putExtra(EXTRA_HEIGHT, height).putExtra(EXTRA_BITRATE, bitrate)
+                    .putExtra(EXTRA_HEIGHT, height).putExtra(EXTRA_BITRATE, bitrate).putExtra(EXTRA_FPS, fps)
                     .putExtra(EXTRA_BROADCASTER_ID, broadcasterId),
             )
         }
@@ -881,13 +1067,13 @@ class StreamService : Service() {
          */
         fun startBonded(
             ctx: Context, host: String, port: Int, streamId: String, passphrase: String?,
-            width: Int, height: Int, bitrate: Int, broadcasterId: String? = null,
+            width: Int, height: Int, bitrate: Int, broadcasterId: String? = null, fps: Int = 30,
         ) {
             ctx.startForegroundService(
                 Intent(ctx, StreamService::class.java).setAction(ACTION_START)
                     .putExtra(EXTRA_BOND_HOST, host).putExtra(EXTRA_BOND_PORT, port).putExtra(EXTRA_BOND_STREAM_ID, streamId)
                     .putExtra(EXTRA_BOND_PASSPHRASE, passphrase)
-                    .putExtra(EXTRA_WIDTH, width).putExtra(EXTRA_HEIGHT, height).putExtra(EXTRA_BITRATE, bitrate)
+                    .putExtra(EXTRA_WIDTH, width).putExtra(EXTRA_HEIGHT, height).putExtra(EXTRA_BITRATE, bitrate).putExtra(EXTRA_FPS, fps)
                     .putExtra(EXTRA_BROADCASTER_ID, broadcasterId),
             )
         }
@@ -941,4 +1127,22 @@ internal fun subscriptionWords(s: SubscriptionStatus): String = when (s) {
     SubscriptionStatus.Active -> "on"
     SubscriptionStatus.NeedsSignIn -> "off: this Twitch sign-in can't see followers (sign in again)"
     is SubscriptionStatus.Failed -> "off: Twitch refused (${s.reason.take(120)})"
+}
+
+/**
+ * Whether the live screen's Pocket screen (black, dimmed, for a phone in a pocket) is on: the live screen sets it, the
+ * session log records when and for how long.
+ */
+object PocketScreen {
+    val on = MutableStateFlow(false)
+}
+
+/**
+ * Something about the mic the streamer should know now ("External mic disconnected"), for the live screen's notice
+ * line; null once shown. Posted by the stream service from the engine's mic events.
+ */
+object MicNotice {
+    val text = MutableStateFlow<Pair<String, Long>?>(null)
+
+    fun post(message: String) { text.value = message to System.currentTimeMillis() }
 }

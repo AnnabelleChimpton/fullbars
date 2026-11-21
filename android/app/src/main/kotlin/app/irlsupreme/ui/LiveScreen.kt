@@ -1,6 +1,7 @@
 package app.irlsupreme.ui
 
 import android.os.BatteryManager
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.only
@@ -70,6 +72,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -103,7 +106,10 @@ import app.irlsupreme.service.CameraPrefs
 import app.irlsupreme.service.ChatFeed
 import app.irlsupreme.service.ChatLine
 import app.irlsupreme.service.HelperHotspotStatus
+import app.irlsupreme.engine.audio.InputClass
+import app.irlsupreme.service.MicNotice
 import app.irlsupreme.service.MicSettings
+import app.irlsupreme.service.PocketScreen
 import app.irlsupreme.service.OverlayStore
 import app.irlsupreme.service.PocketStatus
 import app.irlsupreme.service.StreamService
@@ -118,7 +124,11 @@ import app.irlsupreme.ui.live.HealthPill
 import app.irlsupreme.ui.live.InstrumentLayout
 import app.irlsupreme.ui.live.InstrumentLine
 import app.irlsupreme.ui.live.LiveDetails
+import app.irlsupreme.ui.live.LONG_NOTICE_MS
 import app.irlsupreme.ui.live.NOTICE_MS
+import app.irlsupreme.ui.live.PocketScreenOverlay
+import app.irlsupreme.ui.live.externalCameraNotice
+import app.irlsupreme.ui.live.msToNextSecond
 import app.irlsupreme.ui.live.NotOnCameraFrame
 import app.irlsupreme.ui.live.RailActions
 import app.irlsupreme.ui.live.RailKeys
@@ -208,8 +218,42 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         }
     }
 
+    // The Pocket screen: black and dimmed for a phone in a pocket, the preview no longer drawn (the stream carries on).
+    // Offered once a stream when the phone first warms up; entered from Scenes; a double tap leaves it.
+    var pocketScreen by remember { mutableStateOf(false) }
+    BackHandler(enabled = pocketScreen) { pocketScreen = false }
+    DisposableEffect(pocketScreen, state.running) {
+        engine.setPreviewSuppressed(pocketScreen)
+        PocketScreen.on.value = pocketScreen
+        onDispose {
+            engine.setPreviewSuppressed(false)
+            PocketScreen.on.value = false
+        }
+    }
+    var pocketHintAt by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(state.thermalRung >= 1) {
+        if (state.thermalRung >= 1 && !pocketScreen && PocketHintOnce.claim(engine.lastSession.value)) {
+            pocketHintAt = System.currentTimeMillis()
+            delay(LONG_NOTICE_MS)
+            pocketHintAt = 0L
+        }
+    }
+    // A change of mic kind the engine reported ("External mic disconnected"), for a few seconds.
+    val micNotice by MicNotice.text.collectAsState()
+    var micNoticeShown by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(micNotice) {
+        val (text, at) = micNotice ?: return@LaunchedEffect
+        val left = LONG_NOTICE_MS - (System.currentTimeMillis() - at)
+        if (left <= 0) return@LaunchedEffect
+        micNoticeShown = text
+        delay(left)
+        micNoticeShown = null
+    }
+    // Hot-phone preview halving, with full rate back while the screen is touched (set once the compositor exists).
+    LaunchedEffect(state.running) { if (state.running) engine.setPreviewHalving(true) }
+
     // Keep the screen awake while the live screen is visible, so the phone doesn't time out and lock mid-stream.
-    // (The stream itself survives screen-off regardless: the service holds a partial wake lock + Wi-Fi lock.)
+    // (The stream itself survives screen-off regardless: the service holds a partial wake lock and Wi-Fi locks.)
     DisposableEffect(view) {
         view.keepScreenOn = true
         onDispose { view.keepScreenOn = false }
@@ -395,7 +439,13 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
     val big = bigType(LocalDensity.current.fontScale)
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(500) } }
+    // On the timer's own second boundary: once a second, never twice.
+    LaunchedEffect(state.liveSinceMs) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(msToNextSecond(state.liveSinceMs, now))
+        }
+    }
     val timer = TimerCell(timerLabel(state.liveSinceMs, isTest), timerText(state.liveSinceMs, now), timerSpoken(state.liveSinceMs, now, isTest), state.liveSinceMs == 0L)
     val links = linkCells(
         state.links, state.targetVideoBitrate, state.sentBitrate,
@@ -412,6 +462,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         cameraLink = cameraLink,
         helperProblem = helperProblem?.takeIf { it != seenProblem }?.let { "No helper hotspot. Tap the pill for why." },
         micLoud = micLoud && !state.micMuted && !micOpen,
+        micInput = micNoticeShown,
+        pocketHint = pocketHintAt != 0L,
     )
 
     val brb = state.scene != Scene.LIVE
@@ -436,9 +488,28 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
     val onChat: (() -> Unit)? = if (ending) null else ({ chatOpen = !chatOpen; scenesOpen = false; micOpen = false; sheetKind = SheetKind.CHAT })
     val flipButton: (() -> Unit)? = if (phoneCamera && !ending) ({ flip(true) }) else null
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            // Any finger on the screen keeps the preview at full rate on a warm phone; only watched, never consumed.
+            .pointerInput(engine) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    engine.setPreviewTouchBoost(true)
+                    try {
+                        do {
+                            val e = awaitPointerEvent(PointerEventPass.Initial)
+                        } while (e.changes.any { it.pressed })
+                    } finally {
+                        engine.setPreviewTouchBoost(false)
+                    }
+                }
+            },
+    ) {
         Preview(
             engine,
+            fps = state.fps,
             paused = state.previewPaused,
             viewersSeeYou = state.scene == Scene.LIVE && !state.weakSignal && state.camera != CameraPhase.LOST,
             onZoom = if (phoneCamera && !ending) {
@@ -461,10 +532,16 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                 ) else if (sheetKind == SheetKind.MIC) MicSheet(
                     level = engine.micLevel, muted = state.micMuted,
                     onGain = { db ->
-                        MicSettings.setGain(ctx, db)
+                        // A USB or wired mic in use has its own level, as on Settings › Microphone.
+                        val external = state.micInput?.inputClass == InputClass.EXTERNAL
+                        MicSettings.setGain(ctx, db, external)
                         val p = MicSettings.current(ctx)
-                        engine.setMicGain(p.gainDb.toFloat())
-                        engine.setRawMicGain(p.rawGainDb.toFloat())
+                        if (external) {
+                            engine.setExternalMicGain(p.externalGainDb.toFloat())
+                        } else {
+                            engine.setMicGain(p.gainDb.toFloat())
+                            engine.setRawMicGain(p.rawGainDb.toFloat())
+                        }
                     },
                     onRaw = { raw -> MicSettings.setRaw(ctx, raw); engine.setRawMic(raw) },
                     modifier = m,
@@ -476,6 +553,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                     onFlip = onFlip, onChoose = chooseScene, modifier = m,
                     onTestAlert = if (isTest) ({ k -> scenesOpen = false; AlertQueue.post(k.alert()) }) else null,
                     alertsOn = overlays.alertsOn,
+                    onPocketScreen = { scenesOpen = false; pocketHintAt = 0L; pocketScreen = true },
                 )
             }
             val instrument: @Composable (InstrumentLayout, Modifier) -> Unit = { layout, m ->
@@ -583,8 +661,12 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                 flipSaid?.let { contentDescription = it }
             },
         )
+        if (pocketScreen) PocketScreenOverlay(pill, said, ending, onLeave = { pocketScreen = false })
     }
 }
+
+/** The Pocket screen is offered once per stream, across rebuilds of this screen (see [OncePerStream]). */
+private val PocketHintOnce = OncePerStream()
 
 /**
  * The left-hand slots, top to bottom: the pill (cutout inset + 4dp) with the flip button at the other end of its row,
@@ -720,10 +802,7 @@ private fun Modifier.absorbTouches(): Modifier = pointerInput(Unit) {
  */
 private fun cameraLinkNotice(state: EngineState, pocket: PocketState?): String? = when {
     pocket != null && pocket !is PocketState.Streaming -> "Camera link · ${pocket.label}"
-    state.externalCamera != null && state.activeSource == "phone" ->
-        if (state.externalCamera?.startsWith("waiting") == true) "Phone camera · waiting for the camera link"
-        else "Phone camera · camera link lost"
-    else -> null
+    else -> externalCameraNotice(state.externalCamera, state.activeSource)
 }
 
 /** Highest pinch zoom asked of the engine; it clamps further to what the camera supports. */
@@ -875,6 +954,7 @@ private fun ChatTicker(showChat: Boolean, onOpen: (() -> Unit)?, modifier: Modif
 @Composable
 private fun Preview(
     engine: StreamEngine,
+    fps: Int,
     paused: Boolean,
     viewersSeeYou: Boolean,
     onZoom: ((Float) -> Unit)?,
@@ -882,6 +962,7 @@ private fun Preview(
     onDoubleTap: (() -> Unit)?,
     onSurface: (SurfaceView?) -> Unit,
 ) {
+    val previewFps by rememberUpdatedState(fps)
     Box(Modifier.fillMaxSize()) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -891,6 +972,8 @@ private fun Preview(
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(h: SurfaceHolder) = onSurface(sv)
                         override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hgt: Int) {
+                            // The display can run at the stream's own rate (or a multiple) instead of guessing.
+                            runCatching { h.surface.setFrameRate(previewFps.toFloat(), Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) }
                             engine.attachPreview(h.surface, w, hgt)
                         }
                         override fun surfaceDestroyed(h: SurfaceHolder) {

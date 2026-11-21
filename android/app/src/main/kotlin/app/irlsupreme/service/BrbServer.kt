@@ -80,13 +80,15 @@ class BrbPairingStore(private val secrets: SecretStore) {
 
 /** What the server reports; never includes the stream key. */
 data class BrbStatus(
-    val state: String, // waiting | live | slate | unknown
+    val state: String, // waiting | live | slate | weak | error | unknown
     val outputKind: String, // twitch | rtmp | srt | record
     val outputHost: String?,
     val outputTest: Boolean,
     val phoneSlate: Boolean,
     /** "Also stream to" destinations the server holds, with the last error of any that's failing. */
     val extras: List<BrbExtra> = emptyList(),
+    /** The server waits for a live keyframe to put the camera back on air, and the phone is sending ([KeyframeBackstop]). */
+    val needKeyframe: Boolean = false,
 ) {
     val outputLabel: String get() = when (outputKind) {
         "twitch" -> if (outputTest) "Twitch (test stream)" else "Twitch"
@@ -116,9 +118,10 @@ class BrbClient(private val pairing: BrbPairing) {
     }
     private val base = "https://${if (':' in pairing.host) "[${pairing.host}]" else pairing.host}:${pairing.port}"
 
-    /** Blocking; call off the main thread. */
-    fun status(): BrbStatus {
-        val o = call(Request.Builder().url("$base/v1/status").get())
+    /** Blocking; call off the main thread. [timeoutMs]: give up sooner than the usual timeouts (the keyframe poll). */
+    fun status(timeoutMs: Long? = null): BrbStatus {
+        val client = timeoutMs?.let { http.newBuilder().callTimeout(it, TimeUnit.MILLISECONDS).build() } ?: http
+        val o = call(Request.Builder().url("$base/v1/status").get(), client)
         val out = o.optJSONObject("output") ?: JSONObject()
         return BrbStatus(
             state = o.optString("state", "unknown"),
@@ -133,6 +136,7 @@ class BrbClient(private val pairing: BrbPairing) {
                     }
                 }
             } ?: emptyList(),
+            needKeyframe = o.optBoolean("needKeyframe"),
         )
     }
 
@@ -282,6 +286,51 @@ internal fun isSrtlaReply(buf: ByteArray, len: Int): Boolean {
     val type = Packets.type(buf, len) ?: return false
     return type == Srtla.TYPE_REG2 || type == Srtla.TYPE_REG_ERR ||
         type == Srtla.TYPE_REG_NGP || type == Srtla.TYPE_REG_NAK
+}
+
+/**
+ * The keyframe backstop for a combined-connections stream. When the phone's feed drops, the paired server puts a slate
+ * on air and, once the feed is back, waits for a keyframe to splice the camera in; its status then says
+ * `needKeyframe`. The phone asks its encoder for one at once instead of waiting out the rest of a keyframe interval,
+ * at most once per [minGapMs] (the flag can stay set a moment after the keyframe went). The phone's own resume check
+ * covers most returns; this covers the rest, such as the end of a Weak signal episode the server decides.
+ *
+ * Polls every [fastMs] while the server shows a slate (or Weak signal), and for [afterTroubleMs] after the phone itself
+ * had trouble (reconnecting, Weak signal); every [slowMs] otherwise, just to notice a slate. Pure; fed with times.
+ */
+internal class KeyframeBackstop(
+    private val minGapMs: Long = 1_000,
+    private val fastMs: Long = 400,
+    private val slowMs: Long = 2_000,
+    private val afterTroubleMs: Long = 10_000,
+) {
+    private var lastKeyframeMs = Long.MIN_VALUE / 2
+    private var troubleUntilMs = Long.MIN_VALUE / 2
+
+    /** The server's last word: a slate (or the Weak signal slate) on air. */
+    var serverOnSlate = false
+        private set
+
+    /** Requests made so far, for the session log. */
+    var requests = 0
+        private set
+
+    /** The phone's own state, each round: [trouble] while it reconnects or shows Weak signal. */
+    fun phone(nowMs: Long, trouble: Boolean) {
+        if (trouble) troubleUntilMs = nowMs + afterTroubleMs
+    }
+
+    /** After a status poll: true when the encoder should be asked for a keyframe now. */
+    fun onStatus(nowMs: Long, state: String, needKeyframe: Boolean): Boolean {
+        serverOnSlate = state == "slate" || state == "weak"
+        if (!needKeyframe || nowMs - lastKeyframeMs < minGapMs) return false
+        lastKeyframeMs = nowMs
+        requests++
+        return true
+    }
+
+    /** How long to wait before the next poll. */
+    fun nextPollMs(nowMs: Long): Long = if (serverOnSlate || nowMs < troubleUntilMs) fastMs else slowMs
 }
 
 /** A pairing link that arrived from outside (a tapped fullbars:// link) and waits for the user's OK on the setup screen. */

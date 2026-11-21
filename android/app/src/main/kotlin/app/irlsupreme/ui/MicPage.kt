@@ -27,7 +27,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.rememberUpdatedState
+import app.irlsupreme.service.AudioQuality
+import app.irlsupreme.service.StreamRules
+import app.irlsupreme.service.StreamSettings
+import app.irlsupreme.ui.theme.FbHaptics
+import app.irlsupreme.ui.theme.HapticPattern
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -80,6 +95,9 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
     var left by remember { mutableIntStateOf(SOUND_CHECK_SECONDS) }
     var take by remember { mutableStateOf<PcmClip?>(null) }
     var noTake by remember { mutableStateOf(false) }
+    // The stream's sound settings, read here and written straight back (no stream reads them until the next go-live).
+    var audio by remember { mutableStateOf(StreamSettings.audio(ctx)) }
+    var avOffset by remember { mutableIntStateOf(StreamSettings.avOffsetMs(ctx)) }
 
     // The options a stream doesn't use yet stay hidden, and the check runs without them, as a stream does.
     val options = STREAM_USES_MIC_OPTIONS
@@ -221,12 +239,75 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
         )
     }
 
+    SectionHeader("Sound quality")
+    Column(Modifier.selectableGroup()) {
+        AudioQuality.entries.forEach { a ->
+            RadioRow(a.title, supporting = a.detail, selected = audio == a) { audio = a; StreamSettings.setAudio(ctx, a) }
+        }
+    }
+    HelpText("Set it before you go live. It stays the same for the whole stream.")
+
+    SectionHeader("Lip sync")
+    OffsetStepper(avOffset) { avOffset = it; StreamSettings.setAvOffsetMs(ctx, it) }
+    HelpText("Delay the sound if viewers hear you before your lips move. The sound can't arrive early, so less than 0 ms does nothing yet.")
+
     Footnote(
         null,
         "Fullbars stops your voice from clipping: when something's too loud it turns it down for a moment instead of " +
             "distorting. You can change all of this while you're live too: tap MIC on the live screen.",
         Modifier.padding(top = 16.dp),
     )
+}
+
+/**
+ * The sound's offset from the picture, −300..+300 ms in 10 ms steps: − and + keys, the value, and Reset when it isn't
+ * 0. TalkBack sees an adjustable value.
+ */
+@Composable
+private fun OffsetStepper(ms: Int, onChange: (Int) -> Unit) {
+    val c = LocalFbColors.current
+    val view = LocalView.current
+    val current by rememberUpdatedState(ms)
+    val set: (Int) -> Unit = { v ->
+        val n = StreamRules.avOffsetMs(v)
+        if (n != current) { FbHaptics.play(view, HapticPattern.KEY); onChange(n) }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Sound delay"
+                stateDescription = offsetSpoken(ms)
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    ms.toFloat(), -StreamRules.AV_OFFSET_MAX_MS.toFloat()..StreamRules.AV_OFFSET_MAX_MS.toFloat(),
+                    steps = 2 * StreamRules.AV_OFFSET_MAX_MS / StreamRules.AV_OFFSET_STEP_MS - 1,
+                )
+                setProgress { v -> set(v.roundToInt()); true }
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Sound delay", style = FbType.row, color = c.text, modifier = Modifier.weight(1f).clearAndSetSemantics {})
+        if (ms != 0) FbButton("Reset", { set(0) }, kind = FbButtonKind.Text)
+        StepKey("−", "Sound 10 ms earlier") { set(current - StreamRules.AV_OFFSET_STEP_MS) }
+        Text(
+            offsetText(ms), style = FbType.value, color = c.text, textAlign = TextAlign.Center,
+            modifier = Modifier.width(88.dp).clearAndSetSemantics {},
+        )
+        StepKey("+", "Sound 10 ms later") { set(current + StreamRules.AV_OFFSET_STEP_MS) }
+    }
+}
+
+/** "+40 ms", "−20 ms" (a real minus), "0 ms". */
+internal fun offsetText(ms: Int): String = when {
+    ms > 0 -> "+$ms ms"
+    ms < 0 -> "−${-ms} ms"
+    else -> "0 ms"
+}
+
+/** For TalkBack: "sound 40 milliseconds later", "no delay". */
+internal fun offsetSpoken(ms: Int): String = when {
+    ms > 0 -> "sound $ms milliseconds later"
+    ms < 0 -> "sound ${-ms} milliseconds earlier"
+    else -> "no delay"
 }
 
 /**

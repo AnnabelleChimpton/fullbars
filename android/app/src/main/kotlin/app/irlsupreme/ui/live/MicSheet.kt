@@ -21,6 +21,7 @@ import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import app.irlsupreme.engine.EngineState
+import app.irlsupreme.engine.audio.InputClass
 import app.irlsupreme.engine.audio.MicLevel
 import app.irlsupreme.service.MicSettings
 import app.irlsupreme.ui.Hairline
@@ -81,7 +82,9 @@ internal fun MicSheet(
             } else {
                 Spacer(Modifier.height(12.dp))
             }
-            MicPanel(lvl, muted, prefs.activeGainDb, onGain, prefs.raw, onRaw, source)
+            // A USB or wired mic in use has its own level, as on Settings › Microphone.
+            val external = state.micInput?.inputClass == InputClass.EXTERNAL
+            MicPanel(lvl, muted, prefs.gainFor(external), onGain, prefs.raw, onRaw, source)
             Spacer(Modifier.height(8.dp))
         }
     }

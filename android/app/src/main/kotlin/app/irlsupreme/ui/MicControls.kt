@@ -169,9 +169,26 @@ internal fun LevelBar(
     on: Color = LocalFbColors.current.text,
     off: Color = LocalFbColors.current.rule,
     target: Boolean = true,
+) = LevelBar({ r }, modifier, segments, floorDb, height, on, off, target)
+
+/**
+ * The same bar, reading its level in the draw phase: a state read inside [reading] redraws the bar alone, without
+ * recomposing anything around it (the live screen's meter, ~30 times a second).
+ */
+@Composable
+internal fun LevelBar(
+    reading: () -> MeterReading,
+    modifier: Modifier = Modifier,
+    segments: Int = 30,
+    floorDb: Float = MicLevel.FLOOR_DB,
+    height: Dp = 18.dp,
+    on: Color = LocalFbColors.current.text,
+    off: Color = LocalFbColors.current.rule,
+    target: Boolean = true,
 ) {
     val hot = LocalHealthColors.current.weak
     Canvas(modifier.fillMaxWidth().height(if (target) height + 6.dp else height)) {
+        val r = reading()
         val gap = 2.dp.toPx()
         val segW = (size.width - gap * (segments - 1)) / segments
         val barH = height.toPx()
@@ -337,7 +354,7 @@ private fun FaderTrack(gainDb: Int, min: Int, max: Int) {
 
 /** A 48dp square key with a big sign, outlined like the rail's keys. */
 @Composable
-private fun StepKey(sign: String, label: String, onClick: () -> Unit) {
+internal fun StepKey(sign: String, label: String, onClick: () -> Unit) {
     val c = LocalFbColors.current
     Box(
         Modifier

@@ -119,7 +119,7 @@ class HelperService : Service() {
     private var relayState: MoblinkRelay.State = MoblinkRelay.State.Connecting
     private var lastUp = 0L
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
+    private var wifiLocks: WifiLocks? = null
     private lateinit var host: Helpers.Host
     /** The last time this phone forwarded the stream (or was started, or given a new code), for the idle stop. */
     private var lastUsefulMs = 0L
@@ -597,22 +597,23 @@ class HelperService : Service() {
             .build()
     }
 
-    /** Held while a relay talks to a streaming phone: forwarding with the screen off needs the CPU and fast Wi-Fi. */
+    /**
+     * Held while a relay talks to a streaming phone: forwarding with the screen off needs the CPU and fast Wi-Fi. Both
+     * Wi-Fi locks ([WifiLocks]): the low-latency one does nothing with the screen off, which is how a helper runs.
+     */
     private fun acquireLocks() {
         if (wakeLock == null) {
             wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "fullbars:helper")
                 .apply { setReferenceCounted(false); acquire() }
         }
-        if (wifiLock == null) {
-            @Suppress("DEPRECATION")
-            wifiLock = getSystemService(WifiManager::class.java)
-                .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "fullbars:helper").apply { setReferenceCounted(false); acquire() }
+        if (wifiLocks == null) {
+            wifiLocks = WifiLocks.of(getSystemService(WifiManager::class.java)).apply { acquire("fullbars:helper") }
         }
     }
 
     private fun releaseLocks() {
         wakeLock?.let { runCatching { if (it.isHeld) it.release() } }; wakeLock = null
-        wifiLock?.let { runCatching { if (it.isHeld) it.release() } }; wifiLock = null
+        wifiLocks?.release(); wifiLocks = null
     }
 
     private fun stopRelay() {

@@ -73,6 +73,8 @@ internal fun ScenesSheet(
     onTestAlert: ((app.irlsupreme.service.SampleAlert) -> Unit)? = null,
     /** Whether alerts are on (Settings > Overlays); the row says so when they're off. */
     alertsOn: Boolean = true,
+    /** Turns the Pocket screen on (null hides the row). */
+    onPocketScreen: (() -> Unit)? = null,
 ) {
     val c = LocalFbColors.current
     Column(
@@ -99,6 +101,29 @@ internal fun ScenesSheet(
         }
         Hairline(color = c.rule)
         FlipRow(flipValue, onFlip)
+        if (onPocketScreen != null) {
+            Hairline(color = c.rule)
+            PocketRow(onPocketScreen)
+        }
+    }
+}
+
+/** "Pocket screen": the screen goes black and dim while the stream carries on, for a phone in a pocket or bag. */
+@Composable
+private fun PocketRow(onClick: () -> Unit) {
+    val c = LocalFbColors.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clickable(onClickLabel = "Turn on the pocket screen", role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Pocket screen", style = FbType.row, color = c.text)
+            Text("Black screen, stream carries on. Keeps the phone cooler.", style = FbType.help, color = c.text2)
+        }
     }
 }
 

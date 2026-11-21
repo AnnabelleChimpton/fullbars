@@ -14,9 +14,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -32,7 +33,8 @@ import androidx.compose.ui.unit.dp
 import app.irlsupreme.engine.audio.MicLevel
 import app.irlsupreme.ui.LevelBar
 import app.irlsupreme.ui.micVerdict
-import app.irlsupreme.ui.rememberMeterReading
+import app.irlsupreme.ui.MeterBallistics
+import app.irlsupreme.ui.MeterReading
 import app.irlsupreme.ui.MeterGlyph
 import app.irlsupreme.ui.Tag
 import app.irlsupreme.ui.theme.FbLiveType
@@ -40,7 +42,9 @@ import app.irlsupreme.ui.theme.FbMotion
 import app.irlsupreme.ui.theme.LocalHealthColors
 import app.irlsupreme.ui.theme.OverVideo
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.sample
 
 /*
  * The instrument line: four fixed columns, an L3 label over an L2Mono value. Fixed so nothing jumps rows as
@@ -175,20 +179,27 @@ private fun rememberStepped(target: Int, reduced: Boolean): Int {
 
 /**
  * MIC: the live level as a 10-segment bar (Bone, amber near the top), or an inverted MUTED / NO AUDIO tag in the same
- * slot, or low battery in amber (labelled PHONE then). A tap opens the mic sheet, whatever it shows. The level is
- * collected here, so ~47 updates a second recompose this column only.
+ * slot, or low battery in amber (labelled PHONE then). A tap opens the mic sheet, whatever it shows. The engine
+ * publishes ~47 levels a second; they're sampled at 30 Hz here, run through the meter's ballistics, and read by the bar
+ * in its draw phase, so a new level redraws the bar alone. TalkBack's words change only when the verdict does.
  */
+@OptIn(FlowPreview::class)
 @Composable
 private fun MicColumn(mic: MicCell, levelFlow: StateFlow<MicLevel>?, onMic: (() -> Unit)?, modifier: Modifier) {
     val h = LocalHealthColors.current
-    val level = levelFlow?.collectAsState()?.value ?: MicLevel.SILENT
-    val reading = rememberMeterReading(level)
-    val verdict = micVerdict(reading, muted = mic == MicCell.Muted)
+    val reading = remember { mutableStateOf(MeterReading.SILENT) }
+    LaunchedEffect(levelFlow) {
+        val flow = levelFlow ?: return@LaunchedEffect
+        val ballistics = MeterBallistics()
+        flow.sample(METER_SAMPLE_MS).collect { reading.value = ballistics.update(it, System.currentTimeMillis()) }
+    }
+    val muted = mic == MicCell.Muted
+    val words by remember(muted) { derivedStateOf { micVerdict(reading.value, muted).words } }
     val spoken = when (mic) {
         MicCell.Muted -> "Mic muted"
         MicCell.NoAudio -> "Mic, no audio"
         is MicCell.Battery -> "Battery ${mic.percent} percent"
-        MicCell.On -> "Mic on. ${verdict.words}"
+        MicCell.On -> "Mic on. $words"
     }
     Column(
         modifier
@@ -205,13 +216,16 @@ private fun MicColumn(mic: MicCell, levelFlow: StateFlow<MicLevel>?, onMic: (() 
                 MicCell.NoAudio -> EngagedTag("NO AUDIO")
                 is MicCell.Battery -> Text("BAT ${mic.percent}%", style = FbLiveType.L2Mono, color = h.weak, maxLines = 1)
                 MicCell.On -> LevelBar(
-                    reading, Modifier.padding(end = 4.dp), segments = 10, floorDb = -50f, height = 12.dp,
+                    { reading.value }, Modifier.padding(end = 4.dp), segments = 10, floorDb = -50f, height = 12.dp,
                     on = OverVideo.text, off = OverVideo.keyOutline, target = false,
                 )
             }
         }
     }
 }
+
+/** The live meter's sample period: 30 Hz is as smooth as a 10-segment bar can show. */
+private const val METER_SAMPLE_MS = 33L
 
 /** An inverted Bone tag with Ink text: an engaged state in a fixed slot (MUTED, NO AUDIO, NOT ON CAMERA). */
 @Composable

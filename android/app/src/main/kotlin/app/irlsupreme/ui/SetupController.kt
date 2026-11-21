@@ -14,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -38,7 +39,9 @@ import app.irlsupreme.service.Helpers
 import app.irlsupreme.service.PendingPairing
 import app.irlsupreme.service.SecretStore
 import app.irlsupreme.service.SessionStore
+import app.irlsupreme.service.StreamDelay
 import app.irlsupreme.service.StreamService
+import app.irlsupreme.service.StreamSettings
 import app.irlsupreme.service.Twitch
 import app.irlsupreme.service.srtlaReachable
 import app.irlsupreme.engine.Facing
@@ -274,6 +277,15 @@ class SetupController internal constructor(private val ctx: Context, private val
     ); private set
     private val outW: Int get() = orientation.size(quality).first
     private val outH: Int get() = orientation.size(quality).second
+
+    /** The frame rate chosen in Settings › Video (30 or 60); 60 only runs where [can60] says so. */
+    var fps by mutableIntStateOf(StreamSettings.fps(ctx)); private set
+    /** Whether 60 fps can run at this quality and shape on the start camera (null until checked: [checkFps]). */
+    var can60 by mutableStateOf<Boolean?>(null); private set
+    /** What a stream asks for: 60 only with the phone camera; the service and engine check the phone again. */
+    private val streamFps: Int get() = if (fps == 60 && cameraKind == ExternalCamera.Kind.PHONE) 60 else 30
+    /** Combined connections' delay (Settings › Combine connections). */
+    var delay by mutableStateOf(StreamSettings.delay(ctx)); private set
 
     // Camera
     var cameraKind by mutableStateOf(ExternalCamera.kind(ctx)); private set
@@ -794,6 +806,23 @@ class SetupController internal constructor(private val ctx: Context, private val
     val ingestIsDefault: Boolean get() = effectiveIngest == DEFAULT_INGEST
 
     fun chooseQuality(q: Quality) { quality = q; prefs.edit().putString("quality", q.name).apply() }
+    fun chooseFps(f: Int) { fps = f; StreamSettings.setFps(ctx, f) }
+    fun chooseDelay(d: StreamDelay) { delay = d; StreamSettings.setDelay(ctx, d) }
+
+    /**
+     * Works out [can60] for the current quality, shape and start camera: reads the camera's and encoder's lists, off
+     * the main thread. Only the phone camera films 60.
+     */
+    fun checkFps() {
+        val w = outW
+        val h = outH
+        val facing = startFacing
+        if (cameraKind != ExternalCamera.Kind.PHONE) { can60 = false; return }
+        scope.launch {
+            can60 = withContext(Dispatchers.Default) { app.irlsupreme.engine.video.CameraCapabilities.supports(ctx, facing, w, h, 60) }
+        }
+    }
+
     fun chooseOrientation(o: StreamOrientation) { orientation = o; prefs.edit().putString("orientation", o.name).apply() }
 
     fun chooseCamera(k: ExternalCamera.Kind) { cameraKind = k; ExternalCamera.setKind(ctx, k) }
@@ -1207,7 +1236,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                         return@launch
                     }
                     startService(test, bonded = true) {
-                        StreamService.startBonded(ctx, p.host, p.port, "live/${p.publishId}", p.srtPassphrase, outW, outH, quality.bitrate, userId)
+                        StreamService.startBonded(ctx, p.host, p.port, "live/${p.publishId}", p.srtPassphrase, outW, outH, quality.bitrate, userId, streamFps)
                     }
                 } catch (e: TwitchException) {
                     onTwitchFailure(e)
@@ -1227,7 +1256,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                     val setup = withContext(Dispatchers.IO) { twitch.prepareBroadcast(bandwidthTest = testMode) }
                     channel = setup.channel
                     startService(testMode, bonded = false) {
-                        StreamService.start(ctx, setup.publishUrl.url, outW, outH, quality.bitrate, setup.user.id)
+                        StreamService.start(ctx, setup.publishUrl.url, outW, outH, quality.bitrate, setup.user.id, streamFps)
                     }
                 } catch (e: TwitchException) {
                     onTwitchFailure(e)
@@ -1246,7 +1275,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                 try {
                     withContext(Dispatchers.IO) { secrets.put("stream_key", k) }
                     val userId = signedInUserId()
-                    startService(testMode, bonded = false) { StreamService.start(ctx, keyUrl(k), outW, outH, quality.bitrate, userId) }
+                    startService(testMode, bonded = false) { StreamService.start(ctx, keyUrl(k), outW, outH, quality.bitrate, userId, streamFps) }
                 } finally {
                     busy = false
                 }

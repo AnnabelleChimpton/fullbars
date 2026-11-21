@@ -41,12 +41,12 @@ data class MicPrefs(
 
 /**
  * Whether a stream uses the mic options past the level and the phone's auto level: [MicPrefs.input],
- * [MicPrefs.externalGainDb], [MicPrefs.lowCut], [MicPrefs.voiceLeveler] and [MicPrefs.monoVoice]. Turn it on in the
- * same change that passes them to the stream (StreamConfig, the engine's live setters). Until then Settings ›
- * Microphone hides them and runs its check the way a stream runs today, so the preview never sounds unlike the
- * stream and the fader keeps setting the level a stream uses, plugged-in mic or not.
+ * [MicPrefs.externalGainDb], [MicPrefs.lowCut], [MicPrefs.voiceLeveler] and [MicPrefs.monoVoice]. On: the stream's
+ * config carries them ([StreamRules.config]) and changes reach a running stream through the engine's live setters, so
+ * Settings › Microphone shows them and runs its check with them, and the page, the live mic sheet and the stream
+ * agree. Off would hide them again and run the check the way a stream ran before they existed.
  */
-const val STREAM_USES_MIC_OPTIONS = false
+const val STREAM_USES_MIC_OPTIONS = true
 
 /** A raw mic's starting level: most of the gap to the camcorder source, the limiter covering the rest. */
 const val RAW_DEFAULT_GAIN_DB = 20

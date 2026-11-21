@@ -364,14 +364,66 @@ internal fun notice(
     cameraLink: String?,
     helperProblem: String?,
     micLoud: Boolean = false,
+    micInput: String? = null,
+    pocketHint: Boolean = false,
 ): String? = when {
     holdHint -> HOLD_HINT
     noAudio != null -> noAudio
+    micInput != null -> micInput
     micLoud -> MIC_LOUD_HINT
     firstMute -> FIRST_MUTE_HINT
+    pocketHint -> POCKET_HINT
     cameraLink != null -> cameraLink
     helperProblem != null -> helperProblem
     else -> null
+}
+
+/** Offered once a stream, when the phone first warms up (thermal rung 1). */
+internal const val POCKET_HINT = "Phone is warming up. Scenes › Pocket screen keeps it cooler."
+/** How long the Pocket screen offer and a mic change stay in the notice line. */
+internal const val LONG_NOTICE_MS = 6_000L
+
+// --- Timer -----------------------------------------------------------------------------------------------------------
+
+/**
+ * How long until the timer's next whole second (counted from [liveSinceMs], or the clock's own seconds before going
+ * live), plus a few ms so the redraw lands just after it turns, never just before.
+ */
+internal fun msToNextSecond(liveSinceMs: Long, nowMs: Long): Long {
+    val into = Math.floorMod(nowMs - liveSinceMs, 1_000L)
+    return 1_000L - into + TIMER_SLACK_MS
+}
+
+private const val TIMER_SLACK_MS = 5L
+
+// --- Pocket screen ---------------------------------------------------------------------------------------------------
+
+/**
+ * Where the Pocket screen's small health line sits in minute [minute], as fractions of the free width and height: it
+ * moves every minute so an hour in one place never marks an OLED screen, and never sits where it was the minute before.
+ */
+internal fun pocketSpot(minute: Long): Pair<Float, Float> = POCKET_SPOTS[Math.floorMod(minute, POCKET_SPOTS.size.toLong()).toInt()]
+
+private val POCKET_SPOTS = listOf(0.1f to 0.15f, 0.7f to 0.4f, 0.25f to 0.75f, 0.8f to 0.85f, 0.45f to 0.3f, 0.05f to 0.55f)
+
+/** The Pocket screen shows these at full brightness: trouble the streamer must notice, or the stream ending. */
+internal fun pocketAlarm(health: Health, ending: Boolean): Boolean =
+    ending || health == Health.RECONNECTING || health == Health.FAILED || health == Health.CAMERA_LOST || health == Health.OFF
+
+// --- External camera -------------------------------------------------------------------------------------------------
+
+/**
+ * The notice while the phone camera stands in for an external one, from the engine's camera line ([externalCamera])
+ * and what's on screen; null while the external camera is on screen or there isn't one.
+ */
+internal fun externalCameraNotice(externalCamera: String?, activeSource: String): String? = when {
+    externalCamera == null || activeSource != "phone" -> null
+    externalCamera.startsWith("waiting") -> "Phone camera · waiting for the camera link"
+    externalCamera == "connected" -> "Phone camera · camera connecting"
+    externalCamera == "connected, no video yet" -> "Phone camera · camera connected, no video yet"
+    externalCamera.startsWith("camera sends") -> "Phone camera · ${externalCamera.replaceFirst("camera sends", "the camera sends")}"
+    externalCamera.startsWith("can't listen") -> "Phone camera · $externalCamera"
+    else -> "Phone camera · camera link lost"
 }
 
 // --- Hold to end -----------------------------------------------------------------------------------------------------

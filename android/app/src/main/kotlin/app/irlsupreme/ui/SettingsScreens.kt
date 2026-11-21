@@ -93,6 +93,7 @@ import app.irlsupreme.service.AlsoStreamRules
 import app.irlsupreme.service.AlsoStreamTo
 import app.irlsupreme.service.BrbStatus
 import app.irlsupreme.service.ExternalCamera
+import app.irlsupreme.service.StreamDelay
 import app.irlsupreme.service.HelperState
 import app.irlsupreme.service.HelperStatus
 import app.irlsupreme.service.CardStore
@@ -228,6 +229,14 @@ internal fun sendsToValue(st: BrbStatus): String = when (st.outputKind) {
 internal fun brbScreenValue(st: BrbStatus): String = if (st.phoneSlate) "From this phone" else "Server's default"
 
 /** A quality's figures: "6 Mb/s · 2.8 GB/h". Mb/s is the one unit everywhere. */
+/** The 60 fps row's line: why it can't be chosen, or what it does. [can60] null: still checking the phone. */
+internal fun fps60Help(phoneCamera: Boolean, can60: Boolean?): String = when {
+    !phoneCamera -> "Phone camera only."
+    can60 == null -> "Checking this phone…"
+    !can60 -> "This phone can't film 60 fps at this size."
+    else -> "Smoother motion, a little less detail in each frame."
+}
+
 internal fun qualityValue(q: Quality): String = "${q.mbps} Mb/s · %.1f GB/h".format(q.gbPerHour)
 
 /** The shape's ratio (mono) and its one help line. */
@@ -826,6 +835,16 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
 
     if (c.combine) RouteReadout(c, state, check)
 
+    if (c.combine) {
+        SectionHeader("Delay")
+        HelpText("How far behind live viewers are. More delay rides out longer drops.")
+        Column(Modifier.selectableGroup()) {
+            StreamDelay.entries.forEach { d ->
+                RadioRow(d.title, supporting = d.detail, selected = c.delay == d) { c.chooseDelay(d) }
+            }
+        }
+    }
+
     SectionHeader("BRB server", trailing = rememberCheckedStamp(check)?.let { "checked $it" })
     if (p != null) {
         BrbStatusRow(state, failure = c.brbStatus, port = p.port, justPaired = justPaired)
@@ -1255,6 +1274,15 @@ fun QualityPage(c: SetupController, nav: Navigator) = PageScaffold("Video", nav:
             RadioRow(q.title, supporting = "${q.detail}.", value = qualityValue(q), selected = c.quality == q) { c.chooseQuality(q) }
         }
     }
+    SectionHeader("Frame rate")
+    LaunchedEffect(c.quality, c.orientation, c.startFacing, c.cameraKind) { c.checkFps() }
+    val phone = c.cameraKind == ExternalCamera.Kind.PHONE
+    val can60 = c.can60 == true
+    Column(Modifier.selectableGroup()) {
+        RadioRow("30 fps", supporting = "Steadiest on a weak signal.", selected = !(c.fps == 60 && can60)) { c.chooseFps(30) }
+        RadioRow("60 fps", supporting = fps60Help(phone, c.can60), selected = c.fps == 60 && can60, enabled = can60) { c.chooseFps(60) }
+    }
+
     SectionHeader("When the signal is too weak")
     SwitchRow(
         "Show the Weak signal card",

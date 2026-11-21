@@ -454,6 +454,9 @@ class StreamEngine(private val context: Context) {
 
     fun restartCamera() = compositor?.restartCamera()
 
+    /** Asks the video encoder for a keyframe now (the paired server waits for one to put the camera back on air). */
+    fun requestKeyframe() { compositor?.requestKeyframe() }
+
     /** A web page drawn into the stream (an overlay URL, or HTML for tests); null removes it. */
     fun setBrowserOverlay(content: app.irlsupreme.engine.video.BrowserSource.Content?) = compositor?.setBrowser(content)
     /** Debug: crashes the overlay page's renderer, and a scene card's web page if one is open. */
