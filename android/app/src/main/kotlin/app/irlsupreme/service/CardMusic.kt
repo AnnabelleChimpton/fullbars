@@ -59,6 +59,18 @@ object CardMusicRules {
     /** A new stored file's name for the card called [scene]: never one already used. */
     fun newFileName(scene: String, nowMs: Long): String = "${scene.lowercase()}-$nowMs.music"
 
+    /** Whether the stored file called [fileName] is one of [scene]'s (the current copy, or one left behind). */
+    fun ownsFile(scene: String, fileName: String): Boolean =
+        fileName.startsWith("${scene.lowercase()}-") && fileName.endsWith(".music")
+
+    private val KEY = Regex("music_(.+)_(file|volume|mic|start|end|gain|ms)")
+
+    /** The scene a settings key belongs to, or null if it isn't a music setting. */
+    fun sceneOfKey(key: String): String? = KEY.matchEntire(key)?.groupValues?.get(1)
+
+    /** [scene]'s settings among [keys]: all of them, so nothing carries over to a new scene in the same slot. */
+    fun keysOf(scene: String, keys: Collection<String>): List<String> = keys.filter { sceneOfKey(it) == scene }
+
     /** The session log's lines. Scene names only, never a file's. */
     fun logOn(scene: Scene): String = "card music on (${scene.name})"
     const val LOG_OFF = "card music off"
@@ -79,7 +91,6 @@ object CardMusicRules {
  */
 object CardMusic {
     private var flow: MutableStateFlow<Map<String, CardMusicSetting>>? = null
-    private val KEY = Regex("music_(.+)_(file|volume|mic|start|end|gain|ms)")
 
     private fun prefs(ctx: Context) = ctx.applicationContext.getSharedPreferences("card_music", Context.MODE_PRIVATE)
     private fun dir(ctx: Context) = File(ctx.applicationContext.filesDir, "card_music")
@@ -96,7 +107,7 @@ object CardMusic {
 
     private fun load(ctx: Context): Map<String, CardMusicSetting> {
         val p = prefs(ctx)
-        val names = p.all.keys.mapNotNull { KEY.matchEntire(it)?.groupValues?.get(1) }.toSet()
+        val names = p.all.keys.mapNotNull { CardMusicRules.sceneOfKey(it) }.toSet()
         return names.associateWith { n ->
             CardMusicSetting(
                 fileName = p.getString(key(n, "file"), null)?.takeIf { File(dir(ctx), it).exists() },
@@ -164,6 +175,19 @@ object CardMusic {
             for (field in listOf("file", "start", "end", "gain", "ms")) remove(key(name, field))
         }
         update(ctx, name) { it.copy(fileName = null, startFrame = 0, endFrame = 0, gainDb = 0f, durationMs = 0) }
+    }
+
+    /**
+     * Forgets the card called [name]'s music altogether: its stored file (and any copy left behind) and every setting,
+     * volume and mic included. For a deleted scene, so a new one in its slot starts with no music.
+     */
+    fun forget(ctx: Context, name: String) {
+        dir(ctx).listFiles()?.filter { CardMusicRules.ownsFile(name, it.name) }?.forEach { it.delete() }
+        val p = prefs(ctx)
+        val keys = CardMusicRules.keysOf(name, p.all.keys)
+        if (keys.isNotEmpty()) p.edit { keys.forEach { remove(it) } }
+        state(ctx)
+        flow?.let { f -> f.value = f.value - name }
     }
 
     /**

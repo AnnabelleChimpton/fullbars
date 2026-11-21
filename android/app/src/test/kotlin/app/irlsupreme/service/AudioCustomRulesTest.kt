@@ -95,6 +95,24 @@ class AudioCustomRulesTest {
         assertEquals("brb-1700000000000.music", CardMusicRules.newFileName("BRB", 1_700_000_000_000L))
     }
 
+    @Test fun `forgetting a scene's music takes all its settings and files, and only its own`() {
+        val keys = listOf(
+            "music_CUSTOM_1_file", "music_CUSTOM_1_volume", "music_CUSTOM_1_mic", "music_CUSTOM_1_start",
+            "music_CUSTOM_1_end", "music_CUSTOM_1_gain", "music_CUSTOM_1_ms",
+            "music_CUSTOM_2_mic", "music_BRB_file", "music_BRB_mic", "something_else",
+        )
+        assertEquals(keys.take(7), CardMusicRules.keysOf("CUSTOM_1", keys))
+        assertEquals(listOf("music_CUSTOM_2_mic"), CardMusicRules.keysOf("CUSTOM_2", keys))
+        assertEquals(emptyList<String>(), CardMusicRules.keysOf("CUSTOM_3", keys))
+        // Every file a pick ever made for the scene, and nothing of another's.
+        val name = CardMusicRules.newFileName("CUSTOM_1", 1_700_000_000_000L)
+        assertTrue(CardMusicRules.ownsFile("CUSTOM_1", name))
+        assertTrue(CardMusicRules.ownsFile("CUSTOM_1", "custom_1-1600000000000.music"))
+        assertFalse(CardMusicRules.ownsFile("CUSTOM_2", name))
+        assertFalse(CardMusicRules.ownsFile("CUSTOM_1", "custom_1.tmp"))
+        assertFalse(CardMusicRules.ownsFile("BRB", name))
+    }
+
     @Test fun `failures are said plainly`() {
         for (f in ImportFailure.entries) assertTrue(AudioPick.failureText(f).isNotBlank())
         assertEquals("Music can be up to 15 minutes.", AudioPick.failureText(ImportFailure.TOO_LONG))

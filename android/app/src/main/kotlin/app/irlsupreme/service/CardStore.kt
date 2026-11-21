@@ -547,6 +547,8 @@ object CardStore {
     fun createScene(ctx: Context): Slates.Card? {
         val texts = state(ctx).value
         val card = Scene.CUSTOM.mapNotNull { Slates.Card.of(it) }.firstOrNull { texts[it]?.created != true } ?: return null
+        // A new scene starts with no music, whatever an earlier scene in this slot had.
+        CardMusic.forget(ctx, card.name)
         change(ctx, card) { CardText(created = true) }
         return card
     }
@@ -557,9 +559,13 @@ object CardStore {
         change(ctx, card) { it.copy(name = raw.take(SceneNames.MAX_NAME)) }
     }
 
-    /** Deletes one of your own scenes: its name, its look, its picture and background. The slot is free again. */
+    /**
+     * Deletes one of your own scenes: its name, its look, its picture, background and music. The slot is free again.
+     * Not while it's on air (the page stops that): the card would carry on under a new name.
+     */
     fun deleteScene(ctx: Context, card: Slates.Card) {
         if (!card.isCustom) return
+        CardMusic.forget(ctx, card.name)
         prefs(ctx).edit { (CardPrefs.FIELDS + CardPrefs.SCENE_FIELDS).forEach { remove(CardPrefs.key(card, it)) } }
         pictureFile(ctx, card).delete()
         backgroundFiles(ctx, card).forEach { it.delete() }

@@ -64,6 +64,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import app.irlsupreme.engine.EngineState
 import app.irlsupreme.engine.Scene
 import app.irlsupreme.engine.video.CardFont
 import app.irlsupreme.engine.video.CardLayout
@@ -86,6 +87,7 @@ import app.irlsupreme.ui.theme.FbType
 import app.irlsupreme.ui.theme.LocalFbColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -147,6 +149,10 @@ internal fun dimLabel(percent: Int): String = if (percent == 0) "Off" else "$per
 /** A countdown key: "Off" or "5 min". */
 internal fun countdownLabel(minutes: Int): String = if (minutes == 0) "Off" else "$minutes min"
 
+/** Whether [card], one of your own scenes, can be deleted now: never while it's the scene on air ([onAir]). */
+internal fun canDeleteScene(card: Slates.Card, onAir: Scene?): Boolean =
+    card.isCustom && (onAir == null || Slates.Card.of(onAir) != card)
+
 /** What the Background section's value says: a picture, or a GIF (only its first frame on the server's cards). */
 internal fun backgroundValue(card: Slates.Card, kind: CardBackground): String = when (kind) {
     CardBackground.NONE -> "None"
@@ -174,6 +180,10 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     val t = texts[card] ?: CardText()
     val scene = SceneNames.sceneOf(card)
     var deleting by remember { mutableStateOf(false) }
+    // The scene on air, if a stream runs: that one can't be deleted.
+    val engine = LocalStreamEngine.current
+    val engineState by remember(engine) { engine?.state ?: MutableStateFlow(EngineState()) }.collectAsState()
+    val onAir = engineState.takeIf { it.running }?.scene
     var pictureError by rememberSaveable { mutableStateOf(false) }
     var backgroundError by rememberSaveable { mutableStateOf<String?>(null) }
     var backgroundBusy by remember { mutableStateOf(false) }
@@ -356,14 +366,19 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
             Spacer(Modifier.height(16.dp))
             Hairline(color = colors.rule)
         }
-        FbButton("Delete this scene", { deleting = true }, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Text)
+        val deletable = canDeleteScene(card, onAir)
+        FbButton(
+            "Delete this scene", { deleting = true }, Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            kind = FbButtonKind.Text, enabled = deletable,
+        )
+        if (!deletable) HelpText("It's on air now. Switch scenes first to delete it.")
     }
-    if (deleting) {
+    if (deleting && canDeleteScene(card, onAir)) {
         val name = cardName(card, created)
         AlertDialog(
             onDismissRequest = { deleting = false },
             title = { Text("Delete $name?", style = FbType.cta) },
-            text = { Text("Its name, words, picture and background go. If it's on screen now, switch scenes first.") },
+            text = { Text("Its name, words, picture, background and music go.") },
             confirmButton = {
                 FbButton("Delete", {
                     deleting = false

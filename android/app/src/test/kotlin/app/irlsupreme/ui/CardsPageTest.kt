@@ -23,6 +23,14 @@ class CardsPageTest {
         assertEquals("Signal lost", cardName(Card.SIGNAL_LOST, emptyMap()))
     }
 
+    @Test fun `a scene of your own can't be deleted while it's on air`() {
+        assertTrue(canDeleteScene(Card.CUSTOM_1, null))
+        assertTrue(canDeleteScene(Card.CUSTOM_1, Scene.LIVE))
+        assertTrue(canDeleteScene(Card.CUSTOM_1, Scene.CUSTOM_2))
+        assertFalse(canDeleteScene(Card.CUSTOM_1, Scene.CUSTOM_1))
+        assertFalse(canDeleteScene(Card.BRB, null))
+    }
+
     @Test fun `your own scenes sit between the chosen cards and the automatic ones, by their names`() {
         val own = mapOf(Scene.CUSTOM_2 to "Lunch", Scene.CUSTOM_4 to "Q&A")
         val order = cardOrder(own)
