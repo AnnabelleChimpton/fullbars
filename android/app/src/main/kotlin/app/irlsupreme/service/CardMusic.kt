@@ -50,6 +50,10 @@ object CardMusicRules {
     fun sceneFor(name: String): Scene? =
         runCatching { Scene.valueOf(name) }.getOrNull()?.takeIf { it != Scene.LIVE }
 
+    /** Whether [scene]'s music, from [all] (by scene name), turns the mic off: viewers hear the music, not you. */
+    fun micOff(scene: Scene, all: Map<String, CardMusicSetting>): Boolean =
+        sceneFor(scene.name) != null && all[scene.name]?.let { it.hasFile && !it.micOn } == true
+
     /** What the engine plays for [s] on a card, or null for no music. [dir] holds the stored files. */
     fun track(s: CardMusicSetting?, dir: File): MusicTrack? {
         val name = s?.fileName ?: return null

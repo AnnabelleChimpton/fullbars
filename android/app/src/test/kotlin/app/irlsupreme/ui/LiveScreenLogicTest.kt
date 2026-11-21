@@ -379,6 +379,11 @@ class LiveScreenLogicTest {
         assertEquals("Card · they hear you", sceneConsequence(Scene.BRB, muted = false))
         assertEquals("Card · mic off", sceneConsequence(Scene.ENDING, muted = true))
         assertEquals("Card · camera and mic off", sceneConsequence(Scene.PRIVACY, muted = false))
+        // A card whose music turns the mic off: they hear the music, not you.
+        assertEquals("Card · they hear your music", sceneConsequence(Scene.BRB, muted = false, musicMicOff = true))
+        assertEquals("Card · mic off", sceneConsequence(Scene.BRB, muted = true, musicMicOff = true))
+        assertEquals("Card · camera and mic off", sceneConsequence(Scene.PRIVACY, muted = false, musicMicOff = true))
+        assertEquals("Your camera", sceneConsequence(Scene.LIVE, muted = false, musicMicOff = true))
     }
 
     private fun live(vararg links: LinkInfo) = EngineState(running = true, connection = ConnectionPhase.LIVE, liveSinceMs = 1, links = links.toList())
@@ -415,6 +420,23 @@ class LiveScreenLogicTest {
         val brb = pillModel(live().copy(scene = Scene.BRB), Health.BRB, false, false, false)
         assertEquals(PillLook.SCENE, brb.look)
         assertEquals("Viewers see your BRB screen and hear you", brb.second)
+    }
+
+    @Test fun `on a card whose music turns the mic off, the pill says viewers hear the music`() {
+        val brb = live().copy(scene = Scene.BRB)
+        val p = pillModel(brb, Health.BRB, false, false, false, musicMicOff = true)
+        assertEquals(PillLook.SCENE, p.look)
+        assertEquals("Viewers see your BRB screen and hear your music", p.second)
+        assertEquals("BRB. Viewers see your BRB screen and hear your music", p.spoken)
+        // No music, or music with the mic on: as before.
+        assertEquals("Viewers see your BRB screen and hear you", pillModel(brb, Health.BRB, false, false, false, musicMicOff = false).second)
+        // Privacy with the mic back on, but its music has the mic off: not the mic-on caution.
+        val privacy = pillModel(live().copy(scene = Scene.PRIVACY), Health.BRB, false, false, false, musicMicOff = true)
+        assertEquals(PillLook.PRIVACY, privacy.look)
+        assertEquals("Viewers see your privacy screen and hear your music", privacy.second)
+        // Muted: the mic is off either way, said as before.
+        val muted = pillModel(brb.copy(micMuted = true), Health.BRB, false, false, false, musicMicOff = true)
+        assertEquals("Viewers see your BRB screen · mic off", muted.second)
     }
 
     @Test fun `chat is hidden from the program exactly where the compositor drops layers`() {

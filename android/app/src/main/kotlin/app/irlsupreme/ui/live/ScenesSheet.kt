@@ -48,11 +48,16 @@ import app.irlsupreme.ui.theme.LocalFbColors
  * while you choose. Each row shows the real card it would put on stream and what viewers get.
  */
 
-/** What choosing [scene] does, in one line. Cards hide the camera, never the mic, unless the mic is already off. */
-internal fun sceneConsequence(scene: Scene, muted: Boolean): String = when (scene) {
-    Scene.LIVE -> "Your camera"
-    Scene.PRIVACY -> "Card · camera and mic off"
-    else -> if (muted) "Card · mic off" else "Card · they hear you"
+/**
+ * What choosing [scene] does, in one line. Cards hide the camera, never the mic, unless the mic is already off or the
+ * card's music turns it off ([musicMicOff]).
+ */
+internal fun sceneConsequence(scene: Scene, muted: Boolean, musicMicOff: Boolean = false): String = when {
+    scene == Scene.LIVE -> "Your camera"
+    scene == Scene.PRIVACY -> "Card · camera and mic off"
+    muted -> "Card · mic off"
+    musicMicOff -> "Card · they hear your music"
+    else -> "Card · they hear you"
 }
 
 /**
@@ -71,6 +76,8 @@ internal fun ScenesSheet(
     onFlip: () -> Unit,
     onChoose: (Scene) -> Unit,
     modifier: Modifier = Modifier,
+    /** The scenes whose music turns the mic off. */
+    musicMicOff: Set<Scene> = emptySet(),
     /** Test streams only: sends a pretend alert through the real alert path. Null hides the row. */
     onTestAlert: ((app.irlsupreme.service.SampleAlert) -> Unit)? = null,
     /** Whether alerts are on (Settings > Overlays); the row says so when they're off. */
@@ -93,7 +100,7 @@ internal fun ScenesSheet(
             Column(Modifier.selectableGroup()) {
                 scenes.forEach { s ->
                     Hairline(color = c.rule)
-                    SceneRow(s, s == scene, sceneConsequence(s, muted), thumbs[s], landscapeThumbs) { onChoose(s) }
+                    SceneRow(s, s == scene, sceneConsequence(s, muted, s in musicMicOff), thumbs[s], landscapeThumbs) { onChoose(s) }
                 }
             }
         }

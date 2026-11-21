@@ -113,6 +113,20 @@ class AudioCustomRulesTest {
         assertFalse(CardMusicRules.ownsFile("BRB", name))
     }
 
+    @Test fun `a card turns the mic off only with music that asks for it`() {
+        val all = mapOf(
+            "BRB" to CardMusicSetting(fileName = "brb-1.music", micOn = false),
+            "ENDING" to CardMusicSetting(fileName = "ending-1.music", micOn = true),
+            "PRIVACY" to CardMusicSetting(fileName = null, micOn = false),
+            "LIVE" to CardMusicSetting(fileName = "live-1.music", micOn = false),
+        )
+        assertTrue(CardMusicRules.micOff(Scene.BRB, all))
+        assertFalse(CardMusicRules.micOff(Scene.ENDING, all))
+        assertFalse(CardMusicRules.micOff(Scene.PRIVACY, all)) // no music: the mic setting is only kept for next time
+        assertFalse(CardMusicRules.micOff(Scene.LIVE, all))
+        assertFalse(CardMusicRules.micOff(Scene.CUSTOM_1, all))
+    }
+
     @Test fun `failures are said plainly`() {
         for (f in ImportFailure.entries) assertTrue(AudioPick.failureText(f).isNotBlank())
         assertEquals("Music can be up to 15 minutes.", AudioPick.failureText(ImportFailure.TOO_LONG))

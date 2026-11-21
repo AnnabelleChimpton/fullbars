@@ -464,7 +464,12 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
     val notOnCameraSaid = notOnCameraWords(state.scene)
 
     val said = announced ?: state.health
-    val pill = pillModel(state, said, isTest, bonded, ending)
+    // Card music that turns the mic off: the pill and the Scenes sheet say viewers hear the music, not you.
+    val cardMusic by app.irlsupreme.service.CardMusic.state(ctx).collectAsState()
+    val musicMicOff = remember(cardMusic, offeredScenes) {
+        offeredScenes.filter { app.irlsupreme.service.CardMusicRules.micOff(it, cardMusic) }.toSet()
+    }
+    val pill = pillModel(state, said, isTest, bonded, ending, musicMicOff = app.irlsupreme.service.CardMusicRules.micOff(state.scene, cardMusic))
     val previous = rememberPrevious(said)
     val big = bigType(LocalDensity.current.fontScale)
 
@@ -580,7 +585,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                     thumbs = cardThumbs + (Scene.LIVE to cameraThumb),
                     landscapeThumbs = !state.portrait,
                     flipValue = if (phoneCamera) (if (state.cameraFacing == Facing.FRONT) "Front" else "Back") else null,
-                    onFlip = onFlip, onChoose = chooseScene, modifier = m,
+                    onFlip = onFlip, onChoose = chooseScene, modifier = m, musicMicOff = musicMicOff,
                     onTestAlert = if (isTest) ({ k -> scenesOpen = false; AlertQueue.post(k.alert()) }) else null,
                     alertsOn = overlays.alertsOn,
                     onPocketScreen = { scenesOpen = false; pocketHintAt = 0L; pocketScreen = true },

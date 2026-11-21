@@ -120,8 +120,16 @@ internal data class PillModel(
 /**
  * The pill for [health] (the announced health; see LiveScreen). Every card line says
  * what viewers see *and* hear: cards hide the camera, never the mic, so a pill must not imply silence it isn't giving.
+ * [musicMicOff]: the card on air has music that turns the mic off, so viewers hear the music and not you.
  */
-internal fun pillModel(state: EngineState, health: Health, isTest: Boolean, bonded: Boolean, ending: Boolean): PillModel {
+internal fun pillModel(
+    state: EngineState,
+    health: Health,
+    isTest: Boolean,
+    bonded: Boolean,
+    ending: Boolean,
+    musicMicOff: Boolean = false,
+): PillModel {
     if (ending) return PillModel(PillLook.ENDING, PillGlyph.STOP, "Ending…", null, "Ending the stream")
     val live = if (isTest) "Test" else "Live"
     val hear = if (state.micMuted) "" else " and hear you"
@@ -147,6 +155,11 @@ internal fun pillModel(state: EngineState, health: Health, isTest: Boolean, bond
         )
         Health.BRB -> when {
             // Privacy promises silence; with the mic back on it says so, with a hatched (caution) cap.
+            // Its music has the mic off: viewers hear the music, not you.
+            state.scene == Scene.PRIVACY && !state.micMuted && musicMicOff -> PillModel(
+                PillLook.PRIVACY, PillGlyph.EYE_OFF, "Privacy", "Viewers see your privacy screen and hear your music",
+                "Privacy. Viewers see your privacy screen and hear your music",
+            )
             state.scene == Scene.PRIVACY && !state.micMuted -> PillModel(
                 PillLook.PRIVACY_MIC_ON, PillGlyph.EYE_OFF, "Privacy · mic ON", "Viewers see your privacy screen and hear you",
                 "Privacy, mic on. Viewers see your privacy screen and hear you",
@@ -162,7 +175,11 @@ internal fun pillModel(state: EngineState, health: Health, isTest: Boolean, bond
                     Scene.ENDING -> PillGlyph.CARD_STOP
                     else -> PillGlyph.CARD
                 }
-                PillModel(PillLook.SCENE, glyph, name, "Viewers see your $name screen and hear you", "$name. Viewers see your $name screen and hear you")
+                val hears = if (musicMicOff) "your music" else "you"
+                PillModel(
+                    PillLook.SCENE, glyph, name, "Viewers see your $name screen and hear $hears",
+                    "$name. Viewers see your $name screen and hear $hears",
+                )
             }
         }
         Health.CONNECTING ->
