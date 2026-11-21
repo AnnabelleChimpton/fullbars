@@ -7,6 +7,11 @@ sealed interface ChatCommand {
     data object Privacy : ChatCommand
     data object StartingSoon : ChatCommand
     data object Ending : ChatCommand
+    /**
+     * `!scene <name>`: any scene by its name, the streamer's own included. [name] is what was typed after the command
+     * (at most [ChatCommandParser.MAX_SCENE_NAME] characters); the app matches it, since only it knows the names.
+     */
+    data class ShowScene(val name: String) : ChatCommand
     /** Only produced for `!end <confirmationWord>`. */
     data object End : ChatCommand
     /**
@@ -52,7 +57,10 @@ data class CommandSender(
 
 /** Pure parser for mod commands. No I/O, no state. */
 object ChatCommandParser {
-    private val COMMANDS = setOf("brb", "live", "privacy", "starting", "ending", "end", "restartcam")
+    private val COMMANDS = setOf("brb", "live", "privacy", "starting", "ending", "scene", "end", "restartcam")
+
+    /** The most of a `!scene` name kept: longer than any scene's name, short enough to echo back. */
+    const val MAX_SCENE_NAME = 40
 
     /**
      * Every command, as typed and in plain words, so the Twitch page lists exactly what this parser accepts (a test
@@ -64,6 +72,7 @@ object ChatCommandParser {
         CommandHelp("!privacy", "Shows the privacy screen and turns your mic off."),
         CommandHelp("!starting", "Shows Starting soon."),
         CommandHelp("!ending", "Shows the Ending screen."),
+        CommandHelp("!scene <name>", "Shows any scene by its name, your own too. !scene live goes back to your camera."),
         CommandHelp("!restartcam", "Restarts the camera."),
         CommandHelp("!end ${policy.endConfirmationWord}", "Ends the stream."),
     )
@@ -98,6 +107,10 @@ object ChatCommandParser {
             "starting" -> ChatCommand.StartingSoon
             "ending" -> ChatCommand.Ending
             "restartcam" -> ChatCommand.RestartCam
+            "scene" -> {
+                if (args.isEmpty()) return CommandResult.Invalid(name, "Type !scene and a scene's name, like !scene brb")
+                ChatCommand.ShowScene(args.joinToString(" ").take(MAX_SCENE_NAME))
+            }
             "end" -> {
                 if (args.size != 1 || !args[0].equals(policy.endConfirmationWord, ignoreCase = true)) {
                     return CommandResult.Invalid(name, "To end the stream type: !end ${policy.endConfirmationWord}")

@@ -1,6 +1,9 @@
 package app.irlsupreme.service
 
+import app.irlsupreme.engine.video.CardFont
 import app.irlsupreme.engine.video.CardLayout
+import app.irlsupreme.engine.video.CardTextSize
+import app.irlsupreme.engine.video.StreamPalette
 import app.irlsupreme.engine.video.Slates
 import app.irlsupreme.engine.video.Slates.Card
 import org.junit.Assert.assertEquals
@@ -126,7 +129,10 @@ class CardStoreTest {
             assertEquals(!server, CardRules.canUseWebPage(c))
             assertEquals(!server, CardRules.hasLiveElements(c))
         }
-        assertEquals(setOf(Card.STARTING_SOON, Card.BRB, Card.PRIVACY), Card.entries.filter(CardRules::hasCountdown).toSet())
+        assertEquals(
+            setOf(Card.STARTING_SOON, Card.BRB, Card.PRIVACY, Card.CUSTOM_1, Card.CUSTOM_2, Card.CUSTOM_3, Card.CUSTOM_4),
+            Card.entries.filter(CardRules::hasCountdown).toSet(),
+        )
         assertEquals("Starting in 4:32", CardRules.countdownExample(Card.STARTING_SOON))
         assertEquals("Back in 2:10", CardRules.countdownExample(Card.BRB))
     }
@@ -233,5 +239,115 @@ class CardStoreTest {
             assertFalse(msg.contains('!'))
             assertTrue(msg.endsWith("."))
         }
+    }
+
+    // --- Text, fonts, any accent, your own scenes ---------------------------------------------------------------------
+
+    @Test fun `the new settings survive a round trip, and a custom accent is kept exactly`() {
+        val lime = 0xFF9BE15D.toInt()
+        val t = CardText(
+            headline = "Eating", accent = lime, textColor = 0xFFFFD000.toInt(), textSize = CardTextSize.LARGER, font = CardFont.SERIF,
+        )
+        val m = HashMap<String, Any?>()
+        store(m, Card.BRB, t)
+        assertEquals(lime, m["card_brb_accent_custom"])
+        assertNull(m["card_brb_accent"])
+        assertEquals("LARGER", m["card_brb_text_size"])
+        assertEquals("SERIF", m["card_brb_font"])
+        assertEquals(t, CardPrefs.read(Card.BRB, m::get, false, CardBackground.NONE, accents))
+        // A preset goes back under the old key, so an older build still shows it.
+        store(m, Card.BRB, t.copy(accent = accents[1]))
+        assertEquals(accents[1], m["card_brb_accent"])
+        assertNull(m["card_brb_accent_custom"])
+        for (c in Card.entries) assertEquals(t.copy(name = ""), roundTrip(c, t).copy(name = "", created = false))
+    }
+
+    @Test fun `an install from before these settings reads as today's look`() {
+        // Only the keys an older build wrote: no colours, size, font or scenes.
+        val m = mapOf<String, Any?>("card_brb_headline" to "Back soon", "card_brb_accent" to accents[0], "card_brb_layout" to "CENTERED")
+        val t = CardPrefs.read(Card.BRB, m::get, false, CardBackground.NONE, accents)
+        assertEquals(CardText(headline = "Back soon", accent = accents[0], layout = CardLayout.CENTERED), t)
+        assertNull(t.textColor)
+        assertEquals(CardTextSize.NORMAL, t.textSize)
+        assertEquals(CardFont.FULLBARS, t.font)
+        assertFalse(t.created)
+        for (c in Card.entries.filter { it.isCustom }) {
+            assertEquals(CardText(), CardPrefs.read(c, emptyMap<String, Any?>()::get, false, CardBackground.NONE, accents))
+        }
+        // The style the engine gets is today's card exactly.
+        val style = CardPrefs.style(Card.BRB, CardText(), null, null, null)
+        assertTrue(style.isDefault)
+        assertEquals(CardFont.FULLBARS, style.font)
+        assertEquals(CardTextSize.NORMAL, style.textSize)
+        assertNull(style.textColor)
+    }
+
+    @Test fun `stray values for the new settings read as the default, colours always opaque`() {
+        val m = mapOf<String, Any?>(
+            "card_brb_text_size" to "HUGE", "card_brb_font" to 3, "card_brb_text_color" to 0x00123456,
+            "card_brb_accent_custom" to 0x20FF0000, "card_brb_name" to "Lunch", "card_brb_on" to true,
+        )
+        val t = CardPrefs.read(Card.BRB, m::get, false, CardBackground.NONE, accents)
+        assertEquals(CardTextSize.NORMAL, t.textSize)
+        assertEquals(CardFont.FULLBARS, t.font)
+        assertEquals(0xFF123456.toInt(), t.textColor)
+        assertEquals(0xFFFF0000.toInt(), t.accent)
+        // A name and "made" mean nothing on a built-in card.
+        assertEquals("", t.name)
+        assertFalse(t.created)
+        assertTrue(CardPrefs.write(Card.BRB, CardText(name = "x", created = true)).values.all { it == null })
+    }
+
+    @Test fun `your own scene keeps its name and that it exists, and the engine gets the name`() {
+        val t = CardText(name = " Q&A  time ", created = true)
+        val m = HashMap<String, Any?>()
+        store(m, Card.CUSTOM_3, t)
+        assertEquals(" Q&A  time ", m["card_custom_3_name"])
+        assertEquals(true, m["card_custom_3_on"])
+        assertEquals(t, CardPrefs.read(Card.CUSTOM_3, m::get, false, CardBackground.NONE, accents))
+        assertEquals("Q&A time", CardPrefs.style(Card.CUSTOM_3, t, null, null, null).title)
+        assertNull(CardPrefs.style(Card.CUSTOM_3, CardText(created = true), null, null, null).title)
+        assertNull(CardPrefs.style(Card.BRB, CardText(name = "Lunch"), null, null, null).title)
+        // A long name is cut to the limit on the way in.
+        val long = CardPrefs.read(Card.CUSTOM_1, mapOf<String, Any?>("card_custom_1_name" to "x".repeat(60))::get, false, CardBackground.NONE, accents)
+        assertEquals(SceneNames.MAX_NAME, long.name.length)
+        assertTrue(CardPrefs.SCENE_FIELDS.none { it in CardPrefs.FIELDS })
+        // A scene that exists counts on the Settings row, its look alone doesn't make it custom.
+        assertFalse(t.isCustom)
+        assertEquals("1 custom", cardsValue(mapOf(Card.CUSTOM_3 to t)))
+    }
+
+    @Test fun `new look settings make a card custom`() {
+        assertTrue(CardText(textColor = 0xFFFFFFFF.toInt()).isCustom)
+        assertTrue(CardText(textSize = CardTextSize.SMALLER).isCustom)
+        assertTrue(CardText(font = CardFont.MONO).isCustom)
+        assertTrue(CardText(accent = 0xFF123456.toInt()).isCustom)
+    }
+
+    @Test fun `hard-to-read words are called out, the card's own colours never are`() {
+        val tone = 0xFFFFFFFF.toInt() // a white photo
+        for (c in Card.entries) assertNull("$c", CardRules.contrastProblem(c, CardText(), null))
+        // Bone words on a white background left undimmed.
+        val bright = CardText(background = CardBackground.STILL, dimPercent = 0)
+        assertNotNull(CardRules.contrastProblem(Card.BRB, bright, tone))
+        assertTrue(CardRules.contrastProblem(Card.BRB, bright, tone)!!.contains("background"))
+        // Darkened enough, it reads.
+        assertNull(CardRules.contrastProblem(Card.BRB, bright.copy(dimPercent = 80), tone))
+        // Yellow on the Bone bookend; the same yellow on Ink is fine.
+        val yellow = CardText(textColor = 0xFFFFE066.toInt())
+        assertNotNull(CardRules.contrastProblem(Card.STARTING_SOON, yellow, null))
+        assertNull(CardRules.contrastProblem(Card.BRB, yellow, null))
+        // Ink words on an Ink card; on Full picture the words sit on the Ink plate whatever the card.
+        val ink = CardText(textColor = StreamPalette.INK)
+        assertNotNull(CardRules.contrastProblem(Card.BRB, ink, null))
+        assertNotNull(CardRules.contrastProblem(Card.ENDING, ink.copy(layout = CardLayout.FULL_PICTURE), null))
+        assertNull(CardRules.contrastProblem(Card.ENDING, ink, null))
+        // A web page replaces the words, so there's nothing to warn about.
+        assertNull(CardRules.contrastProblem(Card.BRB, ink.copy(webUrl = "https://example.com"), null))
+        // The words' own colour, as the card draws it.
+        assertEquals(StreamPalette.INK, CardRules.wordsColor(Card.ENDING, CardText()))
+        assertEquals(StreamPalette.BONE, CardRules.wordsColor(Card.ENDING, CardText(background = CardBackground.STILL)))
+        assertEquals(StreamPalette.BONE, CardRules.wordsColor(Card.ENDING, CardText(layout = CardLayout.FULL_PICTURE)))
+        assertEquals(StreamPalette.BONE, CardRules.wordsColor(Card.CUSTOM_1, CardText()))
     }
 }

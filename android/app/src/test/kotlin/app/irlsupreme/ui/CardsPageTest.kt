@@ -1,5 +1,6 @@
 package app.irlsupreme.ui
 
+import app.irlsupreme.engine.Scene
 import app.irlsupreme.engine.video.CardLayout
 import app.irlsupreme.engine.video.Slates.Card
 import app.irlsupreme.service.CardBackground
@@ -14,12 +15,43 @@ import org.junit.Test
 
 class CardsPageTest {
     @Test fun `every card can be customised, the automatic ones last`() {
-        assertEquals(Card.entries.toSet(), CARD_ORDER.toSet())
+        assertEquals(Card.entries.filter { !it.isCustom }.toSet(), CARD_ORDER.toSet())
         assertEquals(listOf(Card.SIGNAL_LOST, Card.WEAK_SIGNAL, Card.CAMERA_LOST), CARD_ORDER.takeLast(3))
         assertTrue(CARD_ORDER.takeLast(3).all(::isAutomatic))
         assertFalse(CARD_ORDER.take(4).any(::isAutomatic))
-        assertEquals("BRB", cardName(Card.BRB))
-        assertEquals("Signal lost", cardName(Card.SIGNAL_LOST))
+        assertEquals("BRB", cardName(Card.BRB, emptyMap()))
+        assertEquals("Signal lost", cardName(Card.SIGNAL_LOST, emptyMap()))
+    }
+
+    @Test fun `your own scenes sit between the chosen cards and the automatic ones, by their names`() {
+        val own = mapOf(Scene.CUSTOM_2 to "Lunch", Scene.CUSTOM_4 to "Q&A")
+        val order = cardOrder(own)
+        assertEquals(CARD_ORDER.take(4) + listOf(Card.CUSTOM_2, Card.CUSTOM_4) + CARD_ORDER.drop(4), order)
+        assertEquals(CARD_ORDER, cardOrder(emptyMap()))
+        assertEquals("Lunch", cardName(Card.CUSTOM_2, own))
+        assertEquals("Scene 1", cardName(Card.CUSTOM_1, own))
+        assertFalse(isAutomatic(Card.CUSTOM_1))
+    }
+
+    @Test fun `colours say what they are, and when they could read as a warning`() {
+        assertEquals("Teal. Picked so it never reads as a signal colour.", colorHelp(app.irlsupreme.engine.video.Slates.ACCENTS[0], preset = true))
+        assertTrue(colorHelp(0xFFFF2020.toInt(), preset = false).contains("warning colour"))
+        assertEquals("Blue, your own colour.", colorHelp(0xFF2050FF.toInt(), preset = false))
+        assertEquals(listOf("Bone", "Ink"), TEXT_PRESETS.map(::textPresetName))
+    }
+
+    @Test fun `the not on camera tag names the screen viewers see`() {
+        val before = app.irlsupreme.service.SceneNames.created
+        try {
+            app.irlsupreme.service.SceneNames.created = mapOf(Scene.CUSTOM_1 to "Lunch")
+            assertEquals("Not on camera. Viewers see your Lunch screen", notOnCameraWords(Scene.CUSTOM_1))
+            assertEquals("Not on camera. Viewers see your BRB screen", notOnCameraWords(Scene.BRB))
+            assertEquals("Not on camera. Viewers see your privacy screen", notOnCameraWords(Scene.PRIVACY))
+            assertEquals("Lunch", sceneName(Scene.CUSTOM_1))
+            assertEquals("Scene 2", sceneName(Scene.CUSTOM_2))
+        } finally {
+            app.irlsupreme.service.SceneNames.created = before
+        }
     }
 
     @Test fun `the settings row counts your cards`() {

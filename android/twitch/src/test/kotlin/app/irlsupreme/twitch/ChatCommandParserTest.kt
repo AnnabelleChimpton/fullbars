@@ -90,4 +90,22 @@ class ChatCommandParserTest {
         assertEquals(CommandResult.NotAllowed("amod"), ChatCommandParser.parse(msg.copy(badges = emptyList())))
         assertEquals(CommandResult.NotAllowed("amod"), ChatCommandParser.parse(msg.copy(sourceBroadcasterUserId = "9999")))
     }
+
+    @Test fun sceneTakesTheRestOfTheLineAsTheName() {
+        assertEquals(CommandResult.Accepted(ChatCommand.ShowScene("lunch"), "modperson"), parse("!scene lunch"))
+        assertEquals(CommandResult.Accepted(ChatCommand.ShowScene("Driving home"), "modperson"), parse("!SCENE   Driving   home "))
+        assertEquals(CommandResult.Accepted(ChatCommand.ShowScene("live"), "modperson"), parse("!scene live"))
+        val long = parse("!scene " + "x".repeat(100)) as CommandResult.Accepted
+        assertEquals(ChatCommandParser.MAX_SCENE_NAME, (long.command as ChatCommand.ShowScene).name.length)
+        // No name: a hint, not a guess.
+        assertTrue(parse("!scene") is CommandResult.Invalid)
+        assertEquals(CommandResult.NotACommand, parse("!scenes lunch"))
+    }
+
+    @Test fun sceneFollowsTheSamePermissionsAsTheOtherCommands() {
+        assertEquals(CommandResult.NotAllowed("viewer"), parse("!scene lunch", viewer))
+        assertTrue(parse("!scene lunch", broadcaster) is CommandResult.Accepted)
+        assertEquals(CommandResult.NotAllowed("modperson"), parse("!scene lunch", policy = CommandPolicy(allowModerators = false)))
+        assertTrue(ChatCommandParser.help().any { it.usage.startsWith("!scene") })
+    }
 }

@@ -56,13 +56,15 @@ internal fun sceneConsequence(scene: Scene, muted: Boolean): String = when (scen
 }
 
 /**
- * The sheet body. [thumbs]: the last camera frame for Live and the engine's card for the rest (null while drawing).
+ * The sheet body. [scenes]: the ones to offer, the built-ins then the streamer's own that exist. [thumbs]: the last
+ * camera frame for Live and the engine's card for the rest (null while drawing).
  * [flipValue]: "Back"/"Front", or null when the phone camera isn't the one being sent (the row is then disabled).
  */
 @Composable
 internal fun ScenesSheet(
     scene: Scene,
     muted: Boolean,
+    scenes: List<Scene>,
     thumbs: Map<Scene, ImageBitmap?>,
     landscapeThumbs: Boolean,
     flipValue: String?,
@@ -89,7 +91,7 @@ internal fun ScenesSheet(
                 Text("Weak signal and Camera lost switch on their own.", style = FbType.help, color = c.text2)
             }
             Column(Modifier.selectableGroup()) {
-                Scene.entries.forEach { s ->
+                scenes.forEach { s ->
                     Hairline(color = c.rule)
                     SceneRow(s, s == scene, sceneConsequence(s, muted), thumbs[s], landscapeThumbs) { onChoose(s) }
                 }

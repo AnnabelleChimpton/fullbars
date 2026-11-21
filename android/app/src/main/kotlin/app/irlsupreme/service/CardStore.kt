@@ -8,9 +8,15 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.util.Log
 import androidx.core.content.edit
+import androidx.core.graphics.get
+import androidx.core.graphics.scale
+import app.irlsupreme.engine.Scene
+import app.irlsupreme.engine.video.CardFont
 import app.irlsupreme.engine.video.CardLayout
 import app.irlsupreme.engine.video.CardStyle
+import app.irlsupreme.engine.video.CardTextSize
 import app.irlsupreme.engine.video.Slates
+import app.irlsupreme.engine.video.StreamPalette
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +41,8 @@ enum class CardBackground { NONE, STILL, GIF }
 /**
  * Everything the streamer set for one card (Settings › Scene cards). Empty text means the card's own words; [webUrl]
  * is kept as typed so the field never loses what you wrote, and only a valid https address ([cardWebUrl]) is used.
+ * [name] and [created] only mean something on the streamer's own scenes ([Slates.Card.isCustom]): the scene exists
+ * once made, and its name is kept as typed (shown cleaned up, see [SceneNames.clean]).
  */
 data class CardText(
     val headline: String = "",
@@ -44,15 +52,22 @@ data class CardText(
     /** How much Ink lies over the background, in percent (one of [CardRules.DIM_STEPS]). */
     val dimPercent: Int = CardRules.DEFAULT_DIM,
     val layout: CardLayout = CardLayout.CLASSIC,
-    /** One of [Slates.ACCENTS], or null for the brand's own colours. */
+    /** A preset from [Slates.ACCENTS] or any opaque colour, or null for the brand's own colours. */
     val accent: Int? = null,
     val elements: CardElements = CardElements(),
     val webUrl: String = "",
+    /** The words' colour, or null for the card's own (Bone on Ink, Ink on Bone). */
+    val textColor: Int? = null,
+    val textSize: CardTextSize = CardTextSize.NORMAL,
+    val font: CardFont = CardFont.FULLBARS,
+    val name: String = "",
+    val created: Boolean = false,
 ) {
-    /** Dim alone isn't custom: with no background it changes nothing viewers see. */
+    /** The card looks other than its own. Dim alone isn't custom: with no background it changes nothing viewers see. */
     val isCustom: Boolean
         get() = headline.isNotBlank() || sub.isNotBlank() || hasPicture || background != CardBackground.NONE ||
-            layout != CardLayout.CLASSIC || accent != null || elements != CardElements() || cardWebUrl(webUrl) != null
+            layout != CardLayout.CLASSIC || accent != null || elements != CardElements() || cardWebUrl(webUrl) != null ||
+            textColor != null || textSize != CardTextSize.NORMAL || font != CardFont.FULLBARS
 }
 
 /** How picking a background went; anything but [OK] leaves the old background as it was. */
@@ -98,9 +113,9 @@ object CardRules {
     /** Timers, chat and socials are drawn by the phone's overlay, so only on the cards the phone draws. */
     fun hasLiveElements(card: Slates.Card): Boolean = !serverLooped(card)
 
-    /** A countdown only where there's something to count down to: the start, or coming back. */
+    /** A countdown only where there's something to count down to: the start, or coming back (your own scenes too). */
     fun hasCountdown(card: Slates.Card): Boolean =
-        card == Slates.Card.STARTING_SOON || card == Slates.Card.BRB || card == Slates.Card.PRIVACY
+        card == Slates.Card.STARTING_SOON || card == Slates.Card.BRB || card == Slates.Card.PRIVACY || card.isCustom
 
     fun canUseWebPage(card: Slates.Card): Boolean = !serverLooped(card)
 
@@ -119,8 +134,9 @@ object CardRules {
     fun snapDim(percent: Int): Int = DIM_STEPS.minBy { kotlin.math.abs(it - percent) }
 
     /**
-     * The curated accent nearest to [argb], or null when there are none. Stored accents are snapped on load, so if the
-     * curated set is retuned a streamer's pick moves to its nearest neighbour and can never become a health colour.
+     * The curated accent nearest to [argb], or null when there are none. A preset accent is stored as a preset and
+     * snapped on load, so if the curated set is retuned a streamer's pick moves to its nearest neighbour. A custom
+     * colour is stored apart ([CardPrefs]) and kept exactly as picked.
      */
     fun snapAccent(argb: Int, accents: List<Int>): Int? = accents.minByOrNull { a ->
         val dr = ((a shr 16) and 0xFF) - ((argb shr 16) and 0xFF)
@@ -161,6 +177,58 @@ object CardRules {
             hue < 315f -> "Orchid"
             else -> "Pink"
         }
+    }
+
+    /** Below this contrast (WCAG, for large type) the page says the words may be hard to read. */
+    const val MIN_TEXT_CONTRAST = 3.0
+
+    /** What a background is taken to be before its picture is known: a mid grey. */
+    private const val UNKNOWN_TONE = 0xFF808080.toInt()
+
+    /**
+     * The colour [card]'s words are drawn in with [t]'s settings: the streamer's, else the card's own (Bone on Ink, Ink
+     * on a Bone bookend, Bone on the plate and over any picture or background), as the stream's card drawing does it.
+     */
+    fun wordsColor(card: Slates.Card, t: CardText): Int {
+        t.textColor?.let { return it or OPAQUE }
+        val plate = t.layout == CardLayout.FULL_PICTURE
+        val imagery = t.background != CardBackground.NONE || (plate && t.hasPicture)
+        return if (!plate && !imagery && card.family == Slates.Family.BOOKEND) StreamPalette.INK else StreamPalette.BONE
+    }
+
+    /**
+     * The colour behind [card]'s words, as near as can be told without drawing it: the Ink plate on Full picture, Ink
+     * at the dim over the background ([backgroundTone]: its average colour, when known), or the card's own field.
+     */
+    fun wordsBackdrop(card: Slates.Card, t: CardText, backgroundTone: Int?): Int = when {
+        t.layout == CardLayout.FULL_PICTURE -> StreamPalette.INK
+        t.background != CardBackground.NONE -> blend(StreamPalette.INK, snapDim(t.dimPercent) / 100f, backgroundTone ?: UNKNOWN_TONE)
+        card.family == Slates.Family.BOOKEND -> StreamPalette.BONE
+        else -> StreamPalette.INK
+    }
+
+    /**
+     * The page's warning when [card]'s words would be hard to read with [t]'s settings, in plain words, or null. Not on
+     * a card that shows a web page instead.
+     */
+    fun contrastProblem(card: Slates.Card, t: CardText, backgroundTone: Int?): String? {
+        if (canUseWebPage(card) && cardWebUrl(t.webUrl) != null) return null
+        val ratio = ColorMath.contrast(wordsColor(card, t), wordsBackdrop(card, t, backgroundTone))
+        if (ratio >= MIN_TEXT_CONTRAST) return null
+        return if (t.background != CardBackground.NONE && t.layout != CardLayout.FULL_PICTURE) {
+            "Your words may be hard to read on this background. Darken it more, or pick another text colour."
+        } else {
+            "Your words may be hard to read: they're close to the colour behind them. Pick another text colour."
+        }
+    }
+
+    private const val OPAQUE = 0xFF000000.toInt()
+
+    /** [top] at [alpha] over [bottom], as Canvas lays a colour over a picture. */
+    private fun blend(top: Int, alpha: Float, bottom: Int): Int {
+        val a = alpha.coerceIn(0f, 1f)
+        fun ch(shift: Int) = (((top shr shift) and 0xFF) * a + ((bottom shr shift) and 0xFF) * (1 - a)).roundToInt().coerceIn(0, 255)
+        return OPAQUE or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
     }
 
     /** What's wrong with [raw] as a card's web page, in plain words, or null when it's fine or empty. */
@@ -281,19 +349,36 @@ object CardPrefs {
 
     fun key(card: Slates.Card, field: String) = "card_${card.name.lowercase()}_$field"
 
-    /** The fields [CardText] keeps in settings. The picture and the background are files, not keys. */
-    val FIELDS = listOf("headline", "sub", "dim", "layout", "accent", "countdown", "time_away", "chat", "web")
+    /**
+     * The fields of a card's look that [CardText] keeps in settings. The picture and the background are files, not
+     * keys. A preset accent is kept under "accent" (snapped to the presets on load, as it always was); a custom colour
+     * under "accent_custom", exactly. Keys added later are simply missing on an older install, which reads as today's
+     * look.
+     */
+    val FIELDS = listOf(
+        "headline", "sub", "dim", "layout", "accent", "accent_custom", "countdown", "time_away", "chat", "web",
+        "text_color", "text_size", "font",
+    )
 
-    fun write(card: Slates.Card, t: CardText): Map<String, Any?> = mapOf(
+    /** What makes one of the streamer's own scenes: its name, and that it exists. Kept when its look is reset. */
+    val SCENE_FIELDS = listOf("name", "on")
+
+    fun write(card: Slates.Card, t: CardText, accents: List<Int> = Slates.ACCENTS): Map<String, Any?> = mapOf(
         key(card, "headline") to t.headline.ifEmpty { null },
         key(card, "sub") to t.sub.ifEmpty { null },
         key(card, "dim") to t.dimPercent.takeIf { it != CardRules.DEFAULT_DIM },
         key(card, "layout") to t.layout.takeIf { it != CardLayout.CLASSIC }?.name,
-        key(card, "accent") to t.accent,
+        key(card, "accent") to t.accent?.takeIf { it in accents },
+        key(card, "accent_custom") to t.accent?.takeIf { it !in accents },
         key(card, "countdown") to t.elements.countdownMinutes.takeIf { it > 0 },
         key(card, "time_away") to t.elements.showTimeAway.takeIf { it },
         key(card, "chat") to t.elements.showChat.takeIf { it },
         key(card, "web") to t.webUrl.ifEmpty { null },
+        key(card, "text_color") to t.textColor,
+        key(card, "text_size") to t.textSize.takeIf { it != CardTextSize.NORMAL }?.name,
+        key(card, "font") to t.font.takeIf { it != CardFont.FULLBARS }?.name,
+        key(card, "name") to t.name.takeIf { card.isCustom }?.ifEmpty { null },
+        key(card, "on") to t.created.takeIf { card.isCustom && it },
     )
 
     /** [card]'s settings from [get]; values of the wrong type (an older build, a hand edit) read as the default. */
@@ -310,11 +395,18 @@ object CardPrefs {
             background = background,
             dimPercent = CardRules.snapDim(int("dim") ?: CardRules.DEFAULT_DIM),
             layout = CardLayout.entries.firstOrNull { it.name == str("layout") } ?: CardLayout.CLASSIC,
-            accent = int("accent")?.let { CardRules.snapAccent(it, accents) },
+            accent = int("accent_custom")?.let { it or OPAQUE } ?: int("accent")?.let { CardRules.snapAccent(it, accents) },
             elements = CardElements(int("countdown")?.coerceIn(0, 60) ?: 0, bool("time_away"), bool("chat")),
             webUrl = str("web").take(CardRules.MAX_WEB_URL),
+            textColor = int("text_color")?.let { it or OPAQUE },
+            textSize = CardTextSize.parse(str("text_size")),
+            font = CardFont.parse(str("font")),
+            name = if (card.isCustom) str("name").take(SceneNames.MAX_NAME) else "",
+            created = card.isCustom && bool("on"),
         )
     }
+
+    private const val OPAQUE = 0xFF000000.toInt()
 
     /**
      * The engine's style for [card] from its settings and its loaded art. The server's cards never get a looping GIF
@@ -329,6 +421,10 @@ object CardPrefs {
             layout = t.layout,
             accent = t.accent,
             webUrl = if (CardRules.canUseWebPage(card)) cardWebUrl(t.webUrl) else null,
+            textColor = t.textColor,
+            textSize = t.textSize,
+            font = t.font,
+            title = if (card.isCustom) SceneNames.clean(t.name).ifEmpty { null } else null,
         )
     }
 }
@@ -353,8 +449,8 @@ object CardStore {
     private var flow: MutableStateFlow<Map<Slates.Card, CardText>>? = null
     private var socialsFlow: MutableStateFlow<String>? = null
 
-    /** One card's loaded pictures. */
-    private class Art(val picture: Bitmap?, val background: Bitmap?, val gif: File?)
+    /** One card's loaded pictures, and its background's average colour (for the page's contrast warning). */
+    private class Art(val picture: Bitmap?, val background: Bitmap?, val gif: File?, val tone: Int? = null)
 
     /** The decoded bitmaps by content (length + CRC), so identical files share one and an unchanged file isn't re-decoded. */
     @Volatile private var decoded: Map<String, Bitmap> = emptyMap()
@@ -389,7 +485,10 @@ object CardStore {
 
     @Synchronized
     fun state(ctx: Context): StateFlow<Map<Slates.Card, CardText>> =
-        (flow ?: MutableStateFlow(load(ctx)).also { flow = it }).asStateFlow()
+        (flow ?: MutableStateFlow(load(ctx)).also { flow = it; SceneNames.created = SceneNames.created(it.value) }).asStateFlow()
+
+    /** The streamer's own scenes that exist, with their names, in slot order. */
+    fun createdScenes(ctx: Context): Map<Scene, String> = SceneNames.created(state(ctx).value)
 
     /** Your socials line, as typed. */
     @Synchronized
@@ -429,9 +528,47 @@ object CardStore {
 
     fun setLayout(ctx: Context, card: Slates.Card, layout: CardLayout) = change(ctx, card) { it.copy(layout = layout) }
 
-    /** [accent] is snapped to the curated set, so nothing outside it ever reaches a card. */
+    /** A preset or any colour (made opaque); null for the card's own. */
     fun setAccent(ctx: Context, card: Slates.Card, accent: Int?) =
-        change(ctx, card) { it.copy(accent = accent?.let { a -> CardRules.snapAccent(a, Slates.ACCENTS) }) }
+        change(ctx, card) { it.copy(accent = accent?.let { a -> a or 0xFF000000.toInt() }) }
+
+    /** The words' colour (made opaque); null for the card's own. */
+    fun setTextColor(ctx: Context, card: Slates.Card, color: Int?) =
+        change(ctx, card) { it.copy(textColor = color?.let { c -> c or 0xFF000000.toInt() }) }
+
+    fun setTextSize(ctx: Context, card: Slates.Card, size: CardTextSize) = change(ctx, card) { it.copy(textSize = size) }
+
+    fun setFont(ctx: Context, card: Slates.Card, font: CardFont) = change(ctx, card) { it.copy(font = font) }
+
+    /**
+     * Makes a new scene of your own in the first free slot, its look the plain chosen card's, and returns its card;
+     * null when all [Scene.CUSTOM] slots are taken.
+     */
+    fun createScene(ctx: Context): Slates.Card? {
+        val texts = state(ctx).value
+        val card = Scene.CUSTOM.mapNotNull { Slates.Card.of(it) }.firstOrNull { texts[it]?.created != true } ?: return null
+        change(ctx, card) { CardText(created = true) }
+        return card
+    }
+
+    /** Keeps [raw] as typed (cut to [SceneNames.MAX_NAME]); everywhere else shows it cleaned up ([SceneNames.clean]). */
+    fun setSceneName(ctx: Context, card: Slates.Card, raw: String) {
+        if (!card.isCustom) return
+        change(ctx, card) { it.copy(name = raw.take(SceneNames.MAX_NAME)) }
+    }
+
+    /** Deletes one of your own scenes: its name, its look, its picture and background. The slot is free again. */
+    fun deleteScene(ctx: Context, card: Slates.Card) {
+        if (!card.isCustom) return
+        prefs(ctx).edit { (CardPrefs.FIELDS + CardPrefs.SCENE_FIELDS).forEach { remove(CardPrefs.key(card, it)) } }
+        pictureFile(ctx, card).delete()
+        backgroundFiles(ctx, card).forEach { it.delete() }
+        update(ctx, card) { CardText() }
+        dropArt(ctx, card, picture = true, background = true)
+    }
+
+    /** The average colour of [card]'s background as loaded (a GIF's first frame), or null without one. */
+    fun backgroundTone(card: Slates.Card): Int? = art[card]?.takeIf { it.background != null }?.tone
 
     fun setElements(ctx: Context, card: Slates.Card, elements: CardElements) = change(ctx, card) { it.copy(elements = elements) }
 
@@ -538,12 +675,15 @@ object CardStore {
         dropArt(ctx, card, background = true)
     }
 
-    /** [card] back to its own card: its words, no picture, no background, the classic layout, nothing live, no web page. */
+    /**
+     * [card] back to its own card: its words, no picture, no background, the classic layout, nothing live, no web page,
+     * the brand's face and colours. One of your own scenes keeps its name.
+     */
     fun reset(ctx: Context, card: Slates.Card) {
         prefs(ctx).edit { CardPrefs.FIELDS.forEach { remove(CardPrefs.key(card, it)) } }
         pictureFile(ctx, card).delete()
         backgroundFiles(ctx, card).forEach { it.delete() }
-        update(ctx, card) { CardText() }
+        update(ctx, card) { CardText(name = it.name, created = it.created) }
         dropArt(ctx, card, picture = true, background = true)
     }
 
@@ -581,15 +721,27 @@ object CardStore {
                     ?.also { keep[key] = it }
             }.onFailure { Log.w(TAG, "card art not loaded: ${it.javaClass.simpleName}") }.getOrNull()
         }
+        val tones = HashMap<Bitmap, Int?>()
         val next = Slates.Card.entries.associateWith { c ->
             val bg = backgroundFile(ctx, c)
             val isGif = kindOf(bg) == CardBackground.GIF
             val frame = load(bg, isGif)
             // A GIF whose first frame won't decode isn't handed on: the card falls back to its plain field.
-            Art(load(pictureFile(ctx, c), gif = false), frame, bg.takeIf { isGif && frame != null })
+            val tone = frame?.let { f -> tones.getOrPut(f) { averageColor(f) } }
+            Art(load(pictureFile(ctx, c), gif = false), frame, bg.takeIf { isGif && frame != null }, tone)
         }
         return keep to next
     }
+
+    /** [b]'s average colour, opaque (transparent parts read as the Ink field under them); null if it can't be read. */
+    private fun averageColor(b: Bitmap): Int? = runCatching {
+        val one = b.scale(1, 1)
+        val px = one[0, 0]
+        if (one !== b) one.recycle()
+        val a = (px ushr 24) / 255f
+        fun ch(shift: Int) = (((px shr shift) and 0xFF) * a + ((StreamPalette.INK shr shift) and 0xFF) * (1 - a)).roundToInt().coerceIn(0, 255)
+        0xFF000000.toInt() or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+    }.getOrNull()
 
     /**
      * A GIF's first frame, at most one 1080p frame, or null when it won't decode. Set as the card's still background
@@ -609,7 +761,10 @@ object CardStore {
             artGen++
             val a = art[card]
             if (a != null) {
-                art = art + (card to Art(if (picture) null else a.picture, if (background) null else a.background, if (background) null else a.gif))
+                art = art + (card to Art(
+                    if (picture) null else a.picture, if (background) null else a.background, if (background) null else a.gif,
+                    if (background) null else a.tone,
+                ))
             }
             push(ctx)
         }
@@ -648,15 +803,16 @@ object CardStore {
         val f = flow ?: return change(CardText())
         var out = CardText()
         f.update { m -> change(m[card] ?: CardText()).also { out = it }.let { m + (card to it) } }
+        SceneNames.created = SceneNames.created(f.value)
         return out
     }
 }
 
 /**
  * The Settings row's value: "Default", how many cards are your own, or "Socials line" when that's all you've set.
- * A card counts once whatever you changed on it.
+ * A card counts once whatever you changed on it; each scene you made counts as one.
  */
-fun cardsValue(texts: Map<Slates.Card, CardText>, socials: String = ""): String = when (val n = texts.values.count { it.isCustom }) {
+fun cardsValue(texts: Map<Slates.Card, CardText>, socials: String = ""): String = when (val n = texts.values.count { it.isCustom || it.created }) {
     0 -> if (socials.isNotBlank()) "Socials line" else "Default"
     1 -> "1 custom"
     else -> "$n custom"

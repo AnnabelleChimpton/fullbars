@@ -28,6 +28,7 @@ import app.irlsupreme.engine.StreamConfig
 import app.irlsupreme.engine.audio.AlertSounds
 import app.irlsupreme.engine.video.AlertGraphic
 import app.irlsupreme.engine.video.BrandType
+import app.irlsupreme.engine.video.SlateAudio
 import app.irlsupreme.engine.video.Slates
 import app.irlsupreme.twitch.ChatCommand
 import app.irlsupreme.twitch.ChatCommandParser
@@ -599,6 +600,8 @@ class StreamService : Service() {
         ChatCommand.Privacy -> { engine.setScene(Scene.PRIVACY); engine.setMicMuted(true); "Privacy on: privacy screen, mic off" }
         ChatCommand.StartingSoon -> { engine.setScene(Scene.STARTING_SOON); "Starting soon screen on" }
         ChatCommand.Ending -> { engine.setScene(Scene.ENDING); "Ending screen on" }
+        is ChatCommand.ShowScene -> SceneNames.match(command.name)?.let { showScene(it) }
+            ?: ModReplies.noScene(SceneNames.offered().map { SceneNames.name(it) })
         ChatCommand.RestartCam -> {
             val p = pocket
             if (p != null) main.post { p.restart() } else engine.restartCamera()
@@ -606,6 +609,12 @@ class StreamService : Service() {
         }
         ChatCommand.End -> { scope.launch { delay(1_500); main.post { stopAndForget(EndReason.MOD) } }; "Ending the stream" }
         is ChatCommand.Quality -> "Quality changes from chat aren't supported yet"
+    }
+
+    /** Shows [scene] for a mod (`!scene`, the mod remote): a built-in as its own command does, your own scenes directly. */
+    private fun showScene(scene: Scene): String? = ModScenes.command(scene)?.let { apply(it) } ?: run {
+        engine.setScene(scene)
+        ModReplies.sceneOn(SceneNames.name(scene))
     }
 
     @Volatile private var pocket: app.irlsupreme.dji.PocketSession? = null
@@ -687,18 +696,13 @@ class StreamService : Service() {
             val client = brbClient(pairing)
             while (isActive) {
                 val st = engine.state.value
-                runCatching { client.pollRemote(st.running, st.scene.name, !st.micMuted) }.getOrNull()?.forEach { scene ->
-                    val cmd = when (scene) {
-                        "LIVE" -> ChatCommand.Live
-                        "BRB" -> ChatCommand.Brb
-                        "PRIVACY" -> ChatCommand.Privacy
-                        "STARTING_SOON" -> ChatCommand.StartingSoon
-                        "ENDING" -> ChatCommand.Ending
-                        else -> null
-                    }
-                    if (cmd != null) {
-                        Log.i(TAG, "mod remote: $scene")
-                        apply(cmd)
+                // Your own scenes go up with their names, so the remote shows a button for each.
+                val own = SceneNames.created.map { (scene, name) -> scene.name to name }
+                runCatching { client.pollRemote(st.running, st.scene.name, !st.micMuted, own) }.getOrNull()?.forEach { picked ->
+                    val scene = ModScenes.fromRemote(picked, SceneNames.created)
+                    if (scene != null) {
+                        Log.i(TAG, "mod remote: ${SceneNames.logName(scene)}")
+                        showScene(scene)
                     }
                 }
                 delay(2_000)
@@ -919,7 +923,7 @@ class StreamService : Service() {
             val style = Slates.style(card)
             val look = LiveElements.look(
                 card, background = style.background != null || style.backgroundGif != null, picture = style.picture != null,
-                layout = style.layout, web = style.webUrl != null, headline = style.headline ?: card.headline,
+                layout = style.layout, web = style.webUrl != null, headline = Slates.copy(card, SlateAudio.ON, style).headline,
             )
             // The streamer's chat layer is already on this card: always on Camera lost (it stands in for Live), and on
             // the chosen cards when they put their layers on cards.
@@ -1164,12 +1168,35 @@ internal object ModReplies {
 
     fun backLive(micStillOff: Boolean) = if (micStillOff) "Back live (mic still off)" else "Back live"
 
+    /** A mod showed one of your own scenes. */
+    fun sceneOn(name: String) = "$name screen on"
+
+    /** `!scene` with a name that isn't one; lists what is, so the mod can try again. */
+    fun noScene(names: List<String>) = "No scene by that name. Try: ${names.joinToString(", ")}"
+
     /** [pocket]: the Pocket's feed is restarted; otherwise the phone camera (the backup, if an RTMP camera is on air). */
     fun restartCam(pocket: Boolean, externalShown: Boolean) = when {
         pocket -> "Restarting the Pocket feed"
         externalShown -> "Restarting the phone camera"
         else -> "Restarting camera"
     }
+}
+
+/** Which command a mod's pick of a built-in scene is, and which scene the mod remote asked for. Pure, for tests. */
+internal object ModScenes {
+    /** The built-in [scene]'s own command (so `!scene brb` does exactly what `!brb` does); null for your own scenes. */
+    fun command(scene: Scene): ChatCommand? = when (scene) {
+        Scene.LIVE -> ChatCommand.Live
+        Scene.BRB -> ChatCommand.Brb
+        Scene.PRIVACY -> ChatCommand.Privacy
+        Scene.STARTING_SOON -> ChatCommand.StartingSoon
+        Scene.ENDING -> ChatCommand.Ending
+        Scene.CUSTOM_1, Scene.CUSTOM_2, Scene.CUSTOM_3, Scene.CUSTOM_4 -> null
+    }
+
+    /** The scene a remote pick ([id], a scene's enum name) is, if it exists: your own only while made ([created]). */
+    fun fromRemote(id: String, created: Map<Scene, String>): Scene? =
+        Scene.entries.firstOrNull { it.name == id }?.takeIf { !it.isCustom || it in created }
 }
 
 /** At most one reply per command per [windowMs], so a mod repeating a typo doesn't make the channel spam back. */

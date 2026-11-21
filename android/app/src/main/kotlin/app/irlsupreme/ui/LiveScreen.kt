@@ -440,12 +440,15 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
             captureSurface(sv, w, h) { bmp -> bmp?.let { cameraThumb = it.asImageBitmap() } }
         }
     }
-    val cardThumbs by produceState<Map<Scene, ImageBitmap?>>(emptyMap(), sheetOpened, state.portrait, state.micMuted) {
+    // The scenes on offer: the built-ins, then the streamer's own that exist (Settings › Scene cards).
+    val cardTexts by app.irlsupreme.service.CardStore.state(ctx).collectAsState()
+    val offeredScenes = remember(cardTexts) { app.irlsupreme.service.SceneNames.offered(app.irlsupreme.service.SceneNames.created(cardTexts)) }
+    val cardThumbs by produceState<Map<Scene, ImageBitmap?>>(emptyMap(), sheetOpened, state.portrait, state.micMuted, cardTexts) {
         if (!sheetOpened) return@produceState
         val (w, h) = if (state.portrait) 270 to 480 else 480 to 270
         val muted = state.micMuted
         value = withContext(Dispatchers.Default) {
-            Scene.entries.filter { it != Scene.LIVE }.associateWith { sceneCardBitmap(it, muted, w, h)?.asImageBitmap() }
+            offeredScenes.filter { it != Scene.LIVE }.associateWith { sceneCardBitmap(it, muted, w, h)?.asImageBitmap() }
         }
     }
 
@@ -456,6 +459,9 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         if (onCard && !reduced) delay(FbMotion.ENTER_MS.toLong())
         frameShown = onCard
     }
+
+    // The NOT ON CAMERA tag says which screen viewers get, for TalkBack ("Viewers see your Lunch screen").
+    val notOnCameraSaid = notOnCameraWords(state.scene)
 
     val said = announced ?: state.health
     val pill = pillModel(state, said, isTest, bonded, ending)
@@ -570,7 +576,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                     onRaw = { raw -> MicSettings.setRaw(ctx, raw); engine.setRawMic(raw) },
                     modifier = m,
                 ) else ScenesSheet(
-                    scene = state.scene, muted = state.micMuted,
+                    scene = state.scene, muted = state.micMuted, scenes = offeredScenes,
                     thumbs = cardThumbs + (Scene.LIVE to cameraThumb),
                     landscapeThumbs = !state.portrait,
                     flipValue = if (phoneCamera) (if (state.cameraFacing == Facing.FRONT) "Front" else "Back") else null,
@@ -607,7 +613,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                             showChat = showChat,
                             onChat = onChat,
                             flip = flipButton,
-                            notOnCamera = frameShown,
+                            notOnCamera = notOnCameraSaid.takeIf { frameShown },
                             notice = noticeText,
                             noticeHeight = noticeHeight(big).dp,
                         )
@@ -639,7 +645,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                             showChat = showChat,
                             onChat = onChat,
                             flip = flipButton,
-                            notOnCamera = frameShown,
+                            notOnCamera = notOnCameraSaid.takeIf { frameShown },
                             notice = noticeText,
                             noticeHeight = noticeHeight(big).dp,
                             bottom = bottomPad,
@@ -711,7 +717,8 @@ private fun Slots(
     showChat: Boolean,
     onChat: (() -> Unit)?,
     flip: (() -> Unit)?,
-    notOnCamera: Boolean,
+    /** What the NOT ON CAMERA tag says to TalkBack while a card is up; null hides the tag. */
+    notOnCamera: String?,
     notice: String?,
     noticeHeight: Dp,
     bottom: Dp = 0.dp,
@@ -731,7 +738,9 @@ private fun Slots(
                 if (flip != null) FlipButton(flip)
             }
             Spacer(Modifier.height(8.dp))
-            if (notOnCamera) EngagedTag("Not on camera", Modifier.padding(bottom = 8.dp).absorbTouches())
+            if (notOnCamera != null) {
+                EngagedTag("Not on camera", Modifier.padding(bottom = 8.dp).absorbTouches().clearAndSetSemantics { contentDescription = notOnCamera })
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (details) detailsContent(Modifier.widthIn(max = 420.dp).verticalScroll(rememberScrollState()))
             }
@@ -870,13 +879,12 @@ internal fun hapticFor(prev: Health, now: Health, ownSceneTap: Boolean): HapticP
     else -> null
 }
 
-fun sceneName(s: Scene) = when (s) {
-    Scene.LIVE -> "Live"
-    Scene.BRB -> "BRB"
-    Scene.PRIVACY -> "Privacy"
-    Scene.STARTING_SOON -> "Starting soon"
-    Scene.ENDING -> "Ending"
-}
+/** [s]'s name as the streamer knows it: "Live", "BRB", or what they called their own ("Lunch"). */
+fun sceneName(s: Scene) = app.irlsupreme.service.SceneNames.name(s)
+
+/** The NOT ON CAMERA tag's spoken words while [s] is up: "Not on camera. Viewers see your Lunch screen". */
+internal fun notOnCameraWords(s: Scene): String =
+    if (s == Scene.LIVE) "Not on camera" else "Not on camera. Viewers see your ${if (s == Scene.PRIVACY) "privacy" else sceneName(s)} screen"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Chat ticker
