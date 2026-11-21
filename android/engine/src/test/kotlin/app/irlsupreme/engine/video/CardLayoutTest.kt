@@ -238,6 +238,11 @@ class CardLayoutTest {
         assertTrue(CardStyle(dim = 0.6f).isDefault)
         assertFalse(CardStyle(layout = CardLayout.CENTERED).isDefault)
         assertFalse(CardStyle(accent = Slates.ACCENTS[0]).isDefault)
+        assertFalse(CardStyle(textColor = 0xFF00FF00.toInt()).isDefault)
+        assertFalse(CardStyle(textSize = CardTextSize.LARGER).isDefault)
+        assertFalse(CardStyle(font = CardFont.SERIF).isDefault)
+        assertFalse(CardStyle(title = "Lunch").isDefault)
+        assertTrue(CardStyle(textSize = CardTextSize.NORMAL, font = CardFont.FULLBARS).isDefault)
     }
 
     // --- Accents ------------------------------------------------------------------------------------------------------
@@ -267,11 +272,19 @@ class CardLayoutTest {
         }
     }
 
-    @Test fun `only a curated accent is ever used`() {
+    @Test fun `any opaque accent is used, the presets and the streamer's own alike`() {
         for (a in Slates.ACCENTS) assertEquals(a, Slates.accentOf(CardStyle(accent = a)))
         assertNull(Slates.accentOf(CardStyle()))
-        for (hc in health.values) assertNull(Slates.accentOf(CardStyle(accent = hc)))
+        // A colour close to a health hue is the streamer's choice: the page warns, the card draws it.
+        for (hc in health.values) assertEquals(hc, Slates.accentOf(CardStyle(accent = hc)))
         assertNull(Slates.accentOf(CardStyle(accent = Slates.ACCENTS[0] and 0x00FFFFFF))) // the same hue, transparent
+        assertNull(Slates.accentOf(CardStyle(accent = 0x80FF0000.toInt())))
+    }
+
+    @Test fun `the words' own colour is used when opaque, else the card's own`() {
+        assertNull(Slates.textColorOf(CardStyle()))
+        assertEquals(0xFFFFD000.toInt(), Slates.textColorOf(CardStyle(textColor = 0xFFFFD000.toInt())))
+        assertNull(Slates.textColorOf(CardStyle(textColor = 0x00FFD000)))
     }
 
     @Test fun `the cursor is Ink on a Bone bookend, Bone elsewhere, and the accent when one is set`() {
@@ -283,7 +296,9 @@ class CardLayoutTest {
         assertEquals(StreamPalette.BONE, Slates.cursorColor(Card.ENDING, CardStyle(), CardLayer.FOREGROUND))
         val teal = Slates.ACCENTS[0]
         for (c in Card.entries) assertEquals(teal, Slates.cursorColor(c, CardStyle(accent = teal)))
-        assertEquals(StreamPalette.BONE, Slates.cursorColor(Card.BRB, CardStyle(accent = StreamPalette.WEAK)))
+        // Any opaque accent the streamer picked, even one the page warned about; a transparent one is ignored.
+        assertEquals(StreamPalette.WEAK, Slates.cursorColor(Card.BRB, CardStyle(accent = StreamPalette.WEAK)))
+        assertEquals(StreamPalette.BONE, Slates.cursorColor(Card.BRB, CardStyle(accent = StreamPalette.WEAK and 0xFFFFFF)))
         assertTrue(Slates.showsImagery(CardStyle(), CardLayer.FOREGROUND))
         assertFalse(Slates.showsImagery(CardStyle(layout = CardLayout.FULL_PICTURE)))
     }

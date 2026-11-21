@@ -1423,9 +1423,10 @@ class Compositor(
 internal object CardBackdrops {
     enum class Show { CARD, GIF, WEB }
 
-    /** The cards the phone draws live and can animate: BRB, Starting soon, Ending, Privacy and Camera lost. */
+    /** The cards the phone draws live and can animate: BRB, Starting soon, Ending, Privacy, Camera lost and your own. */
     fun animates(card: Slates.Card): Boolean = when (card) {
-        Slates.Card.BRB, Slates.Card.STARTING_SOON, Slates.Card.ENDING, Slates.Card.PRIVACY, Slates.Card.CAMERA_LOST -> true
+        Slates.Card.BRB, Slates.Card.STARTING_SOON, Slates.Card.ENDING, Slates.Card.PRIVACY, Slates.Card.CAMERA_LOST,
+        Slates.Card.CUSTOM_1, Slates.Card.CUSTOM_2, Slates.Card.CUSTOM_3, Slates.Card.CUSTOM_4 -> true
         Slates.Card.WEAK_SIGNAL, Slates.Card.SIGNAL_LOST -> false
     }
 
@@ -1546,11 +1547,12 @@ internal object SceneRules {
     }
 
     /**
-     * Whether an alert may show over [shown]: on the camera and the full-frame BRB, Starting soon and Ending cards.
-     * Privacy, Weak signal, Camera lost and Signal lost hold it (and its chime) until they're gone.
+     * Whether an alert may show over [shown]: on the camera and the full-frame BRB, Starting soon, Ending and custom
+     * cards. Privacy, Weak signal, Camera lost and Signal lost hold it (and its chime) until they're gone.
      */
     fun alertsAllowed(shown: Slates.Card?): Boolean = when (shown) {
-        null, Slates.Card.BRB, Slates.Card.STARTING_SOON, Slates.Card.ENDING -> true
+        null, Slates.Card.BRB, Slates.Card.STARTING_SOON, Slates.Card.ENDING,
+        Slates.Card.CUSTOM_1, Slates.Card.CUSTOM_2, Slates.Card.CUSTOM_3, Slates.Card.CUSTOM_4 -> true
         Slates.Card.PRIVACY, Slates.Card.WEAK_SIGNAL, Slates.Card.CAMERA_LOST, Slates.Card.SIGNAL_LOST -> false
     }
 }

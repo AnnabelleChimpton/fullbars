@@ -193,9 +193,14 @@ class BrbClient(private val pairing: BrbPairing) {
     fun resetRemote(): String =
         base + call(Request.Builder().url("$base/v1/remote/reset").post(ByteArray(0).toRequestBody())).getString("path")
 
-    /** Tells the server what viewers see and collects the mods' picks since the last poll (scene names). Blocking. */
-    fun pollRemote(live: Boolean, scene: String, micOn: Boolean): List<String> {
-        val body = JSONObject().put("live", live).put("scene", scene).put("mic", micOn).toString().toRequestBody("application/json".toMediaType())
+    /**
+     * Tells the server what viewers see and collects the mods' picks since the last poll (scene names). [own] are the
+     * streamer's own scenes, (enum name, name as shown), so the remote can offer them. Blocking.
+     */
+    fun pollRemote(live: Boolean, scene: String, micOn: Boolean, own: List<Pair<String, String>> = emptyList()): List<String> {
+        val scenes = org.json.JSONArray().apply { own.forEach { (id, name) -> put(JSONObject().put("id", id).put("name", name)) } }
+        val body = JSONObject().put("live", live).put("scene", scene).put("mic", micOn).put("scenes", scenes)
+            .toString().toRequestBody("application/json".toMediaType())
         val cmds = call(Request.Builder().url("$base/v1/remote/poll").post(body)).optJSONArray("commands") ?: return emptyList()
         return (0 until cmds.length()).mapNotNull { cmds.optJSONObject(it)?.optString("scene")?.takeIf { s -> s.isNotEmpty() } }
     }

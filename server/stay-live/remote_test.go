@@ -159,3 +159,44 @@ func TestModRemoteShowsTheSlateDuringADropout(t *testing.T) {
 		t.Fatalf("no keeper wired: %v", s)
 	}
 }
+
+// The streamer's own scenes: the phone reports them with their names, the page gets them back checked (known slots,
+// once each, named, names cut to 20 runes), and a mod's pick of one reaches the phone like any other.
+func TestModRemoteOwnScenes(t *testing.T) {
+	rm := &remote{dir: t.TempDir()}
+	t0 := time.Unix(1000, 0)
+	long := strings.Repeat("é", 30)
+	rm.poll(remoteStatus{Live: true, Scene: "CUSTOM_2", Mic: true, Scenes: []remoteScene{
+		{ID: "CUSTOM_2", Name: " Lunch "},
+		{ID: "CUSTOM_2", Name: "Again"}, // a slot once only
+		{ID: "EVIL", Name: "Nope"},      // not a slot
+		{ID: "CUSTOM_3", Name: "  "},    // no name
+		{ID: "CUSTOM_4", Name: long},
+	}}, t0)
+	s := rm.snapshot(t0.Add(time.Second))
+	got, _ := s["scenes"].([]remoteScene)
+	want := []remoteScene{{ID: "CUSTOM_2", Name: "Lunch"}, {ID: "CUSTOM_4", Name: strings.Repeat("é", remoteNameMax)}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("scenes: %+v", got)
+	}
+	if s["scene"] != "CUSTOM_2" {
+		t.Fatalf("scene: %v", s["scene"])
+	}
+	// An older phone sends none: an empty list, never null, so the page draws no extra buttons.
+	rm.poll(remoteStatus{Live: true, Scene: "LIVE"}, t0)
+	if b, _ := json.Marshal(rm.snapshot(t0)); !strings.Contains(string(b), `"scenes":[]`) {
+		t.Fatalf("no scenes: %s", b)
+	}
+	for _, id := range []string{"CUSTOM_1", "CUSTOM_2", "CUSTOM_3", "CUSTOM_4"} {
+		if !remoteScenes[id] {
+			t.Fatalf("%s must be a scene mods can pick", id)
+		}
+	}
+	rm.add("CUSTOM_1", t0)
+	if cmds := rm.poll(remoteStatus{}, t0); len(cmds) != 1 || cmds[0].Scene != "CUSTOM_1" {
+		t.Fatalf("pick: %+v", cmds)
+	}
+	if !strings.Contains(remotePage, `id="own"`) || !strings.Contains(remotePage, "textContent=x.name") {
+		t.Fatal("the page must draw the streamer's own scenes, as text")
+	}
+}

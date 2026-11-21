@@ -45,14 +45,15 @@ data class CardOverlayPlan(
  * [CardStore.socials]): a countdown, the time away, chat and a socials line. Pure, so the words, the end states and
  * which card gets what are unit-tested; [OverlayComposer] draws them and [StreamService] times them.
  *
- * Only the cards the engine lays the overlay over get them: BRB, Starting soon and Ending (full-frame, chosen) and
- * Camera lost (drawn in Live's place, so Live's layers already show on it). Never Privacy or Weak signal, where the
+ * Only the cards the engine lays the overlay over get them: BRB, Starting soon, Ending and the streamer's own scenes
+ * (full-frame, chosen) and Camera lost (drawn in Live's place, so Live's layers already show on it). Never Privacy or Weak signal, where the
  * engine hides every layer (Privacy promises stillness; Weak signal must stay cheap to send), and never Signal lost,
  * which the BRB server loops from a still encoded at the start of the stream, so nothing on it can tick.
  */
 object LiveElements {
-    private val DRAWN_ON = setOf(Slates.Card.STARTING_SOON, Slates.Card.BRB, Slates.Card.ENDING, Slates.Card.CAMERA_LOST)
-    private val COUNTS_DOWN = setOf(Slates.Card.STARTING_SOON, Slates.Card.BRB, Slates.Card.ENDING)
+    private val OWN = Slates.Card.entries.filter { it.isCustom }.toSet()
+    private val DRAWN_ON = setOf(Slates.Card.STARTING_SOON, Slates.Card.BRB, Slates.Card.ENDING, Slates.Card.CAMERA_LOST) + OWN
+    private val COUNTS_DOWN = setOf(Slates.Card.STARTING_SOON, Slates.Card.BRB, Slates.Card.ENDING) + OWN
 
     /** Longest countdown honoured, and the longest time any figure shows, so the block's width stays bounded. */
     const val MAX_COUNTDOWN_MINUTES = 24 * 60

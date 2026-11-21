@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -52,15 +53,23 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import app.irlsupreme.engine.Scene
+import app.irlsupreme.engine.video.CardFont
 import app.irlsupreme.engine.video.CardLayout
 import app.irlsupreme.engine.video.CardStyle
+import app.irlsupreme.engine.video.CardTextSize
+import app.irlsupreme.engine.video.CardTypefaces
 import app.irlsupreme.engine.video.SlateAudio
 import app.irlsupreme.engine.video.Slates
 import app.irlsupreme.engine.video.StreamPalette
@@ -68,6 +77,8 @@ import app.irlsupreme.service.CardBackground
 import app.irlsupreme.service.CardRules
 import app.irlsupreme.service.CardStore
 import app.irlsupreme.service.CardText
+import app.irlsupreme.service.ColorMath
+import app.irlsupreme.service.SceneNames
 import app.irlsupreme.service.cardWebUrl
 import app.irlsupreme.ui.theme.FbShape
 import app.irlsupreme.ui.theme.FbSpace
@@ -78,17 +89,38 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** The cards in the order a stream meets them: the four you choose, then the three that switch on by themselves. */
+/** The built-in cards in the order a stream meets them: the four you choose, then the three that switch on by themselves. */
 internal val CARD_ORDER = listOf(
     Slates.Card.STARTING_SOON, Slates.Card.BRB, Slates.Card.PRIVACY, Slates.Card.ENDING,
     Slates.Card.SIGNAL_LOST, Slates.Card.WEAK_SIGNAL, Slates.Card.CAMERA_LOST,
 )
 
-/** A card's short name for the chooser ("Signal lost"), from its default headline where that's the name. */
-internal fun cardName(card: Slates.Card): String = when (card) {
-    Slates.Card.BRB -> "BRB"
-    Slates.Card.ENDING -> "Ending"
+/** The chooser's cards: the four you choose, your own scenes that exist ([created]), then the automatic three. */
+internal fun cardOrder(created: Map<Scene, String>): List<Slates.Card> =
+    CARD_ORDER.take(4) + created.keys.mapNotNull { Slates.Card.of(it) } + CARD_ORDER.drop(4)
+
+/** A card's short name for the chooser ("Signal lost"), from its default headline where that's the name; yours by theirs. */
+internal fun cardName(card: Slates.Card, created: Map<Scene, String> = SceneNames.created): String = when {
+    card == Slates.Card.BRB -> "BRB"
+    card == Slates.Card.ENDING -> "Ending"
+    card.isCustom -> SceneNames.sceneOf(card)?.let { SceneNames.name(it, created) } ?: card.headline
     else -> card.headline
+}
+
+/** What an accent or text colour is, for the line under its swatches: its name, and a word if it could read as a warning. */
+internal fun colorHelp(argb: Int, preset: Boolean): String = when {
+    preset -> "${CardRules.accentName(argb)}. Picked so it never reads as a signal colour."
+    ColorMath.looksLikeSignal(argb) -> "${ColorMath.name(argb)}. Close to a warning colour: viewers might read it as one."
+    else -> "${ColorMath.name(argb)}, your own colour."
+}
+
+/** The Text colour presets: the brand's Bone and Ink. */
+internal val TEXT_PRESETS = listOf(StreamPalette.BONE, StreamPalette.INK)
+
+internal fun textPresetName(argb: Int): String = when (argb) {
+    StreamPalette.BONE -> "Bone"
+    StreamPalette.INK -> "Ink"
+    else -> ColorMath.name(argb)
 }
 
 /** True for the cards nobody chooses; their help says the label stays so viewers know. */
@@ -123,8 +155,9 @@ internal fun backgroundValue(card: Slates.Card, kind: CardBackground): String = 
 }
 
 /**
- * Settings › Scene cards: your own words, picture, background, layout, accent, live elements and web page on each card
- * viewers see instead of your camera, the automatic ones included. A live preview drawn by the stream's own card code,
+ * Settings › Scene cards: your own words, face, size and colour, picture, background, layout, accent, live elements and
+ * web page on each card viewers see instead of your camera, the automatic ones included, and up to four scenes of your
+ * own. A live preview drawn by the stream's own card code,
  * at the stream's shape. Sections run from what every card has (words) to what only power users want (a web page).
  */
 @Composable
@@ -134,9 +167,13 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     val scope = rememberCoroutineScope()
     val texts by CardStore.state(ctx).collectAsState()
     val socials by CardStore.socialsState(ctx).collectAsState()
+    val created = SceneNames.created(texts)
     var picked by rememberSaveable { mutableStateOf(Slates.Card.BRB.name) }
-    val card = Slates.Card.valueOf(picked)
+    // One of your own scenes that's been deleted falls back to BRB.
+    val card = Slates.Card.valueOf(picked).takeIf { !it.isCustom || texts[it]?.created == true } ?: Slates.Card.BRB
     val t = texts[card] ?: CardText()
+    val scene = SceneNames.sceneOf(card)
+    var deleting by remember { mutableStateOf(false) }
     var pictureError by rememberSaveable { mutableStateOf(false) }
     var backgroundError by rememberSaveable { mutableStateOf<String?>(null) }
     var backgroundBusy by remember { mutableStateOf(false) }
@@ -163,20 +200,64 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         "What viewers see instead of your camera. The small label at the top and the sound line at the bottom stay, so " +
             "viewers always know when a card switched on by itself and what they can hear.",
     )
-    KeyChoice("Card", CARD_ORDER, card, ::cardName) { picked = it.name; pictureError = false; backgroundError = null }
+    KeyChoice("Card", cardOrder(created), card, { cardName(it, created) }) { picked = it.name; pictureError = false; backgroundError = null }
+    if (created.size < Scene.CUSTOM.size) {
+        FbButton(
+            "Add a scene of your own", {
+                CardStore.createScene(ctx)?.let { picked = it.name; pictureError = false; backgroundError = null }
+            },
+            Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text,
+        )
+        if (created.isEmpty()) HelpText("Up to ${Scene.CUSTOM.size}, for things like Lunch or Q&A. They show in Scenes, on the mod remote and with !scene.")
+    }
 
     CardPreview(c, card, t)
 
+    // --- Your own scene: its name ---
+    if (scene != null && card.isCustom) {
+        SectionHeader("Scene")
+        val problem = SceneNames.nameProblem(t.name, scene, created)
+        val shown = SceneNames.name(scene, created)
+        NameField(
+            t.name, { CardStore.setSceneName(ctx, card, it) },
+            supporting = problem ?: "Shows in Scenes and on the mod remote. Mods can type !scene ${shown.lowercase()}. " +
+                "Up to ${SceneNames.MAX_NAME} characters.",
+            isError = problem != null,
+            placeholder = SceneNames.defaultName(scene),
+        )
+    }
+
     // --- Words ---
     SectionHeader("Words")
+    val ownHeadline = if (scene != null && card.isCustom) SceneNames.name(scene, created) else card.headline
     PlainField(
         t.headline, { CardStore.setText(ctx, card, it, t.sub) }, "Headline",
-        supporting = "Blank shows “${card.headline}”. Up to ${CardStore.MAX_HEADLINE} characters.",
+        supporting = "Blank shows “$ownHeadline”. Up to ${CardStore.MAX_HEADLINE} characters.",
     )
+    val ownSub = Slates.copy(card, SlateAudio.ON, CardStyle.DEFAULT).sub
     PlainField(
         t.sub, { CardStore.setText(ctx, card, t.headline, it) }, "Line under it",
-        supporting = "Blank shows “${Slates.copy(card, SlateAudio.ON, CardStyle.DEFAULT).sub}”. Up to ${CardStore.MAX_SUB} characters.",
+        supporting = (if (ownSub.isEmpty()) "Blank shows no line." else "Blank shows “$ownSub”.") + " Up to ${CardStore.MAX_SUB} characters.",
     )
+    ChoiceLabel("Font")
+    FontChoice(t.font) { CardStore.setFont(ctx, card, it) }
+    if (!CardTypefaces.shows(t.font)) HelpText("${t.font.label} isn't on this phone, so it shows as Sans.")
+    ChoiceLabel("Size")
+    KeyChoice("Text size", CardTextSize.entries, t.textSize, { it.label }) { CardStore.setTextSize(ctx, card, it) }
+    ChoiceLabel("Text colour")
+    ColorChoice("Text colour", t.textColor, TEXT_PRESETS, { CardStore.setTextColor(ctx, card, it) }, defaultLabel = "Automatic", presetName = ::textPresetName)
+    HelpText(
+        t.textColor?.let { if (it in TEXT_PRESETS) "${textPresetName(it)}." else colorHelp(it, preset = false) }
+            ?: "Bone on dark cards, Ink on light ones.",
+    )
+    // Said plainly when the words would be hard to read; the background's colour is known once it's loaded.
+    val contrast by produceState<String?>(null, card, t) {
+        repeat(3) {
+            value = CardRules.contrastProblem(card, t, CardStore.backgroundTone(card))
+            delay(500)
+        }
+    }
+    contrast?.let { Caution(it) }
 
     // --- Picture ---
     SectionHeader("Picture")
@@ -222,11 +303,8 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     }
     if (t.layout == CardLayout.FULL_PICTURE && !t.hasPicture) HelpText("This layout is built around your picture. Add one under Picture.")
     ChoiceLabel("Accent")
-    AccentChoice(t.accent) { CardStore.setAccent(ctx, card, it) }
-    HelpText(
-        t.accent?.let { "${CardRules.accentName(it)}. Picked so it never reads as a signal colour." }
-            ?: "The card's own Ink and Bone.",
-    )
+    ColorChoice("Accent", t.accent, Slates.ACCENTS, { CardStore.setAccent(ctx, card, it) }, presetName = CardRules::accentName)
+    HelpText(t.accent?.let { colorHelp(it, preset = it in Slates.ACCENTS) } ?: "The card's own Ink and Bone.")
 
     // --- Live ---
     SectionHeader("Live")
@@ -268,6 +346,31 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         FbButton(
             "Back to the card's own look", { CardStore.reset(ctx, card); pictureError = false; backgroundError = null },
             Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Text,
+        )
+    }
+    if (card.isCustom) {
+        if (!t.isCustom) {
+            Spacer(Modifier.height(16.dp))
+            Hairline(color = colors.rule)
+        }
+        FbButton("Delete this scene", { deleting = true }, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Text)
+    }
+    if (deleting) {
+        val name = cardName(card, created)
+        AlertDialog(
+            onDismissRequest = { deleting = false },
+            title = { Text("Delete $name?", style = FbType.cta) },
+            text = { Text("Its name, words, picture and background go. If it's on screen now, switch scenes first.") },
+            confirmButton = {
+                FbButton("Delete", {
+                    deleting = false
+                    CardStore.deleteScene(ctx, card)
+                    picked = Slates.Card.BRB.name
+                }, kind = FbButtonKind.Text)
+            },
+            dismissButton = { FbButton("Cancel", { deleting = false }, kind = FbButtonKind.Text) },
+            shape = FbShape.medium, containerColor = colors.s1, titleContentColor = colors.text, textContentColor = colors.text2,
+            tonalElevation = 0.dp,
         )
     }
 
@@ -347,43 +450,66 @@ private fun DrawScope.drawLayoutSchematic(l: CardLayout, frame: Color, picture: 
 }
 
 /**
- * "Default" and the curated accents as a radio group. Each swatch is named for TalkBack ("Sky"), and the chosen one gets
- * a Bone ring and an Ink square inside, so the choice never rests on colour alone.
+ * The fonts as a radio group of keys, each name set in its own face (a family the phone lacks shows in Sans, as it
+ * would on stream).
  */
 @Composable
-private fun AccentChoice(selected: Int?, onPick: (Int?) -> Unit) {
+private fun FontChoice(selected: CardFont, onPick: (CardFont) -> Unit) {
     val c = LocalFbColors.current
     FlowRow(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).semantics { contentDescription = "Accent" }.selectableGroup(),
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).semantics { contentDescription = "Font" }.selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
-        itemVerticalAlignment = Alignment.CenterVertically,
     ) {
-        val defaultChosen = selected == null
-        Box(
-            Modifier.heightIn(min = FbSpace.target)
-                .background(if (defaultChosen) c.text else Color.Transparent, FbShape.medium)
-                .then(if (defaultChosen) Modifier else Modifier.border(FbShape.stroke, c.ruleStrong, FbShape.medium))
-                .selectable(defaultChosen, role = Role.RadioButton) { onPick(null) }
-                .padding(horizontal = 14.dp),
-            contentAlignment = Alignment.Center,
-        ) { Text("Default", style = FbType.rowValue, color = if (defaultChosen) c.bg else c.text) }
-        Slates.ACCENTS.forEach { a ->
-            val chosen = a == selected
-            val name = CardRules.accentName(a)
+        CardFont.entries.forEach { f ->
+            val chosen = f == selected
+            val family = remember(f) { runCatching { FontFamily(CardTypefaces.head(f)) }.getOrNull() }
             Box(
-                Modifier.size(FbSpace.target)
-                    .then(if (chosen) Modifier.border(FbShape.outline, c.text, FbShape.small) else Modifier)
-                    .selectable(chosen, role = Role.RadioButton) { onPick(a) }
-                    .semantics { contentDescription = name },
+                Modifier.heightIn(min = FbSpace.target)
+                    .background(if (chosen) c.text else Color.Transparent, FbShape.medium)
+                    .then(if (chosen) Modifier else Modifier.border(FbShape.stroke, c.ruleStrong, FbShape.medium))
+                    .selectable(chosen, role = Role.RadioButton) { onPick(f) }
+                    .padding(horizontal = 14.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Box(Modifier.size(34.dp).background(Color(a), FbShape.small), contentAlignment = Alignment.Center) {
-                    if (chosen) Box(Modifier.size(10.dp).background(Color(StreamPalette.INK)))
-                }
+                Text(f.label, style = FbType.rowValue.copy(fontFamily = family ?: FbType.rowValue.fontFamily), color = if (chosen) c.bg else c.text)
             }
         }
     }
+}
+
+/** One of your own scenes' name: kept as typed, the problem (a name !scene can't reach) said under it. */
+@Composable
+private fun NameField(text: String, onChange: (String) -> Unit, supporting: String, isError: Boolean, placeholder: String) {
+    val c = LocalFbColors.current
+    OutlinedTextField(
+        value = text, onValueChange = onChange, label = { Text("Name") }, singleLine = true,
+        placeholder = { Text(placeholder) },
+        textStyle = FbType.rowValue,
+        isError = isError,
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
+        supportingText = { Text(supporting) },
+        shape = FbShape.medium,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = c.text, unfocusedTextColor = c.text, errorTextColor = c.text,
+            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, errorContainerColor = Color.Transparent,
+            cursorColor = c.text, errorCursorColor = c.error,
+            focusedBorderColor = c.text, unfocusedBorderColor = c.ruleStrong, errorBorderColor = c.error,
+            focusedLabelColor = c.text, unfocusedLabelColor = c.text2, errorLabelColor = c.error,
+            focusedPlaceholderColor = c.text2, unfocusedPlaceholderColor = c.text2,
+            focusedSupportingTextColor = c.text2, unfocusedSupportingTextColor = c.text2, errorSupportingTextColor = c.error,
+        ),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+}
+
+/** A plain heads-up in the text colour, read out when it appears: not an error, the choice stays the streamer's. */
+@Composable
+private fun Caution(text: String) {
+    Text(
+        text, style = FbType.help, color = LocalFbColors.current.text,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+    )
 }
 
 /**

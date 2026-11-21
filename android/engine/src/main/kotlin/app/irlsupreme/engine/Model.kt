@@ -182,8 +182,21 @@ data class StreamConfig(
  * Scenes are what viewers see; switching never rebuilds the pipeline. Every scene but [LIVE] is a still card drawn on
  * the phone (the camera isn't sent). The automatic Weak signal screen isn't one of these: it stands in for [LIVE] only
  * ([EngineState.weakSignal]).
+ *
+ * [CUSTOM_1] to [CUSTOM_4] are the streamer's own scenes ("Lunch", "Driving"): fixed slots, each named and switched on
+ * in Settings › Scene cards, so the enum's names stay stable in logs and on the mod remote whatever they're called.
  */
-enum class Scene { LIVE, BRB, PRIVACY, STARTING_SOON, ENDING }
+enum class Scene {
+    LIVE, BRB, PRIVACY, STARTING_SOON, ENDING, CUSTOM_1, CUSTOM_2, CUSTOM_3, CUSTOM_4;
+
+    /** One of the streamer's own scenes. */
+    val isCustom: Boolean get() = this in CUSTOM
+
+    companion object {
+        /** The streamer's own scenes, in slot order. */
+        val CUSTOM: List<Scene> = listOf(CUSTOM_1, CUSTOM_2, CUSTOM_3, CUSTOM_4)
+    }
+}
 
 /** The mic's real state: [UNAVAILABLE] couldn't open, [FAILING] stopped delivering, [SILENCED] delivers only zeros. */
 enum class AudioInput { OK, UNAVAILABLE, FAILING, SILENCED }
@@ -447,7 +460,7 @@ sealed interface EngineEvent {
     data class Note(override val line: String) : EngineEvent
 }
 
-/** [BRB]: any scene but Live (BRB, Privacy, Starting soon, Ending). [WEAK_SCREEN]: the automatic Weak signal screen. */
+/** [BRB]: any scene but Live (BRB, Privacy, Starting soon, Ending, your own). [WEAK_SCREEN]: the automatic Weak signal screen. */
 enum class Health { OFF, CONNECTING, GREAT, WEAK, WEAK_SCREEN, HOT, CAMERA_LOST, BRB, RECONNECTING, FAILED }
 
 /** What happened in one stream, for the end-of-stream recap. */

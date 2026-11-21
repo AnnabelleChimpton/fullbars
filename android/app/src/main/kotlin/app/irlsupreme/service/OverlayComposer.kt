@@ -177,27 +177,16 @@ object OverlayComposer {
     }
 
     /**
-     * Where CLASSIC's headline starts on [plan]'s card, measured as the engine lays it out ([Slates.fitLines] in the
-     * headline face), so a short headline leaves chat its room and a long one pushes chat up. Null for the other
-     * layouts, the automatic cards and web pages (their floor doesn't depend on it) or when it can't be measured, in
-     * which case [CardZones.chatFloor] assumes the highest a headline can reach.
+     * Where CLASSIC's headline starts on [plan]'s card, measured as the engine lays it out (the streamer's words, face
+     * and size: [Slates.classicHeadlineTop]), so a short headline leaves chat its room and a long one pushes chat up.
+     * Null for the other layouts, the automatic cards and web pages (their floor doesn't depend on it) or when it can't
+     * be measured, in which case [CardZones.chatFloor] assumes the highest a headline can reach.
      */
     private fun classicHeadlineTop(plan: CardOverlayPlan, width: Int, height: Int): Float? {
         val look = plan.look
         if (look.web || look.layout != CardLayout.CLASSIC || plan.card.family == Slates.Family.AUTOMATIC) return null
-        val headline = look.headline ?: return null
-        return runCatching {
-            val u = Slates.unit(width, height)
-            val head = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = BrandType.xc800; letterSpacing = -0.01f }
-            val fit = Slates.fitLines(headline, width - 2 * CardZones.MARGIN_U * u, 17f * u, 12f * u, { t, size ->
-                head.textSize = size
-                head.measureText(t)
-            })
-            head.textSize = fit.size
-            val r = Rect()
-            head.getTextBounds("H", 0, 1, r)
-            CardZones.classicHeadlineTop(width, height, fit.lines.size, fit.size, r.height().toFloat())
-        }.getOrNull()
+        if (look.headline == null) return null
+        return runCatching { Slates.classicHeadlineTop(width, height, plan.card) }.getOrNull()
     }
 
     /**

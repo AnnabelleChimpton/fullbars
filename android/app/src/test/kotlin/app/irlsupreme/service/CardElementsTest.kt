@@ -63,6 +63,13 @@ class CardElementsTest {
         for (c in listOf(Slates.Card.STARTING_SOON, Slates.Card.BRB, Slates.Card.ENDING, Slates.Card.CAMERA_LOST)) {
             assertTrue(c.name, LiveElements.plan(c, all, "@you", 0, false, plain) != null)
         }
+        // Your own scenes get everything BRB does, counting down to coming back.
+        for (c in Slates.Card.entries.filter { it.isCustom }) {
+            val p = LiveElements.plan(c, all, "@you", 0, false, plain)
+            assertTrue(c.name, p != null && p.timers.size == 2 && p.chat)
+            assertEquals("BACK IN", p!!.timers[0].label)
+            assertEquals(Slates.Card.CUSTOM_1, LiveElements.cardOnScreen(Scene.CUSTOM_1, false, "phone"))
+        }
         // Server-looped (Signal lost, and Weak signal's upload) and the cards the engine keeps bare.
         for (c in listOf(Slates.Card.SIGNAL_LOST, Slates.Card.WEAK_SIGNAL, Slates.Card.PRIVACY)) {
             assertNull(c.name, LiveElements.plan(c, all, "@you", 0, false, plain))
