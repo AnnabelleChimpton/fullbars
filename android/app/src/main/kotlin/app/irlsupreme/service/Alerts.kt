@@ -194,8 +194,8 @@ object AlertHold {
         else -> true
     }
 
-    /** The chosen full-frame cards, where an alert sits higher (30%) to clear the headline. */
-    fun onCard(scene: Scene): Boolean = scene == Scene.BRB || scene == Scene.STARTING_SOON || scene == Scene.ENDING
+    /** The chosen full-frame cards (your own scenes too), where an alert sits higher (30%) to clear the headline. */
+    fun onCard(scene: Scene): Boolean = scene == Scene.BRB || scene == Scene.STARTING_SOON || scene == Scene.ENDING || scene.isCustom
 }
 
 /**

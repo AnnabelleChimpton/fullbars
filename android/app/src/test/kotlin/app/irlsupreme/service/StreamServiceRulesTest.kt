@@ -66,7 +66,7 @@ class StreamServiceRulesTest {
     }
 
     @Test fun `alerts sit higher only on the full-frame chosen cards`() {
-        assertEquals(setOf(Scene.BRB, Scene.STARTING_SOON, Scene.ENDING), Scene.entries.filter { AlertHold.onCard(it) }.toSet())
+        assertEquals(setOf(Scene.BRB, Scene.STARTING_SOON, Scene.ENDING) + Scene.CUSTOM, Scene.entries.filter { AlertHold.onCard(it) }.toSet())
     }
 
     @Test fun `the chime starts so its attack lands on the first full frame`() {
