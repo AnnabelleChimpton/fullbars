@@ -38,8 +38,18 @@ enum class AlertTier {
  * stepping down, wipe out. [leftPx]/[topPx] place its top-left corner in the output frame.
  *
  * The engine draws the time-left rule itself, over the bitmap (see [AlertRule]); the bitmap leaves that strip empty.
+ * [scale] is the size the bitmap was drawn at against the frame's u (Small, Large, or shrunk to fit), so the rule
+ * scales with it and stays in the strip; [ruleColor] matches the alert's text.
  */
-class AlertGraphic(val bitmap: Bitmap, val leftPx: Int, val topPx: Int, val tier: AlertTier, val dwellMs: Long)
+class AlertGraphic(
+    val bitmap: Bitmap,
+    val leftPx: Int,
+    val topPx: Int,
+    val tier: AlertTier,
+    val dwellMs: Long,
+    val scale: Float = 1f,
+    val ruleColor: Int = AlertRule.color(tier),
+)
 
 /**
  * Where the engine draws an alert's time-left rule inside the alert's bitmap, in u = min(w, h) / 100 of the output
@@ -60,6 +70,21 @@ object AlertRule {
 
     /** Bone on the Ink plates, Ink on the Bone slab. */
     fun color(tier: AlertTier): Int = if (tier == AlertTier.LOUD) StreamPalette.INK else StreamPalette.BONE
+
+    /**
+     * The rule inside an alert drawn at [left], [top], [w] x [h] px, where the alert's own unit is [u] (the frame's u
+     * times the alert's scale). Pure, so the engine and the app's previews put it in the same place.
+     */
+    fun box(left: Float, top: Float, w: Float, h: Float, u: Float): Box {
+        val bottom = top + h - BOTTOM_U * u
+        return Box(left + INSET_U * u, bottom - HEIGHT_U * u, left + w - INSET_U * u, bottom, GAP_U * u, LINE_U * u)
+    }
+
+    /** A rule's edges in px, with its segment gap and hollow-segment line. */
+    data class Box(val left: Float, val top: Float, val right: Float, val bottom: Float, val gap: Float, val line: Float) {
+        val width: Float get() = right - left
+        val height: Float get() = bottom - top
+    }
 }
 
 /**
@@ -159,6 +184,8 @@ internal class AlertLayer(private val outW: Int, private val outH: Int) {
     private var tex = 0
     private var tier = AlertTier.QUIET
     private var dwellMs = 0L
+    private var ruleBox = AlertRule.box(0f, 0f, 0f, 0f, 0f)
+    private var ruleColor = AlertRule.color(AlertTier.QUIET)
     private var left = 0f
     private var top = 0f
     private var w = 0f
@@ -193,10 +220,9 @@ internal class AlertLayer(private val outW: Int, private val outH: Int) {
             startNs = atNs
             exitAtMs = null
             pos = GlUtil.rectMatrix(left, top, left + w, top + h, outW, outH)
-            val rl = left + AlertRule.INSET_U * u
-            val rr = left + w - AlertRule.INSET_U * u
-            val rb = top + h - AlertRule.BOTTOM_U * u
-            rulePos = GlUtil.rectMatrix(rl, rb - AlertRule.HEIGHT_U * u, rr, rb, outW, outH)
+            ruleBox = AlertRule.box(left, top, w, h, u * g.scale)
+            ruleColor = g.ruleColor
+            rulePos = GlUtil.rectMatrix(ruleBox.left, ruleBox.top, ruleBox.right, ruleBox.bottom, outW, outH)
         } finally {
             g.bitmap.recycle()
         }
@@ -223,11 +249,10 @@ internal class AlertLayer(private val outW: Int, private val outH: Int) {
         GLES30.glScissor(x0, y0, x1 - x0, y1 - y0)
         try {
             program.draw(tex, GlUtil.FLIP_V, pos, premultiplied = true)
-            val ruleW = (w - 2 * AlertRule.INSET_U * u) * sx
-            val ruleH = AlertRule.HEIGHT_U * u * sy
+            val b = ruleBox
             rule.draw(
-                rulePos, ruleW, ruleH, AlertRule.SEGMENTS, AlertMotion.ruleRemaining(tier, dwellMs, t),
-                gapPx = AlertRule.GAP_U * u * sx, linePx = maxOf(1f, AlertRule.LINE_U * u * sx), color = AlertRule.color(tier),
+                rulePos, b.width * sx, b.height * sy, AlertRule.SEGMENTS, AlertMotion.ruleRemaining(tier, dwellMs, t),
+                gapPx = b.gap * sx, linePx = maxOf(1f, b.line * sx), color = ruleColor,
             )
         } finally {
             GLES30.glDisable(GLES30.GL_SCISSOR_TEST)

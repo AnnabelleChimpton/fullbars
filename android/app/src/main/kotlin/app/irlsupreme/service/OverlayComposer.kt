@@ -18,8 +18,11 @@ import android.text.style.TypefaceSpan
 import android.util.Size
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.toColorInt
+import androidx.core.graphics.withClip
 import androidx.core.graphics.withTranslation
 import app.irlsupreme.engine.audio.AlertSounds
+import app.irlsupreme.engine.video.AlertGraphic
+import app.irlsupreme.engine.video.AlertRule
 import app.irlsupreme.engine.video.AlertTier
 import app.irlsupreme.engine.video.BrandDraw
 import app.irlsupreme.engine.video.BrandType
@@ -357,65 +360,105 @@ object OverlayComposer {
 
     /**
      * One alert, drawn once into its own bitmap, no bigger than [OverlayLayout.ALERT_MAX_W] x
-     * [OverlayLayout.ALERT_MAX_H] of the frame. Loudness shows by size and inversion, never hue:
+     * [OverlayLayout.ALERT_MAX_H] of the frame at Normal [size] (Small and Large scale that box too). Loudness shows
+     * by size and inversion, never hue:
      * - QUIET (a follow): an Ink 92% plate, one line, `FOLLOW` in mono then the name.
      * - MEDIUM (subs, gifts, cheers, tips): the same plate, two lines, the amount in mono on the right.
      * - LOUD (a raid): a Bone slab with a 0.35u Ink keyline (19.4:1 against a white sky) and the mark.
-     * The foot of each keeps room for the engine's 12-step time-left rule, which it draws over this bitmap.
+     * Those are the default colours; the streamer's own ([AlertCard.paint], resolved by [AlertColors]) take their
+     * place, and an accent adds a keyline or a stripe. The foot of each keeps room for the engine's 12-step time-left
+     * rule, which it draws over this bitmap at [AlertDrawn.scale].
      */
-    fun alertBitmap(card: AlertCard, frameW: Int, frameH: Int): Pair<Bitmap, AlertTier> {
+    fun alertBitmap(card: AlertCard, frameW: Int, frameH: Int, size: AlertSize = AlertSize.NORMAL): AlertDrawn {
         val tier = card.tier
-        val maxW = frameW * OverlayLayout.ALERT_MAX_W
-        val maxH = frameH * OverlayLayout.ALERT_MAX_H
-        var u = OverlayLayout.unit(frameW, frameH)
-        var size = drawAlert(null, card, tier, u, maxW)
+        val ink = AlertColors.resolve(card.paint, tier)
+        val frameU = OverlayLayout.unit(frameW, frameH)
+        val maxW = frameW * OverlayLayout.ALERT_MAX_W * size.factor
+        val maxH = frameH * OverlayLayout.ALERT_MAX_H * size.factor
+        var u = frameU * size.factor
+        var measured = drawAlert(null, card, ink, tier, u, maxW)
         // In landscape a raid's slab is close to a quarter of the height: shrink the whole thing rather than clip it.
-        if (size.second > maxH) {
-            u *= maxH / size.second
-            size = drawAlert(null, card, tier, u, maxW)
+        if (measured.second > maxH) {
+            u *= maxH / measured.second
+            measured = drawAlert(null, card, ink, tier, u, maxW)
         }
-        val bmp = createBitmap(ceil(size.first).toInt().coerceAtLeast(1), ceil(size.second).toInt().coerceAtLeast(1))
-        drawAlert(Canvas(bmp), card, tier, u, maxW)
-        return bmp to tier
+        val bmp = createBitmap(ceil(measured.first).toInt().coerceAtLeast(1), ceil(measured.second).toInt().coerceAtLeast(1))
+        drawAlert(Canvas(bmp), card, ink, tier, u, maxW)
+        return AlertDrawn(bmp, tier, u / frameU, ink.rule)
     }
 
+    /** A drawn alert: the bitmap, its tier, the scale it was drawn at against the frame's u, and its rule's colour. */
+    data class AlertDrawn(val bitmap: Bitmap, val tier: AlertTier, val scale: Float, val ruleColor: Int)
+
     /**
-     * Where an alert of [size] goes on a [frameW] x [frameH] stream ([OverlayLayout.alertBox]): left on the title-safe
-     * margin, 58% down on camera and 30% on a full-frame card ([onCard]), mirrored right when [occupied] has the
-     * lower-left. Pixels, top-left.
+     * Where an alert of [size] goes on a [frameW] x [frameH] stream. [AlertPlace.AUTO] is [OverlayLayout.alertBox]:
+     * left on the title-safe margin, 58% down on camera and 30% on a full-frame card ([onCard]), mirrored right when
+     * [occupied] has the lower-left. A fixed [place] is [AlertPlacement.box]. Pixels, top-left.
      */
-    fun alertPosition(frameW: Int, frameH: Int, onCard: Boolean, occupied: Set<Corner>, size: Size): Point {
-        val b = OverlayLayout.alertBox(frameW, frameH, onCard, occupied, size.width.toFloat(), size.height.toFloat())
+    fun alertPosition(frameW: Int, frameH: Int, onCard: Boolean, occupied: Set<Corner>, size: Size, place: AlertPlace = AlertPlace.AUTO): Point {
+        val b = AlertPlacement.box(place, frameW, frameH, onCard, occupied, size.width.toFloat(), size.height.toFloat())
         return Point(Math.round(b.x), Math.round(b.y))
     }
 
-    /** Measures (with [c] null) or draws one alert; returns its width and height in px. */
-    private fun drawAlert(c: Canvas?, a: AlertCard, tier: AlertTier, u: Float, maxW: Float): Pair<Float, Float> = when (tier) {
-        AlertTier.QUIET -> quiet(c, a, u, maxW)
-        AlertTier.MEDIUM -> medium(c, a, u, maxW)
-        AlertTier.LOUD -> loud(c, a, u, maxW)
+    /**
+     * [card] as the engine's alert layer takes it: drawn at the streamer's size, placed where they chose, held for its
+     * kind's length. The stream and every preview build it here, so they agree.
+     */
+    fun alertGraphic(card: AlertCard, frameW: Int, frameH: Int, onCard: Boolean, occupied: Set<Corner>, options: AlertOptions): AlertGraphic {
+        val d = alertBitmap(card, frameW, frameH, options.size)
+        val at = alertPosition(frameW, frameH, onCard, occupied, Size(d.bitmap.width, d.bitmap.height), options.place)
+        return AlertGraphic(d.bitmap, at.x, at.y, d.tier, card.dwellMs, d.scale, d.ruleColor)
     }
 
-    private val plateInk get() = StreamPalette.withAlpha(StreamPalette.INK, StreamPalette.ALERT_PLATE_ALPHA)
+    /**
+     * [g] as it looks fully shown, for a preview: the bitmap where the stream puts it and the engine's time-left rule
+     * full, in the same place ([AlertRule.box]) and colour. Recycles [g]'s bitmap.
+     */
+    fun drawAlertStill(canvas: Canvas, g: AlertGraphic, frameW: Int, frameH: Int) {
+        val b = g.bitmap
+        val left = g.leftPx.toFloat()
+        val top = g.topPx.toFloat()
+        canvas.drawBitmap(b, left, top, null)
+        val r = AlertRule.box(left, top, b.width.toFloat(), b.height.toFloat(), OverlayLayout.unit(frameW, frameH) * g.scale)
+        val n = AlertRule.SEGMENTS
+        val segW = (r.width - r.gap * (n - 1)) / n
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = g.ruleColor }
+        for (i in 0 until n) {
+            val x = r.left + i * (segW + r.gap)
+            canvas.drawRect(x, r.top, x + segW, r.bottom, p)
+        }
+        b.recycle()
+    }
+
+    /** Measures (with [c] null) or draws one alert; returns its width and height in px. */
+    private fun drawAlert(c: Canvas?, a: AlertCard, ink: AlertInk, tier: AlertTier, u: Float, maxW: Float): Pair<Float, Float> = when (tier) {
+        AlertTier.QUIET -> quiet(c, a, ink, u, maxW)
+        AlertTier.MEDIUM -> medium(c, a, ink, u, maxW)
+        AlertTier.LOUD -> loud(c, a, ink, u, maxW)
+    }
+
+    /** A label takes at most this share of the line, so a long one (a template with a name in it) leaves the name room. */
+    private const val LABEL_MAX_SHARE = 0.6f
 
     /** `FOLLOW` (mono 2.5u, text2) then the name (SC 600 4.2u, Bone) on one baseline, 3u padding. */
-    private fun quiet(c: Canvas?, a: AlertCard, u: Float, maxW: Float): Pair<Float, Float> {
+    private fun quiet(c: Canvas?, a: AlertCard, ink: AlertInk, u: Float, maxW: Float): Pair<Float, Float> {
         val pad = 3f * u
-        val labelP = label(2.5f * u, StreamPalette.TEXT2)
-        val nameP = paint(BrandType.sc600, 4.2f * u, StreamPalette.BONE)
+        val labelP = label(2.5f * u, ink.label)
+        val nameP = paint(BrandType.sc600, 4.2f * u, ink.text)
         val gap = 2f * u
         val baseline = pad + ascender(nameP)
         val h = baseline + nameP.fontMetrics.descent + pad
         val lead = pictureLead(a, h - 2 * pad, u)
-        val labelW = labelP.measureText(a.label)
+        val labelText = fit(a.label, labelP, (maxW - 2 * pad - lead) * LABEL_MAX_SHARE)
+        val labelW = labelP.measureText(labelText)
         val line = a.message ?: a.name
         val nameW = maxW - 2 * pad - lead - labelW - gap
         val name = fitShrink(line, nameP, nameW, a.message != null)
         val w = pad + lead + labelW + gap + nameP.measureText(name) + pad
         if (c != null) {
-            plate(c, RectF(0f, 0f, w, h), 0.5f * u, plateInk)
+            plated(c, w, h, u, ink)
             drawPicture(c, a, pad, pad, h - 2 * pad, u)
-            c.drawText(a.label, pad + lead, baseline, labelP)
+            c.drawText(labelText, pad + lead, baseline, labelP)
             c.drawText(name, pad + lead + labelW + gap, baseline, nameP)
         }
         return w to h
@@ -425,17 +468,18 @@ object OverlayComposer {
      * Label (mono 2.5u, text2) with the amount (mono 5.2u, Bone) right-aligned on the same baseline, then the name
      * (Archivo C 800 6.4u, Bone). At least 44u wide so the amount has somewhere to sit right.
      */
-    private fun medium(c: Canvas?, a: AlertCard, u: Float, maxW: Float): Pair<Float, Float> {
+    private fun medium(c: Canvas?, a: AlertCard, ink: AlertInk, u: Float, maxW: Float): Pair<Float, Float> {
         val pad = 3f * u
-        val labelP = label(2.5f * u, StreamPalette.TEXT2)
-        val amountP = paint(BrandType.mono500, 5.2f * u, StreamPalette.BONE)
-        val nameP = paint(BrandType.c800, 6.4f * u, StreamPalette.BONE)
+        val labelP = label(2.5f * u, ink.label)
+        val amountP = paint(BrandType.mono500, 5.2f * u, ink.text)
+        val nameP = paint(BrandType.c800, 6.4f * u, ink.text)
         val row1 = pad + (if (a.amount != null) ascender(amountP) else ascender(labelP))
         val row2 = row1 + 1.6f * u + ascender(nameP)
         val h = row2 + nameP.fontMetrics.descent + pad
         val lead = pictureLead(a, h - 2 * pad, u)
         val inner = maxW - 2 * pad - lead
-        val labelW = labelP.measureText(a.label)
+        val labelText = fit(a.label, labelP, inner * LABEL_MAX_SHARE)
+        val labelW = labelP.measureText(labelText)
         val gap = 3f * u
         val amount = a.amount?.let { fit(it, amountP, inner - labelW - gap) }
         val amountW = amount?.let { amountP.measureText(it) } ?: 0f
@@ -443,9 +487,9 @@ object OverlayComposer {
         val contentW = maxOf(44f * u - 2 * pad, labelW + (if (amount != null) gap + amountW else 0f), nameP.measureText(name))
         val w = minOf(maxW, contentW + 2 * pad + lead)
         if (c != null) {
-            plate(c, RectF(0f, 0f, w, h), 0.5f * u, plateInk)
+            plated(c, w, h, u, ink)
             drawPicture(c, a, pad, pad, h - 2 * pad, u)
-            c.drawText(a.label, pad + lead, row1, labelP)
+            c.drawText(labelText, pad + lead, row1, labelP)
             if (amount != null) c.drawText(amount, w - pad - amountW, row1, amountP)
             c.drawText(name, pad + lead, row2, nameP)
         }
@@ -457,15 +501,15 @@ object OverlayComposer {
      * (Archivo XC 800 10u), then the count (mono 4.6u) and "viewers" (SC 500). All Ink on Bone, inside a 0.35u Ink
      * keyline so the slab's edge holds against a white sky. At least 56u wide.
      */
-    private fun loud(c: Canvas?, a: AlertCard, u: Float, maxW: Float): Pair<Float, Float> {
+    private fun loud(c: Canvas?, a: AlertCard, ink: AlertInk, u: Float, maxW: Float): Pair<Float, Float> {
         val padT = 2.4f * u
         val padR = 3.4f * u
         val padB = 3.2f * u
         val padL = 3f * u
-        val labelP = paint(BrandType.c700, 3.2f * u, StreamPalette.INK).apply { letterSpacing = 0.2f }
-        val nameP = paint(BrandType.xc800, 10f * u, StreamPalette.INK)
-        val countP = paint(BrandType.mono500, 4.6f * u, StreamPalette.INK)
-        val unitP = paint(BrandType.sc500, 3.4f * u, StreamPalette.INK)
+        val labelP = paint(BrandType.c700, 3.2f * u, ink.label).apply { letterSpacing = 0.2f }
+        val nameP = paint(BrandType.xc800, 10f * u, ink.text)
+        val countP = paint(BrandType.mono500, 4.6f * u, ink.text)
+        val unitP = paint(BrandType.sc500, 3.4f * u, ink.text)
         val markSize = 4f * u
         // Heights first (they don't depend on the text's width), so a picture's width is known before the text fits.
         val labelCap = ascender(labelP)
@@ -482,7 +526,8 @@ object OverlayComposer {
         val unitGap = 1.4f * u
         val unitW = a.amountUnit?.let { unitP.measureText(it) } ?: 0f
         val row3W = countW + (if (a.amountUnit != null) unitGap + unitW else 0f)
-        val row1W = labelP.measureText(a.label) + 3f * u + markSize
+        val labelText = fit(a.label, labelP, inner - 3f * u - markSize)
+        val row1W = labelP.measureText(labelText) + 3f * u + markSize
         val contentW = maxOf(56f * u - padL - padR, row1W, nameP.measureText(name), row3W)
         val w = minOf(maxW, contentW + padL + padR + lead)
         val row1Base = row1Top + maxOf(labelCap, markSize) / 2 + labelCap / 2
@@ -491,20 +536,50 @@ object OverlayComposer {
         val row3 = if (count != null || a.amountUnit != null) row2 + 0.22f * nameP.textSize + 1.4f * u + ascender(countP) else row2
         val h = row3 + (if (row3 == row2) nameP.fontMetrics.descent else 0f) + padB
         if (c != null) {
-            val keyline = StreamPalette.SLAB_KEYLINE_U * u
-            val r = 0.5f * u
-            plate(c, RectF(0f, 0f, w, h), r, StreamPalette.INK)
-            plate(c, RectF(keyline, keyline, w - keyline, h - keyline), (r - keyline).coerceAtLeast(0f), StreamPalette.BONE)
+            plated(c, w, h, u, ink)
             drawPicture(c, a, padL, padT, h - padT - padB, u)
-            c.drawText(a.label, padL + lead, row1Base, labelP)
+            c.drawText(labelText, padL + lead, row1Base, labelP)
             val markTop = row1Top + (maxOf(labelCap, markSize) - markSize) / 2
-            BrandDraw.mark(c, w - padR - markSize, markTop, markSize, intArrayOf(BrandDraw.BAR_FULL, BrandDraw.BAR_FULL, BrandDraw.BAR_FULL), StreamPalette.INK)
+            BrandDraw.mark(c, w - padR - markSize, markTop, markSize, intArrayOf(BrandDraw.BAR_FULL, BrandDraw.BAR_FULL, BrandDraw.BAR_FULL), ink.text)
             c.drawText(name, padL + lead, row2, nameP)
             if (count != null) c.drawText(count, padL + lead, row3, countP)
             a.amountUnit?.let { c.drawText(it, padL + lead + countW + (if (count != null) unitGap else 0f), row3, unitP) }
         }
         return w to h
     }
+
+    /**
+     * An alert's plate, [w] x [h] with the brand's 0.5u corners, in [ink]'s colours: a keyline is the plate's own edge
+     * in its colour (0.35u, as the raid slab's Ink one has always been), a stripe a 1u bar down the left edge, both
+     * inside the plate's padding so they never touch the words, the picture or the time-left rule.
+     */
+    private fun plated(c: Canvas, w: Float, h: Float, u: Float, ink: AlertInk) {
+        val r = 0.5f * u
+        val fill = StreamPalette.withAlpha(ink.plate, ink.plateAlpha)
+        val keyline = ink.keyline
+        when {
+            keyline == null -> plate(c, RectF(0f, 0f, w, h), r, fill)
+            ink.plateAlpha >= 1f -> {
+                // The slab: the keyline's colour, then the plate inset by its width, as the raid has always been drawn.
+                val k = StreamPalette.SLAB_KEYLINE_U * u
+                plate(c, RectF(0f, 0f, w, h), r, keyline)
+                plate(c, RectF(k, k, w - k, h - k), (r - k).coerceAtLeast(0f), fill)
+            }
+            else -> {
+                // A see-through plate keeps its look; the keyline goes round its edge.
+                val k = StreamPalette.SLAB_KEYLINE_U * u
+                plate(c, RectF(0f, 0f, w, h), r, fill)
+                val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = k; color = keyline }
+                c.drawRoundRect(RectF(k / 2, k / 2, w - k / 2, h - k / 2), r - k / 2, r - k / 2, ring)
+            }
+        }
+        ink.stripe?.let { stripe ->
+            // The plate's own rounded shape, cut to the stripe's width, so its corners follow the plate's.
+            c.withClip(0f, 0f, STRIPE_U * u, h) { plate(c, RectF(0f, 0f, w, h), r, stripe) }
+        }
+    }
+
+    private const val STRIPE_U = 1f
 
     private fun paint(face: Typeface, size: Float, color: Int) = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = face

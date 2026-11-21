@@ -18,7 +18,6 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import android.util.Size
 import androidx.core.content.ContextCompat
 import app.irlsupreme.engine.CameraInput
 import app.irlsupreme.engine.OutputTarget
@@ -26,7 +25,6 @@ import app.irlsupreme.engine.Scene
 import app.irlsupreme.engine.SessionSummary
 import app.irlsupreme.engine.StreamConfig
 import app.irlsupreme.engine.audio.AlertSounds
-import app.irlsupreme.engine.video.AlertGraphic
 import app.irlsupreme.engine.video.BrandType
 import app.irlsupreme.engine.video.Slates
 import app.irlsupreme.twitch.ChatCommand
@@ -136,6 +134,7 @@ class StreamService : Service() {
                     // server draw them from here, even when no activity ran first.
                     CardStore.apply(this)
                     AlertStyles.apply(this)
+                    AlertOptionsStore.state(this)
                     // Built here: the helper password and camera settings are Keystore reads.
                     val target = if (bondHost != null) {
                         StreamRules.bonded(
@@ -759,6 +758,18 @@ class StreamService : Service() {
                 if (AlertQueue.peek() == null) { AlertQueue.awaitPosted(); continue }
                 val s = OverlayStore.load(this@StreamService)
                 if (!s.alertsOn) { AlertQueue.poll(); continue }
+                // The streamer's on/off and minimums: a filtered alert is dropped at once, never shown or chimed.
+                // Test an alert's pretend ones always show, so each kind's look can be checked whatever its minimum.
+                AlertQueue.peek()?.takeUnless { SampleAlert.isSample(it) }?.let { next ->
+                    val kind = AlertKind.of(next)
+                    val verdict = AlertFilter.verdict(next, AlertOptionsStore.state(this@StreamService).value.of(kind))
+                    if (verdict != AlertVerdict.SHOW) {
+                        AlertQueue.poll()
+                        // The kind and why only: never who sent it.
+                        sessionLog?.line(AlertFilter.logLine(kind, verdict))
+                        continue
+                    }
+                }
                 if (!engine.alertsAllowed || !AlertHold.allowed(engine.state.value)) { delay(AlertTiming.HOLD_POLL_MS); continue }
                 val a = AlertQueue.poll() ?: continue
                 showAlert(AlertText.card(a), s, width, height)
@@ -777,11 +788,10 @@ class StreamService : Service() {
         // A corner layer only counts where it's drawn: over a card, only if the streamer put the layers on cards too.
         val layers = if (onCard && !s.onCards) emptySet() else OverlayLayout.occupied(s)
         val occupied = LiveElements.alertOccupied(layers, onCard && cardColumnTaken)
-        val (bitmap, tier) = OverlayComposer.alertBitmap(card, width, height)
-        val at = OverlayComposer.alertPosition(width, height, onCard, occupied, Size(bitmap.width, bitmap.height))
+        val graphic = OverlayComposer.alertGraphic(card, width, height, onCard, occupied, AlertOptionsStore.state(this).value)
         val cut = AlertTiming.cut(st.thermalRung)
-        val enterMs = AlertTiming.enterMs(tier, cut)
-        engine.showAlert(AlertGraphic(bitmap, at.x, at.y, tier, card.dwellMs))
+        val enterMs = AlertTiming.enterMs(graphic.tier, cut)
+        engine.showAlert(graphic)
         // The kind only: who sent it and their message stay out of the log.
         sessionLog?.line("alert shown: ${card.style.name.lowercase()} (${alertsShown.incrementAndGet()} this stream)")
         if (s.alertSound) engine.playAlertChime(card.style, AlertTiming.chimeDelayMs(enterMs, AlertSounds.attackMs(card.style)))

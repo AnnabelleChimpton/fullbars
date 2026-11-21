@@ -21,11 +21,16 @@ enum class SampleAlert(val title: String) {
         val id = "sample-${name.lowercase()}-$seq"
         return when (this) {
             FOLLOW -> TwitchAlert.Follow(id, "sample_viewer")
-            SUB -> TwitchAlert.Sub(id, "kit_irl", "1000", prime = false, months = null)
+            SUB -> TwitchAlert.Sub(id, "kit_irl", "1000", prime = false, months = null, message = "first sub, love the stream")
             GIFT -> TwitchAlert.GiftSubs(id, "Anonymous", 5, "1000")
-            BITS -> TwitchAlert.Cheer(id, "kit_irl", 500)
+            BITS -> TwitchAlert.Cheer(id, "kit_irl", 500, message = "this view is unreal")
             RAID -> TwitchAlert.Raid(id, "BigStreamer", 230)
             TIP -> TwitchAlert.Tip(id, "kit_irl", "$5.00")
         }
+    }
+
+    companion object {
+        /** Whether [a] is one of these pretend alerts rather than a real one. */
+        fun isSample(a: TwitchAlert): Boolean = a.id.startsWith("sample-")
     }
 }

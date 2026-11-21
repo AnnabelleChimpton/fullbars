@@ -26,6 +26,19 @@ internal fun chatFragments(dto: List<FragmentDto>?): List<ChatFragment> = dto.or
 
 private val EMOTE_ID = Regex("[A-Za-z0-9_]{1,64}")
 
+/**
+ * A cheer's own words: the message without its cheermotes ("Cheer100"), which Twitch marks as fragments of their own.
+ * Without fragments, words shaped like a cheermote (letters then a number) are dropped. Null when nothing is left.
+ */
+internal fun cheerWords(dto: ChatTextDto): String? {
+    val f = dto.fragments
+    val text = if (!f.isNullOrEmpty()) f.filter { it.type != "cheermote" }.joinToString("") { it.text }
+    else dto.text.split(' ').filterNot { CHEERMOTE.matches(it) }.joinToString(" ")
+    return text.replace(Regex("\\s+"), " ").trim().ifEmpty { null }
+}
+
+private val CHEERMOTE = Regex("[A-Za-z]+[0-9]+")
+
 /** One `channel.chat.message` event (https://dev.twitch.tv/docs/eventsub/reference/chat#channel-chat-message). */
 data class ChatMessage(
     val messageId: String,
@@ -44,6 +57,8 @@ data class ChatMessage(
     val sourceBroadcasterUserId: String?,
     /** Bits cheered with this message, if any. */
     val bits: Int? = null,
+    /** With [bits]: the message's own words, without the cheermotes; null when there are none. */
+    val cheerMessage: String? = null,
     /** [text] in pieces, with Twitch emotes marked, so they can be drawn as images. Empty: just [text]. */
     val fragments: List<ChatFragment> = emptyList(),
     /**
@@ -72,12 +87,23 @@ sealed interface TwitchAlert {
     val user: String
 
     data class Follow(override val id: String, override val user: String) : TwitchAlert
-    /** [tier]: "1000", "2000", "3000" (or Prime); [months]: cumulative, when Twitch says (resubs). */
-    data class Sub(override val id: String, override val user: String, val tier: String, val prime: Boolean, val months: Int?) : TwitchAlert
+    /**
+     * [tier]: "1000", "2000", "3000" (or Prime); [months]: cumulative, when Twitch says (resubs). [message]: what the
+     * viewer wrote with it, when they wrote something.
+     */
+    data class Sub(
+        override val id: String,
+        override val user: String,
+        val tier: String,
+        val prime: Boolean,
+        val months: Int?,
+        val message: String? = null,
+    ) : TwitchAlert
     /** One person gifting [count] subs (a batch shows once, not once per recipient). */
     data class GiftSubs(override val id: String, override val user: String, val count: Int, val tier: String) : TwitchAlert
     data class Raid(override val id: String, override val user: String, val viewers: Int) : TwitchAlert
-    data class Cheer(override val id: String, override val user: String, val bits: Int) : TwitchAlert
+    /** [message]: the words cheered with, without the Cheer100-style tokens; null when there are none. */
+    data class Cheer(override val id: String, override val user: String, val bits: Int, val message: String? = null) : TwitchAlert
     /** A tip through StreamElements or Streamlabs ([TipsClient]); [amount] is ready to show ("$4.20"). */
     data class Tip(override val id: String, override val user: String, val amount: String) : TwitchAlert
 }
@@ -138,6 +164,7 @@ internal object EventSubParser {
             replyParentMessageId = e.reply?.parentMessageId,
             sourceBroadcasterUserId = e.sourceBroadcasterUserId,
             bits = e.cheer?.bits?.takeIf { it > 0 },
+            cheerMessage = if ((e.cheer?.bits ?: 0) > 0) cheerWords(e.message) else null,
             fragments = chatFragments(e.message.fragments).takeIf { f -> f.any { it is ChatFragment.Emote } }.orEmpty(),
         )
     }
@@ -149,9 +176,10 @@ internal object EventSubParser {
     fun parseChatNotification(messageId: String, event: JsonObject): TwitchAlert? {
         val e = decodeOrThrow("channel.chat.notification event") { TwitchJson.decodeFromJsonElement(ChatNotificationDto.serializer(), event) }
         val who = if (e.chatterIsAnonymous == true) "Anonymous" else e.chatterUserName ?: "Someone"
+        val said = e.message?.text?.trim()?.ifEmpty { null }
         return when (e.noticeType) {
-            "sub" -> e.sub?.let { TwitchAlert.Sub(messageId, who, it.subTier ?: "1000", it.isPrime == true, null) }
-            "resub" -> e.resub?.let { TwitchAlert.Sub(messageId, who, it.subTier ?: "1000", it.isPrime == true, it.cumulativeMonths) }
+            "sub" -> e.sub?.let { TwitchAlert.Sub(messageId, who, it.subTier ?: "1000", it.isPrime == true, null, said) }
+            "resub" -> e.resub?.let { TwitchAlert.Sub(messageId, who, it.subTier ?: "1000", it.isPrime == true, it.cumulativeMonths, said) }
             "community_sub_gift" -> e.communitySubGift?.let { TwitchAlert.GiftSubs(messageId, who, it.total ?: 1, it.subTier ?: "1000") }
             "sub_gift" -> e.subGift?.takeIf { it.communityGiftId.isNullOrEmpty() }?.let { TwitchAlert.GiftSubs(messageId, who, 1, it.subTier ?: "1000") }
             "raid" -> e.raid?.let { TwitchAlert.Raid(messageId, it.userName ?: who, it.viewerCount ?: 0) }

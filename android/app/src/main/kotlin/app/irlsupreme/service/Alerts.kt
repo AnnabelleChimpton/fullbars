@@ -28,16 +28,20 @@ data class AlertCard(
     val kind: AlertKind = AlertKind.FOLLOW,
     /** A resub (months > 1), for the spoken sentence. */
     val resub: Boolean = false,
-    /** The streamer's own message with {name} and {amount} filled in; shown in place of the name. */
+    /** The streamer's own message with its placeholders filled in ([AlertTemplate]); shown in place of the name. */
     val message: String? = null,
     /** The streamer's picture for this kind, drawn at the card's left. */
     val picture: android.graphics.Bitmap? = null,
+    /** The streamer's colours for this kind. */
+    val paint: AlertPaint = AlertPaint(),
+    /** How long this kind stays up. */
+    val length: AlertLength = AlertLength.NORMAL,
 ) {
     /** Loudness follows the chime, so what viewers see and hear always agree. */
     val tier: AlertTier get() = AlertTier.of(style)
 
     /** How long it stays fully on screen, after the wipe-in and before the wipe-out. */
-    val dwellMs: Long get() = AlertTiming.dwellMs(tier)
+    val dwellMs: Long get() = AlertTiming.dwellMs(tier, length)
 
     /** The Live screen's polite announcement for TalkBack: plain words, read once when the alert lands. */
     val spoken: String get() = AlertText.spoken(this)
@@ -46,21 +50,32 @@ data class AlertCard(
 /** Words for each kind of Twitch alert. Pure, for tests. */
 object AlertText {
     /**
-     * [a] as a card, with the streamer's own label, message and picture for its kind ([AlertStyles]). A message that
-     * shows {amount} itself takes the amount off the card's own amount line, so it's never shown twice.
+     * [a] as a card, with the streamer's own label, message and picture for its kind ([AlertStyles]) and its colours
+     * and length ([AlertOptionsStore]). The label and message are templates ([AlertTemplate]); one that shows the
+     * amount itself takes it off the card's own amount line, so it's never shown twice.
      */
-    fun card(a: TwitchAlert, look: AlertLook = AlertStyles.look(AlertKind.of(a))): AlertCard {
+    fun card(
+        a: TwitchAlert,
+        look: AlertLook = AlertStyles.look(AlertKind.of(a)),
+        options: AlertKindOptions = AlertOptionsStore.options.of(AlertKind.of(a)),
+    ): AlertCard {
+        val kind = AlertKind.of(a)
         val base = baseCard(a)
         val amountText = listOfNotNull(base.amount, base.amountUnit).joinToString(" ").ifEmpty { null }
-        val message = look.message?.let { fillAlertTemplate(it, base.name, amountText) }?.ifEmpty { null }
-        val amountInMessage = message != null && templateHasAmount(look.message)
+        val values = AlertTemplate.values(a, amountText)
+        val message = look.message?.let { AlertTemplate.fill(it, values) }?.ifEmpty { null }
+        val label = look.label?.let { AlertTemplate.fill(it, values) }?.ifEmpty { null }
+        val amountShown = (message != null && AlertTemplate.showsAmount(look.message, kind)) ||
+            (label != null && AlertTemplate.showsAmount(look.label, kind))
         return base.copy(
-            kind = AlertKind.of(a),
-            label = look.label?.uppercase() ?: base.label,
+            kind = kind,
+            label = label?.uppercase() ?: base.label,
             message = message,
             picture = look.picture,
-            amount = if (amountInMessage) null else base.amount,
-            amountUnit = if (amountInMessage) null else base.amountUnit,
+            amount = if (amountShown) null else base.amount,
+            amountUnit = if (amountShown) null else base.amountUnit,
+            paint = options.paint,
+            length = options.length,
         )
     }
 
@@ -140,6 +155,9 @@ object AlertTiming {
         AlertTier.MEDIUM -> 6_000L
         AlertTier.LOUD -> 7_200L
     }
+
+    /** How long an alert of [tier] stays up at the streamer's [length] for its kind, to the nearest 10 ms. */
+    fun dwellMs(tier: AlertTier, length: AlertLength): Long = Math.round(dwellMs(tier) * length.factor / 10.0) * 10
 
     fun enterMs(tier: AlertTier, cut: Boolean): Long = when {
         cut -> 0L

@@ -105,4 +105,37 @@ class TwitchAlertParserTest {
             EventSubParser.parseFollow("f", obj("""{"user_id":"5","user_login":"newfan","user_name":"NewFan","broadcaster_user_id":"1","followed_at":"2026-11-18T10:00:00Z"}""")),
         )
     }
+
+    @Test fun `a resub carries what the viewer wrote, a blank one nothing`() {
+        val withWords = obj(
+            """{"chatter_user_id":"2","chatter_user_name":"KitIRL","chatter_user_login":"kitirl","chatter_is_anonymous":false,
+            "message_id":"m1","message":{"text":"  two years already  ","fragments":[]},"notice_type":"resub",
+            "resub":{"cumulative_months":24,"sub_tier":"1000","is_prime":false}}""",
+        )
+        assertEquals("two years already", (EventSubParser.parseChatNotification("x", withWords) as TwitchAlert.Sub).message)
+        assertNull((EventSubParser.parseChatNotification("x", notification("sub", """"sub":{"sub_tier":"1000"}""")) as TwitchAlert.Sub).message)
+    }
+
+    @Test fun `a cheer's words leave out the cheermotes`() {
+        fun cheer(message: String) = EventSubParser.parseChatMessage(
+            obj(
+                """{"broadcaster_user_id":"1","chatter_user_id":"2","chatter_user_login":"kitirl","chatter_user_name":"KitIRL",
+                "message_id":"c1","message":$message,"badges":[],"cheer":{"bits":200}}""",
+            ),
+        ).cheerMessage
+        assertEquals(
+            "nice view",
+            cheer(
+                """{"text":"Cheer100 nice view Cheer100","fragments":[{"type":"cheermote","text":"Cheer100"},
+                {"type":"text","text":" nice view "},{"type":"cheermote","text":"Cheer100"}]}""",
+            ),
+        )
+        assertEquals("go go", cheer("""{"text":"Cheer100 go   go"}"""))
+        assertNull(cheer("""{"text":"Cheer100 Corgo100"}"""))
+        // A plain chat line has no cheer words.
+        val plain = EventSubParser.parseChatMessage(
+            obj("""{"broadcaster_user_id":"1","chatter_user_id":"2","chatter_user_login":"k","chatter_user_name":"K","message_id":"c2","message":{"text":"hi"}}"""),
+        )
+        assertNull(plain.cheerMessage)
+    }
 }

@@ -9,11 +9,12 @@ import org.junit.Test
 
 class AlertStylesTest {
     @Test fun `templates fill in the name and amount, any case, tidily`() {
-        assertEquals("kit just joined the crew!", fillAlertTemplate("{name} just joined the crew!", "kit", null))
-        assertEquals("Thanks kit for 500 bits", fillAlertTemplate("Thanks {NAME} for {Amount}", "kit", "500 bits"))
-        assertEquals("kit raided", fillAlertTemplate("{name} raided {amount}", "kit", null))
-        assertTrue(templateHasAmount("x {AMOUNT}"))
-        assertFalse(templateHasAmount("{name} only"))
+        val v = mapOf("name" to "kit", "amount" to "500 bits")
+        assertEquals("kit just joined the crew!", AlertTemplate.fill("{name} just joined the crew!", mapOf("name" to "kit")))
+        assertEquals("Thanks kit for 500 bits", AlertTemplate.fill("Thanks {NAME} for {Amount}", v))
+        assertEquals("kit raided", AlertTemplate.fill("{name} raided {amount}", mapOf("name" to "kit")))
+        assertTrue(AlertTemplate.showsAmount("x {AMOUNT}", AlertKind.BITS))
+        assertFalse(AlertTemplate.showsAmount("{name} only", AlertKind.BITS))
     }
 
     @Test fun `a custom look replaces the label and the name line, keeps the size class`() {
