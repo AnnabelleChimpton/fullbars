@@ -331,6 +331,9 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         supporting = "Every card your phone draws, along the bottom. Like “@you everywhere”. Up to ${CardRules.MAX_SOCIALS} characters.",
     )
 
+    // --- Music: chosen cards and your own scenes only (nothing for the automatic ones) ---
+    scene?.let { CardMusicRow(it.name) }
+
     // --- Web page ---
     SectionHeader("Web page")
     if (!CardRules.canUseWebPage(card)) {

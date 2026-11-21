@@ -41,9 +41,10 @@ class MixStageTest {
      * One fixed script through the stage: gain changes, a camera that comes and goes, two chimes (one scheduled), a
      * mute and a mic reopen. Returns every output chunk, concatenated.
      */
-    private fun goldenRun(): ByteArray {
+    private fun goldenRun(music: MusicSource? = null): ByteArray {
         val dsp = MicDsp(rate, 2).apply { gainDb = 6f }
         val stage = MixStage(rate, 2, dsp)
+        stage.music = music
         stage.start(muted = false)
         stage.micOpened()
         val out = java.io.ByteArrayOutputStream()
@@ -71,6 +72,12 @@ class MixStageTest {
         // Guards the mix against unintended change. If a change to the mix is meant, check the new output by ear or
         // with the bench (AudioQualityBenchTest), then update this.
         val crc = CRC32().apply { update(goldenRun()) }
+        assertEquals(GOLDEN_CRC, crc.value)
+    }
+
+    @Test fun `a card music player with nothing to play changes nothing`() {
+        val idle = MusicMixer(MusicRing(rate), rate)
+        val crc = CRC32().apply { update(goldenRun(idle)) }
         assertEquals(GOLDEN_CRC, crc.value)
     }
 

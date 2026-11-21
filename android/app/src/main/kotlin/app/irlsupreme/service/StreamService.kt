@@ -24,7 +24,6 @@ import app.irlsupreme.engine.OutputTarget
 import app.irlsupreme.engine.Scene
 import app.irlsupreme.engine.SessionSummary
 import app.irlsupreme.engine.StreamConfig
-import app.irlsupreme.engine.audio.AlertSounds
 import app.irlsupreme.engine.video.BrandType
 import app.irlsupreme.engine.video.SlateAudio
 import app.irlsupreme.engine.video.Slates
@@ -297,6 +296,8 @@ class StreamService : Service() {
         val startedAt = System.currentTimeMillis()
         logJob = scope.launch {
             launch { engine.micLevel.collect { mic.add(it) } }
+            // Music under the card on air, preview included.
+            launch { CardMusic.follow(this@StreamService, engine) { log.line(it) } }
             launch {
                 var prev: EngineState? = null
                 engine.state.collect { st ->
@@ -795,10 +796,12 @@ class StreamService : Service() {
         val graphic = OverlayComposer.alertGraphic(card, width, height, onCard, occupied, AlertOptionsStore.state(this).value)
         val cut = AlertTiming.cut(st.thermalRung)
         val enterMs = AlertTiming.enterMs(graphic.tier, cut)
+        // The kind's own sound (or the chime, or none), read before the alert goes up so it starts on time.
+        val sound = if (s.alertSound) AlertSoundChoices.prepare(this, card.kind, card.style) else null
         engine.showAlert(graphic)
         // The kind only: who sent it and their message stay out of the log.
         sessionLog?.line("alert shown: ${card.style.name.lowercase()} (${alertsShown.incrementAndGet()} this stream)")
-        if (s.alertSound) engine.playAlertChime(card.style, AlertTiming.chimeDelayMs(enterMs, AlertSounds.attackMs(card.style)))
+        sound?.play(engine, enterMs)?.let { sessionLog?.line(it) }
         try {
             delay(enterMs)
             AlertQueue.show(card) // fully revealed: the Live screen announces it now

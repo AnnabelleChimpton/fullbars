@@ -147,7 +147,7 @@ private fun AlertKindSettings(kind: AlertKind, o: AlertKindOptions) {
     KeyChoice("Length", AlertLength.entries, o.length, { it.title }) { set(o.copy(length = it)) }
     HelpText("Up for ${seconds(AlertTiming.dwellMs(tier, o.length))} once it's in.")
 
-    // Sound for this kind: the audio settings' row goes here.
+    AlertSoundRow(kind)
 
     WordsSection(kind, t)
     PictureSection(kind, t)

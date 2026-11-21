@@ -81,6 +81,18 @@ class AudioPipeline(
     fun playEffect(samples: ShortArray, startAtNs: Long = 0L) = stage.playEffect(samples, startAtNs)
 
     /**
+     * [playEffect] at [gain] (linear); with [replaces], it takes over from any sound still playing (which fades out
+     * quickly) instead of waiting for it: the streamer's own alert sounds, which can be long.
+     */
+    fun playEffect(samples: ShortArray, startAtNs: Long, gain: Float, replaces: Boolean) =
+        stage.playEffect(samples, startAtNs, gain, replaces)
+
+    /** Card music, mixed under the voice inside the limiter; null for none. */
+    internal var music: MusicSource?
+        get() = stage.music
+        set(v) { stage.music = v }
+
+    /**
      * An RTMP camera's audio (Pocket 3 / DJI Mic). When set, each mic chunk is replaced by the camera's samples for
      * the same moment whenever the camera has them; the mic stays the clock and the fallback.
      */
