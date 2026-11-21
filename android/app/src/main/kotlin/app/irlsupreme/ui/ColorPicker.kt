@@ -92,7 +92,7 @@ fun ColorChoice(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            val fill = if (custom && selected != null) Modifier.background(Color(selected), FbShape.small)
+            val fill = if (custom && selected != null) Modifier.background(Color(selected), FbShape.small).border(1.dp, c.ruleStrong, FbShape.small)
             else Modifier.background(Brush.sweepGradient(HUES.map { Color(it) }), FbShape.small)
             Box(Modifier.size(34.dp).then(fill), contentAlignment = Alignment.Center) {
                 if (custom && selected != null) Box(Modifier.size(10.dp).background(Color(ColorMath.readableOn(selected, WHITE, BLACK))))
@@ -118,7 +118,11 @@ private fun Swatch(argb: Int, chosen: Boolean, name: String, onPick: () -> Unit)
             .semantics { contentDescription = name },
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.size(34.dp).background(Color(argb), FbShape.small), contentAlignment = Alignment.Center) {
+        // A hairline outline, so a swatch close to the page's own colour (Ink on the dark page) still shows.
+        Box(
+            Modifier.size(34.dp).background(Color(argb), FbShape.small).border(1.dp, c.ruleStrong, FbShape.small),
+            contentAlignment = Alignment.Center,
+        ) {
             if (chosen) Box(Modifier.size(10.dp).background(Color(ColorMath.readableOn(argb, WHITE, BLACK))))
         }
     }

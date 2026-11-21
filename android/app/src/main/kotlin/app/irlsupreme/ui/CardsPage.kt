@@ -230,7 +230,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         val shown = SceneNames.name(scene, created)
         NameField(
             t.name, { CardStore.setSceneName(ctx, card, it) },
-            supporting = problem ?: "Shows in Scenes and on the mod remote. Mods can type !scene ${shown.lowercase()}. " +
+            supporting = problem ?: "Shows in Scenes and on the mod remote. Mods can type !\u2060scene\u00A0${shown.lowercase()}. " +
                 "Up to ${SceneNames.MAX_NAME} characters.",
             isError = problem != null,
             placeholder = SceneNames.defaultName(scene),
