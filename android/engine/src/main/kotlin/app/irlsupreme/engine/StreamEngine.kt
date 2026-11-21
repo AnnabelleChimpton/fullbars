@@ -60,6 +60,8 @@ class StreamEngine(private val context: Context) {
     @Volatile private var audio: AudioPipeline? = null
     /** The last stream's final audio mix ([recentAudio]): replaced when a stream starts, kept after it stops. */
     @Volatile private var mixRing: app.irlsupreme.engine.audio.PcmRing? = null
+    /** This stream's card music ([setCardMusic]); null while not streaming. */
+    @Volatile private var music: app.irlsupreme.engine.audio.CardMusicPlayer? = null
     @Volatile private var output: StreamOutput? = null
     @Volatile private var monitor: ScheduledExecutorService? = null
     private var ingest: RtmpIngestServer? = null
@@ -276,6 +278,9 @@ class StreamEngine(private val context: Context) {
             it.monoVoice = monoVoice
             it.inputChoice = micInput
             it.externalGainDb = externalMicGainDb
+            val player = app.irlsupreme.engine.audio.CardMusicPlayer(config.audioSampleRate)
+            music = player
+            it.music = player.mixer
             it.start()
         }
         (config.camera as? CameraInput.Rtmp)?.let { startIngest(it, config) }
@@ -428,6 +433,7 @@ class StreamEngine(private val context: Context) {
         abr = null
         rtmpAbr = null
         audio?.stop(); audio = null
+        music?.stop(); music = null
         _micLevel.value = app.irlsupreme.engine.audio.MicLevel.SILENT
         compositor?.stop(); compositor = null
         _state.value = EngineState(running = false)
@@ -531,10 +537,34 @@ class StreamEngine(private val context: Context) {
      * the alert's wipe-in time minus [app.irlsupreme.engine.audio.AlertSounds.attackMs], so the chime's attack lands on
      * the first fully revealed frame.
      */
-    fun playAlertChime(style: app.irlsupreme.engine.audio.AlertSounds.Style, startDelayMs: Long = 0) {
+    fun playAlertChime(style: app.irlsupreme.engine.audio.AlertSounds.Style, startDelayMs: Long = 0, gainDb: Float = 0f) {
         val cfg = config ?: return
         val startAtNs = if (startDelayMs > 0) System.nanoTime() + startDelayMs * 1_000_000 else 0L
-        audio?.playEffect(app.irlsupreme.engine.audio.AlertSounds.chime(style, cfg.audioSampleRate, cfg.audioStereo), startAtNs)
+        val chime = app.irlsupreme.engine.audio.AlertSounds.chime(style, cfg.audioSampleRate, cfg.audioStereo)
+        if (gainDb == 0f) audio?.playEffect(chime, startAtNs)
+        else audio?.playEffect(chime, startAtNs, app.irlsupreme.engine.audio.ImportMath.dbToGain(gainDb.toDouble()), replaces = false)
+    }
+
+    /**
+     * Mixes the streamer's own alert sound into the stream at [gainDb], starting [startDelayMs] from now (the alert's
+     * wipe-in time less the clip's [app.irlsupreme.engine.audio.AlertClip.attackMs], as for a chime). Into the same
+     * place as the chimes, inside the limiter. It doesn't queue: it takes over from any sound still playing, which
+     * fades out quickly, so a long sound never stacks under the next alert's.
+     */
+    fun playAlertSound(clip: app.irlsupreme.engine.audio.AlertClip, gainDb: Float, startDelayMs: Long = 0) {
+        val cfg = config ?: return
+        val samples = app.irlsupreme.engine.audio.AlertSoundLayout.forStream(clip, cfg.audioSampleRate, cfg.audioStereo)
+        val startAtNs = if (startDelayMs > 0) System.nanoTime() + startDelayMs * 1_000_000 else 0L
+        audio?.playEffect(samples, startAtNs, app.irlsupreme.engine.audio.ImportMath.dbToGain(gainDb.toDouble()), replaces = true)
+    }
+
+    /**
+     * The music under the scene on air: null for none. It fades in over 0.8 s, loops without a seam, and fades out
+     * over 0.8 s when this changes (another card's music fades in after). Mixed under the voice inside the limiter;
+     * plays in preview too. A change of level alone glides, with no fade.
+     */
+    fun setCardMusic(track: app.irlsupreme.engine.audio.MusicTrack?) {
+        music?.play(track)
     }
 
     /**
