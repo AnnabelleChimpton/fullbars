@@ -361,11 +361,16 @@ class SrtlaCore(
                 for (i in 0 until linkList.size) linkList[i].beginAckBatch()
                 for (k in 0 until n) {
                     val seq = Packets.srtlaAckSeq(buf, k)
-                    for (i in 0 until linkList.size) {
-                        val l = linkList[i]
-                        if (l.onSrtlaAckSpecific(seq, nowMs)) {
-                            l.onProof(nowMs)
-                            break
+                    // The receiver acknowledges on the link the packet came in on, so only that link earns the
+                    // delivery and the proof. A resend of a packet lost on a dead link is acknowledged on the live
+                    // link that carried it; crediting the first link holding the sequence would keep the dead one
+                    // looking alive. The others are only checked for window bookkeeping, with no proof.
+                    if (link.onSrtlaAckSpecific(seq, nowMs)) {
+                        link.onProof(nowMs)
+                    } else {
+                        for (i in 0 until linkList.size) {
+                            val l = linkList[i]
+                            if (l !== link && l.onSrtlaAckSpecific(seq, nowMs)) break
                         }
                     }
                     for (i in 0 until linkList.size) linkList[i].onSrtlaAckGlobal()

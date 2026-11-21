@@ -7,7 +7,6 @@ import srtlakt.protocol.Srt
 import srtlakt.protocol.Srtla
 import java.util.PriorityQueue
 import java.util.Random
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -39,26 +38,17 @@ class FailoverTest {
     @Test
     fun `last link dead both ways is declared down within connTimeoutMs`() = declaredDown(dead = 2, uplinkOnly = false)
 
-    // These fail today: when an SRTLA ACK arrives, SrtlaCore credits it to the first link (in the order links were
-    // added) whose logs hold that sequence number, not to the link the ACK arrived on. A packet lost on a dead link
-    // is NAKed, resent on a live one and acknowledged there; if the dead link was added earlier, the ACK clears the
-    // dead link's delay-log entry (so it drops back under its cap and is refilled at once, ~500 packets in 3 s here),
-    // counts as delivery on it, and counts as proof that it is alive, so it is never declared down. Crediting only
-    // the link the ACK arrived on (onLinkPacket's `link`, falling back to the others for window bookkeeping without
-    // proof) makes all four pass.
-    @Ignore
+    // A dead link added first: a packet lost on it is resent and acknowledged on a live link. That ACK must not count
+    // as delivery or proof on the dead link, or it is never declared down and keeps being refilled.
     @Test
     fun `dead first link - traffic leaves it within 200 ms`() = diverts(dead = 0, uplinkOnly = true)
 
-    @Ignore
     @Test
     fun `dead first link both ways - traffic leaves it within 200 ms`() = diverts(dead = 0, uplinkOnly = false)
 
-    @Ignore
     @Test
     fun `dead first uplink is declared down within connTimeoutMs`() = declaredDown(dead = 0, uplinkOnly = true)
 
-    @Ignore
     @Test
     fun `first link dead both ways is declared down within connTimeoutMs`() = declaredDown(dead = 0, uplinkOnly = false)
 
