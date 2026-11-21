@@ -130,6 +130,31 @@ class MixStageMusicTest {
         assertEquals(0.0, Metrics.peak(fading, from = MixStage.MUTE_RAMP_FRAMES + 1), 0.0)
     }
 
+    @Test fun `music asked for through the real mixer reaches the stream, and leaves it`() {
+        val ring = MusicRing(rate * 2)
+        val mixer = MusicMixer(ring, rate)
+        val r = Rig(music = mixer)
+        var gen = 0
+        val block = FloatArray(4096) { 0.25f }
+        fun chunk(): FloatArray {
+            val out = r.chunk(FloatArray(frames * 2))
+            // The decoder's part: follow the request, keep the ring full.
+            val req = mixer.request
+            if (req.gen != gen) { gen = req.gen; ring.startGen(gen) }
+            if (req.track != null) while (ring.free() > 0) ring.write(block, minOf(2048, ring.free()))
+            return out
+        }
+        repeat(5) { assertEquals(0.0, Metrics.peak(chunk()), 0.0) }
+        mixer.wanted = MusicTrack("/m", 0, 1000, 0f)
+        var out = FloatArray(0)
+        repeat(60) { out = chunk() }
+        assertEquals(0.25, Metrics.peak(out), 1e-3)
+        mixer.wanted = null
+        repeat(60) { out = chunk() }
+        assertEquals(0.0, Metrics.peak(out), 0.0)
+        assertTrue(!mixer.engaged)
+    }
+
     /** A steady level for [seconds], as a clip in the stream's layout. */
     private fun level(v: Float, seconds: Double) = ShortArray((rate * seconds).toInt() * 2) { (v * 32768).toInt().toShort() }
 

@@ -234,7 +234,7 @@ internal class MusicMixer(
     @Volatile var underruns = 0
         private set
 
-    override val engaged: Boolean get() = current != null || level > 0
+    override val engaged: Boolean get() = wanted != null || current != null || level > 0
     override val micOff: Boolean get() = wanted?.micOff == true
 
     override fun addInto(fx: FloatArray, frames: Int, channels: Int) {
@@ -242,6 +242,8 @@ internal class MusicMixer(
         var fadingOut = false
         if (current?.sameMusic(w) == true) {
             current = w // the same music: just take its new level and mic setting
+        } else if (current == null && w == null) {
+            return // nothing wanted, nothing playing
         } else if (current == null || level == 0) {
             switchTo(w)
         } else {
