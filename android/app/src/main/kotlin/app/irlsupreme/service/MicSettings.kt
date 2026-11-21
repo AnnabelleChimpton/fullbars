@@ -29,7 +29,7 @@ data class MicPrefs(
     val input: InputChoice = InputChoice.AUTO,
     val externalGainDb: Int = 0,
     val lowCut: LowCut = LowCut.AUTO,
-    val voiceLeveler: Boolean = true,
+    val voiceLeveler: Boolean = false,
     val monoVoice: Boolean = false,
 ) {
     /** The level in use now for the phone's own mic, the one the fader shows. */
@@ -113,6 +113,11 @@ object MicSettings {
             // has always streamed; only a fresh install on a phone with a flat source starts with it off.
             p.edit { putBoolean(KEY_RAW, defaultRaw(freshInstall(ctx), unprocessedSupported(ctx))) }
         }
+        if (!p.contains(KEY_GAIN_EXT)) {
+            // A plugged-in mic used to follow the phone mic's level; it now has its own. Start it where it streamed.
+            val phoneLevel = if (p.getBoolean(KEY_RAW, false)) p.getInt(KEY_GAIN_RAW, RAW_DEFAULT_GAIN_DB) else p.getInt(KEY_GAIN, 0)
+            p.edit { putInt(KEY_GAIN_EXT, firstExternalGainDb(freshInstall(ctx), clampGain(phoneLevel))) }
+        }
         return MicPrefs(
             gainDb = clampGain(p.getInt(KEY_GAIN, 0)),
             raw = p.getBoolean(KEY_RAW, false),
@@ -120,10 +125,17 @@ object MicSettings {
             input = enumOr(p.getString(KEY_INPUT, null), InputChoice.AUTO),
             externalGainDb = clampGain(p.getInt(KEY_GAIN_EXT, 0)),
             lowCut = enumOr(p.getString(KEY_LOW_CUT, null), LowCut.AUTO),
-            voiceLeveler = p.getBoolean(KEY_LEVELER, true),
+            // Off until it is proven on phones: streams have always sounded without it.
+            voiceLeveler = p.getBoolean(KEY_LEVELER, false),
             monoVoice = p.getBoolean(KEY_MONO, false),
         )
     }
+
+    /**
+     * A plugged-in mic's first level of its own: on an install that has streamed before, the phone mic's level it
+     * followed until now ([phoneLevelDb]), so it sounds the same; on a fresh install 0 dB, the level it arrives at.
+     */
+    internal fun firstExternalGainDb(freshInstall: Boolean, phoneLevelDb: Int): Int = if (freshInstall) 0 else phoneLevelDb
 
     /** Never updated since it was installed: no earlier version has run, so there's no choice of the user's to keep. */
     private fun freshInstall(ctx: Context): Boolean = runCatching {

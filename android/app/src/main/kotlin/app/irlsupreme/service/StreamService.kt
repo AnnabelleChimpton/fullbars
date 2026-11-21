@@ -165,6 +165,9 @@ class StreamService : Service() {
                     SessionLogText.startLines(sessionStart(config, choices.fps)).forEach(log::essential)
                     // The battery as the stream starts, for the recap's battery per hour and the heat ladder's floor.
                     readBattery()
+                    // Open the side the streamer starts on, so the engine's own 60 fps check reads that camera (and
+                    // the camera isn't reopened a moment after going live).
+                    if (choices.camera is CameraInput.Phone) engine.setCameraFacing(CameraPrefs.startFacing(this))
                     val started = try {
                         engine.start(config)
                     } catch (t: Throwable) {
@@ -295,6 +298,13 @@ class StreamService : Service() {
                     applyMic(it)
                 }
             }
+            launch {
+                // Settings › Microphone › Lip sync: the stream eases to the new offset.
+                StreamSettings.avOffsetState(this@StreamService).drop(1).collect { ms ->
+                    log.line("lip sync offset now ${SessionLogText.signedMs(ms.toLong())}")
+                    engine.setAvOffsetNs(ms * 1_000_000L)
+                }
+            }
             launch { PocketStatus.state.collect { s -> s?.let { log.line("pocket: ${it.label}") } } }
             launch {
                 PocketScreen.on.drop(1).collect { on ->
@@ -416,33 +426,62 @@ class StreamService : Service() {
 
     /**
      * Combined connections: the paired server's keyframe backstop ([KeyframeBackstop]). While its slate is on air the
-     * status is polled every 400 ms, and the encoder asked for a keyframe when the server waits for one.
+     * status is polled every 400 ms, and the encoder asked for a keyframe when the server waits for one. The same
+     * status carries the server's slate checks: they are logged, and a refused or mismatched slate is sent again
+     * ([SlateRetry]).
      */
     private fun startKeyframeBackstop(log: SessionLog) {
         keyframeJob?.cancel()
         keyframeJob = scope.launch {
             val pairing = BrbPairingStore(SecretStore(this@StreamService)).load() ?: return@launch
-            val client = BrbClient(pairing)
+            val client = brbClient(pairing)
             val backstop = KeyframeBackstop()
+            val slates = SlateRetry()
             var wasOnSlate = false
+            var slateReport = ""
             while (isActive) {
                 val st = engine.state.value
                 val now = android.os.SystemClock.elapsedRealtime()
                 backstop.phone(now, trouble = st.connection != app.irlsupreme.engine.ConnectionPhase.LIVE || st.weakSignal)
                 runCatching { client.status(timeoutMs = KEYFRAME_POLL_TIMEOUT_MS) }.getOrNull()?.let { s ->
-                    if (backstop.onStatus(android.os.SystemClock.elapsedRealtime(), s.state, s.needKeyframe)) {
+                    val at = android.os.SystemClock.elapsedRealtime()
+                    if (backstop.onStatus(at, s.state, s.needKeyframe)) {
                         engine.requestKeyframe()
                         log.line("server waits for a keyframe: asked the encoder (${backstop.requests} this stream)")
                     }
                     if (backstop.serverOnSlate != wasOnSlate) {
                         wasOnSlate = backstop.serverOnSlate
-                        log.line("server ${if (wasOnSlate) "shows its ${s.state} slate" else "is back on the camera"}")
+                        log.line("server ${if (wasOnSlate) (if (s.state == "weak") "shows its Weak signal slate" else "shows its slate") else "is back on the camera"}")
+                    }
+                    val report = slateReport(s)
+                    if (report != slateReport) {
+                        slateReport = report
+                        if (report.isNotEmpty()) log.line("server slate: $report")
+                    }
+                    if (slates.onStatus(at, s.slateMatches, s.slateRejected) && engine.resendSlate()) {
+                        slates.sent(at)
+                        log.line("server slate ${if (s.slateRejected != null) "refused" else "doesn't match the live picture"}: sending it again (${slates.tries} this stream)")
                     }
                 }
                 delay(backstop.nextPollMs(android.os.SystemClock.elapsedRealtime()))
             }
         }
     }
+
+    /** The server's slate checks as one line for the session log: "phone 1080x1920, live 1080x1920, matches". */
+    private fun slateReport(s: BrbStatus): String = listOfNotNull(
+        s.slateSource?.let { src -> src + (s.slateSize?.let { " $it" } ?: "") },
+        s.liveSize?.let { "live $it" },
+        s.slateMatches?.let { if (it) "matches" else "doesn't match" },
+        s.slateRejected?.let { "refused: $it" },
+    ).joinToString(", ")
+
+    /** One control client per pairing for the stream's polls, so they share a connection. */
+    private var brbShared: Pair<BrbPairing, BrbClient>? = null
+
+    @Synchronized
+    private fun brbClient(pairing: BrbPairing): BrbClient =
+        brbShared?.takeIf { it.first == pairing }?.second ?: BrbClient(pairing).also { brbShared = pairing to it }
 
     /**
      * Why a stream ended, for the session log. [deliberate]: someone chose to end it, so the BRB server is told
@@ -630,7 +669,7 @@ class StreamService : Service() {
         remoteJob?.cancel()
         remoteJob = scope.launch {
             val pairing = BrbPairingStore(SecretStore(this@StreamService)).load() ?: return@launch
-            val client = BrbClient(pairing)
+            val client = brbClient(pairing)
             while (isActive) {
                 val st = engine.state.value
                 runCatching { client.pollRemote(st.running, st.scene.name, !st.micMuted) }.getOrNull()?.forEach { scene ->

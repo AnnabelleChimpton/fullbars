@@ -354,17 +354,20 @@ private fun FaderTrack(gainDb: Int, min: Int, max: Int) {
 
 /** A 48dp square key with a big sign, outlined like the rail's keys. */
 @Composable
-internal fun StepKey(sign: String, label: String, onClick: () -> Unit) {
+internal fun StepKey(sign: String, label: String, enabled: Boolean = true, onClick: () -> Unit) {
     val c = LocalFbColors.current
     Box(
         Modifier
             .size(48.dp)
-            .border(1.5.dp, c.ruleStrong, FbShape.medium)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, role = Role.Button, onClickLabel = label, onClick = onClick)
+            .border(1.5.dp, if (enabled) c.ruleStrong else c.ruleStrong.copy(alpha = 0.4f), FbShape.medium)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() }, indication = null, enabled = enabled,
+                role = Role.Button, onClickLabel = label, onClick = onClick,
+            )
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text(sign, style = FbType.title, color = c.text, modifier = Modifier.clearAndSetSemantics {})
+        Text(sign, style = FbType.title, color = if (enabled) c.text else c.text.copy(alpha = 0.4f), modifier = Modifier.clearAndSetSemantics {})
     }
 }
 

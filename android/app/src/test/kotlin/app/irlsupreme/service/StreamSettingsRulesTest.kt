@@ -73,10 +73,20 @@ class StreamSettingsRulesTest {
     @Test fun `the offset stays within 300 ms either way, in 10 ms steps`() {
         assertEquals(0, StreamRules.avOffsetMs(0))
         assertEquals(300, StreamRules.avOffsetMs(1_000))
-        assertEquals(-300, StreamRules.avOffsetMs(-305))
+        assertEquals(-300, StreamRules.avOffsetMs(-305, allowEarlier = true))
         assertEquals(10, StreamRules.avOffsetMs(14))
-        assertEquals(-20, StreamRules.avOffsetMs(-21))
+        assertEquals(-20, StreamRules.avOffsetMs(-21, allowEarlier = true))
         assertEquals(StreamConfig.MAX_AV_OFFSET_NS, StreamRules.AV_OFFSET_MAX_MS * 1_000_000L)
+    }
+
+    @Test fun `the sound can't be set early unless automatic lip sync is on`() {
+        // Without automatic lip sync the total delay can't go below 0, so an earlier setting would do nothing.
+        assertEquals(0, StreamRules.avOffsetMs(-120))
+        assertEquals(0, StreamRules.avOffsetMinMs(allowEarlier = false))
+        assertEquals(-300, StreamRules.avOffsetMinMs(allowEarlier = true))
+        val early = StreamChoices(1920, 1080, 6_000_000, avOffsetMs = -120)
+        assertEquals(0L, StreamRules.config(OutputTarget.Rtmp("rtmp://x"), early, 30).avOffsetNs)
+        assertEquals(-120_000_000L, StreamRules.config(OutputTarget.Rtmp("rtmp://x"), early.copy(autoLipSync = true), 30).avOffsetNs)
     }
 
     private class FakeLock(val mode: Int) : WifiLocks.Lock {
@@ -134,5 +144,24 @@ class StreamSettingsRulesTest {
         assertEquals(400, b.nextPollMs(5_000))
         assertEquals("for ten seconds after", 400, b.nextPollMs(14_999))
         assertEquals(2_000, b.nextPollMs(15_000))
+    }
+
+    @Test fun `a refused or mismatched slate is sent again, three times quickly, then rarely`() {
+        val r = SlateRetry()
+        assertFalse("not compared yet", r.onStatus(0, matches = null, rejected = null))
+        assertFalse("matches", r.onStatus(0, matches = true, rejected = null))
+        // The server reports a mismatch from 1 s on; the phone polls every second.
+        val sentAt = mutableListOf<Long>()
+        for (t in 1_000L..450_000L step 1_000L) {
+            if (r.onStatus(t, matches = false, rejected = null)) { r.sent(t); sentAt += t }
+        }
+        // Held 5 s first (the server checks at the next live keyframe), then 15, 30 and 60 s apart, then every 5 min.
+        assertEquals(listOf(6_000L, 21_000L, 51_000L, 111_000L, 411_000L), sentAt)
+        assertEquals(5, r.tries)
+        // A good report starts over; a refusal counts as bad too.
+        assertFalse(r.onStatus(460_000, matches = true, rejected = null))
+        assertEquals(0, r.tries)
+        assertFalse(r.onStatus(461_000, matches = null, rejected = "not H.264"))
+        assertTrue(r.onStatus(466_000, matches = null, rejected = "not H.264"))
     }
 }

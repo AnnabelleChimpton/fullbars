@@ -109,7 +109,7 @@ class SessionLogTest {
         assertTrue(s, s.contains("heat=1/rung1"))
         assertTrue(s, s.contains("ext=\"1920x1080 · camera audio\""))
         assertTrue(s, s.contains("mic peak -1.0 alerts=3"))
-        assertTrue(s, s.contains("[wifi \"Wi-Fi\" up 3200k 45ms q 0ms nak 0.0/s cap 0; helper \"Pixel\" up 500k rtt? battery 76% hot q 0ms nak 0.0/s cap 0; cellular \"T-Mobile\" down]"))
+        assertTrue(s, s.contains("[wifi \"Wi-Fi\" up 3200k 45ms q 0ms nak 0.0/s cap 0 proof never; helper \"Pixel\" up 500k rtt? battery 76% hot q 0ms nak 0.0/s cap 0 proof never; cellular \"T-Mobile\" down]"))
         assertFalse("values at their defaults are left out of the snapshot", s.contains("naks=0") || s.contains("encoder=\"\"") || s.contains("NaN"))
     }
 
@@ -187,9 +187,11 @@ class SessionLogTest {
         val ev = EventLines()
         assertEquals("srtla: link down Wi-Fi (uplink dead)", ev.line(0, EngineEvent.Link("srtla: link down Wi-Fi (uplink dead)")))
         assertEquals("abr 6000 -> 4500 kbps: down (queue 400 ms)", ev.line(100, EngineEvent.Bitrate("abr 6000 -> 4500 kbps: down (queue 400 ms)")))
-        assertNull("a second bitrate line within the second waits", ev.line(900, EngineEvent.Bitrate("abr 4500 -> 4400 kbps: hold")))
+        assertNull("a burst of bitrate lines is still held back", ev.line(400, EngineEvent.Bitrate("abr 4500 -> 4400 kbps: hold")))
         assertEquals("heat rung 0 -> 1 (status 2)", ev.line(950, EngineEvent.Note("heat rung 0 -> 1 (status 2)")))
-        assertEquals("abr 4400 -> 4600 kbps: up", ev.line(1_100, EngineEvent.Bitrate("abr 4400 -> 4600 kbps: up")))
+        // The engine sends one a second; arriving a little early must not cost the line.
+        assertEquals("abr 4400 -> 4600 kbps: up", ev.line(1_099, EngineEvent.Bitrate("abr 4400 -> 4600 kbps: up")))
+        assertEquals("abr 4600 -> 4800 kbps: up", ev.line(2_098, EngineEvent.Bitrate("abr 4600 -> 4800 kbps: up")))
         val mic = EngineEvent.MicInput(ActiveInput(7, android.media.AudioDeviceInfo.TYPE_USB_DEVICE, "USB mic"), "External mic connected")
         assertEquals("mic input USB mic: External mic connected", ev.line(1_200, mic))
     }
@@ -197,7 +199,14 @@ class SessionLogTest {
     @Test fun `the snapshot carries each link's queue and resends, and the new state fields`() {
         val st = EngineState(
             running = true, connection = ConnectionPhase.LIVE,
-            links = listOf(LinkInfo("wifi", "Wi-Fi", up = true, kbps = 3_200, rttMs = 45, queueMs = 120, nakRate = 2.5, capPackets = 300, overCap = 4)),
+            links = listOf(
+                LinkInfo("wifi", "Wi-Fi", up = true, kbps = 3_200, rttMs = 45, queueMs = 120, nakRate = 2.5, capPackets = 300, overCap = 4),
+                LinkInfo(
+                    "cell", "Mobile data", up = true, kbps = 400, rttMs = 70, capPackets = 80, proofAgoMs = 140,
+                    localDrops = 3, priority = "secondary", bytesSent = 12_400_000,
+                ),
+            ),
+            provenLinks = 2, clientSendDrops = 5,
             abrAction = "hold (draining)", queueMs = 120, naks = 42, overhead = 1.152, thermalHeadroom = 0.81f, phoneBatteryPct = 64,
             encoder = "c2.qti.avc.encoder High@4.1 CBR", videoDelayMs = 80, avDelayMs = 0,
             cadence = CadenceCounters(phoneRepeatTicks = 3, tickP99Ms = 9.25f),
@@ -205,7 +214,15 @@ class SessionLogTest {
             micInput = ActiveInput(1, android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC, "Phone mic"),
         )
         val s = SessionLogText.snapshot(st, null, alerts = 0, screenOn = false, pocketScreen = true)
-        assertTrue(s, s.contains("screen=off pocketScreen links=[wifi \"Wi-Fi\" up 3200k 45ms q 120ms nak 2.5/s cap 300 over 4]"))
+        assertTrue(
+            s,
+            s.contains(
+                "screen=off pocketScreen links=[wifi \"Wi-Fi\" up 3200k 45ms q 120ms nak 2.5/s cap 300 over 4 proof never; " +
+                    "cell \"Mobile data\" up 400k 70ms q 0ms nak 0.0/s cap 80 proof 140ms secondary drops 3 sent 12.4MB]",
+            ),
+        )
+        assertTrue(s, s.contains(" provenLinks=2"))
+        assertTrue(s, s.contains(" clientSendDrops=5"))
         assertTrue(s, s.contains(" queueMs=120"))
         assertTrue(s, s.contains(" naks=42"))
         assertTrue(s, s.contains(" overhead=1.152"))

@@ -228,7 +228,6 @@ internal fun sendsToValue(st: BrbStatus): String = when (st.outputKind) {
 /** Where the BRB screen viewers see in a dropout comes from: the phone's upload, or the server's built-in one. */
 internal fun brbScreenValue(st: BrbStatus): String = if (st.phoneSlate) "From this phone" else "Server's default"
 
-/** A quality's figures: "6 Mb/s · 2.8 GB/h". Mb/s is the one unit everywhere. */
 /** The 60 fps row's line: why it can't be chosen, or what it does. [can60] null: still checking the phone. */
 internal fun fps60Help(phoneCamera: Boolean, can60: Boolean?): String = when {
     !phoneCamera -> "Phone camera only."
@@ -237,6 +236,7 @@ internal fun fps60Help(phoneCamera: Boolean, can60: Boolean?): String = when {
     else -> "Smoother motion, a little less detail in each frame."
 }
 
+/** A quality's figures: "6 Mb/s · 2.8 GB/h". Mb/s is the one unit everywhere. */
 internal fun qualityValue(q: Quality): String = "${q.mbps} Mb/s · %.1f GB/h".format(q.gbPerHour)
 
 /** The shape's ratio (mono) and its one help line. */
@@ -837,7 +837,7 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
 
     if (c.combine) {
         SectionHeader("Delay")
-        HelpText("How far behind live viewers are. More delay rides out longer drops.")
+        HelpText("More delay rides out longer drops; viewers see you that much later.")
         Column(Modifier.selectableGroup()) {
             StreamDelay.entries.forEach { d ->
                 RadioRow(d.title, supporting = d.detail, selected = c.delay == d) { c.chooseDelay(d) }

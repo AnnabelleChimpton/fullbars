@@ -321,6 +321,11 @@ internal object SessionLogText {
         append(" nak ").append(String.format(Locale.ROOT, "%.1f", l.nakRate)).append("/s")
         append(" cap ").append(l.capPackets)
         if (l.overCap > 0) append(" over ").append(l.overCap)
+        // When the server last answered on it, its role if it's a standby, socket drops and its data use so far.
+        append(" proof ").append(l.proofAgoMs?.let { "${it}ms" } ?: "never")
+        if (l.priority != "primary") append(' ').append(l.priority)
+        if (l.localDrops > 0) append(" drops ").append(l.localDrops)
+        if (l.bytesSent > 0) append(" sent ").append(String.format(Locale.ROOT, "%.1f", l.bytesSent / 1_000_000.0)).append("MB")
     }
 
     /**
@@ -401,7 +406,7 @@ internal object SessionLogText {
 
     /**
      * What the engine reported as it happened, as a log line: link events with their reasons, bitrate changes (with the
-     * controller's reason), mic input changes and notes. [EventLines] keeps the bitrate lines to one a second.
+     * controller's reason), mic input changes and notes. The engine keeps the bitrate lines to one a second.
      */
     fun event(e: EngineEvent): String = when (e) {
         is EngineEvent.Link -> e.line
@@ -461,10 +466,11 @@ internal object SessionLogText {
 }
 
 /**
- * The engine's events as log lines, with the bitrate lines held to one per [abrGapMs] (the engine limits them too;
- * this keeps the file readable whatever it sends). Everything else is written as it comes.
+ * The engine's events as log lines. The engine already sends at most one bitrate line a second; [abrGapMs] is only a
+ * safety net well under that, so delivery jitter never drops a line the engine let through. Everything else is
+ * written as it comes.
  */
-internal class EventLines(private val abrGapMs: Long = 1_000) {
+internal class EventLines(private val abrGapMs: Long = 500) {
     private var lastAbrMs = Long.MIN_VALUE / 2
 
     @Synchronized

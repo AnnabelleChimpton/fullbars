@@ -380,6 +380,14 @@ internal fun notice(
 
 /** Offered once a stream, when the phone first warms up (thermal rung 1). */
 internal const val POCKET_HINT = "Phone is warming up. Scenes › Pocket screen keeps it cooler."
+
+/**
+ * Whether to offer the Pocket screen for heat: the ladder has stepped down and heat is the reason (Android's status at
+ * moderate or worse, or its forecast at 0.85 or more). A low battery alone also holds the first rung on a cool phone,
+ * and "warming up" would not be true then.
+ */
+internal fun pocketHintDue(thermalRung: Int, thermalStatus: Int, thermalHeadroom: Float): Boolean =
+    thermalRung >= 1 && (thermalStatus >= 2 || thermalHeadroom >= 0.85f)
 /** How long the Pocket screen offer and a mic change stay in the notice line. */
 internal const val LONG_NOTICE_MS = 6_000L
 

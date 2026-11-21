@@ -89,6 +89,18 @@ data class BrbStatus(
     val extras: List<BrbExtra> = emptyList(),
     /** The server waits for a live keyframe to put the camera back on air, and the phone is sending ([KeyframeBackstop]). */
     val needKeyframe: Boolean = false,
+    /**
+     * The slate's picture settings equal the live video's, so every switch to it is clean; null until the server has
+     * compared a live keyframe ([SlateRetry]).
+     */
+    val slateMatches: Boolean? = null,
+    /** Why the server refused this phone's last slate, until one is accepted; null when it didn't. */
+    val slateRejected: String? = null,
+    /** The slate the server uses: phone (this stream), saved or default; null from a server that doesn't say. */
+    val slateSource: String? = null,
+    /** The slate's and the live picture's sizes, "1080x1920", when the server reports them. */
+    val slateSize: String? = null,
+    val liveSize: String? = null,
 ) {
     val outputLabel: String get() = when (outputKind) {
         "twitch" -> if (outputTest) "Twitch (test stream)" else "Twitch"
@@ -137,6 +149,11 @@ class BrbClient(private val pairing: BrbPairing) {
                 }
             } ?: emptyList(),
             needKeyframe = o.optBoolean("needKeyframe"),
+            slateMatches = if (o.has("slateMatches")) o.optBoolean("slateMatches") else null,
+            slateRejected = o.optString("slateRejected").ifBlank { null },
+            slateSource = o.optString("slateSource").ifBlank { null },
+            slateSize = o.optString("slateSize").ifBlank { null },
+            liveSize = o.optString("liveSize").ifBlank { null },
         )
     }
 
@@ -331,6 +348,45 @@ internal class KeyframeBackstop(
 
     /** How long to wait before the next poll. */
     fun nextPollMs(nowMs: Long): Long = if (serverOnSlate || nowMs < troubleUntilMs) fastMs else slowMs
+}
+
+/**
+ * Sends the slates again when the paired server refused them or found they don't match the live picture (its status
+ * says `slateRejected`, or `slateMatches` false), so a dropout switches to a slate cleanly. The server compares at the
+ * next live keyframe after an upload, so a bad report must hold for [confirmMs] first. Then up to three tries, spaced
+ * by [gapsMs]; after that one every [thenMs], since a slate costs data on every link and the same settings rarely
+ * match on a later try. A good report starts the count again. Pure; fed with times.
+ */
+internal class SlateRetry(
+    private val confirmMs: Long = 5_000,
+    private val gapsMs: LongArray = longArrayOf(15_000, 30_000, 60_000),
+    private val thenMs: Long = 300_000,
+) {
+    private var badSinceMs = -1L
+    private var nextMs = Long.MIN_VALUE
+
+    /** Slates sent again since the last good report. */
+    var tries = 0
+        private set
+
+    /** After a status poll: true when the slates should be sent again now (then call [sent] if they were). */
+    fun onStatus(nowMs: Long, matches: Boolean?, rejected: String?): Boolean {
+        val bad = matches == false || rejected != null
+        if (!bad) {
+            badSinceMs = -1L
+            if (matches == true) { tries = 0; nextMs = Long.MIN_VALUE }
+            return false
+        }
+        if (badSinceMs < 0) badSinceMs = nowMs
+        return nowMs - badSinceMs >= confirmMs && nowMs >= nextMs
+    }
+
+    /** The slates went out again at [nowMs]. */
+    fun sent(nowMs: Long) {
+        nextMs = nowMs + if (tries < gapsMs.size) gapsMs[tries] else thenMs
+        tries++
+        badSinceMs = -1L
+    }
 }
 
 /** A pairing link that arrived from outside (a tapped fullbars:// link) and waits for the user's OK on the setup screen. */

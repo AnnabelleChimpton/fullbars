@@ -68,8 +68,13 @@ class InputClipWatchTest {
         assertEquals(0, p.gainFor(external = true))
         assertEquals(-4, p.copy(externalGainDb = -4).gainFor(external = true))
         assertEquals(InputChoice.AUTO, p.input)
-        assertTrue(p.voiceLeveler) // the "Voice" preset is the raw mic's default
+        assertFalse(p.voiceLeveler) // off until it's proven on phones
         assertFalse(p.monoVoice)
+    }
+
+    @Test fun `a plugged-in mic keeps the level it streamed at after the update`() {
+        assertEquals(10, MicSettings.firstExternalGainDb(freshInstall = false, phoneLevelDb = 10))
+        assertEquals(0, MicSettings.firstExternalGainDb(freshInstall = true, phoneLevelDb = 10))
     }
 
     @Test fun `stored choices read back, and unknown ones fall back`() {

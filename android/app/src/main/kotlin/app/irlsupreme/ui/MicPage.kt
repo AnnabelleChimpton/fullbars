@@ -95,9 +95,11 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
     var left by remember { mutableIntStateOf(SOUND_CHECK_SECONDS) }
     var take by remember { mutableStateOf<PcmClip?>(null) }
     var noTake by remember { mutableStateOf(false) }
-    // The stream's sound settings, read here and written straight back (no stream reads them until the next go-live).
+    // The stream's sound settings, read here and written straight back. Sound quality waits for the next go-live; a
+    // running stream follows the lip sync offset at once.
     var audio by remember { mutableStateOf(StreamSettings.audio(ctx)) }
     var avOffset by remember { mutableIntStateOf(StreamSettings.avOffsetMs(ctx)) }
+    val avOffsetMin = remember { StreamRules.avOffsetMinMs(StreamSettings.autoLipSync(ctx)) }
 
     // The options a stream doesn't use yet stay hidden, and the check runs without them, as a stream does.
     val options = STREAM_USES_MIC_OPTIONS
@@ -248,8 +250,8 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
     HelpText("Set it before you go live. It stays the same for the whole stream.")
 
     SectionHeader("Lip sync")
-    OffsetStepper(avOffset) { avOffset = it; StreamSettings.setAvOffsetMs(ctx, it) }
-    HelpText("Delay the sound if viewers hear you before your lips move. The sound can't arrive early, so less than 0 ms does nothing yet.")
+    OffsetStepper(avOffset, avOffsetMin) { avOffset = it; StreamSettings.setAvOffsetMs(ctx, it) }
+    HelpText("Delay the sound if viewers hear you before your lips move. Works while you're live too.")
 
     Footnote(
         null,
@@ -260,16 +262,17 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
 }
 
 /**
- * The sound's offset from the picture, −300..+300 ms in 10 ms steps: − and + keys, the value, and Reset when it isn't
- * 0. TalkBack sees an adjustable value.
+ * The sound's offset from the picture, [minMs]..+300 ms in 10 ms steps: − and + keys, the value, and Reset when it
+ * isn't 0. [minMs] is 0 unless automatic lip sync is on (the sound can only be held back). TalkBack sees an adjustable
+ * value.
  */
 @Composable
-private fun OffsetStepper(ms: Int, onChange: (Int) -> Unit) {
+private fun OffsetStepper(ms: Int, minMs: Int, onChange: (Int) -> Unit) {
     val c = LocalFbColors.current
     val view = LocalView.current
     val current by rememberUpdatedState(ms)
     val set: (Int) -> Unit = { v ->
-        val n = StreamRules.avOffsetMs(v)
+        val n = StreamRules.avOffsetMs(v, allowEarlier = minMs < 0)
         if (n != current) { FbHaptics.play(view, HapticPattern.KEY); onChange(n) }
     }
     Row(
@@ -278,8 +281,8 @@ private fun OffsetStepper(ms: Int, onChange: (Int) -> Unit) {
                 contentDescription = "Sound delay"
                 stateDescription = offsetSpoken(ms)
                 progressBarRangeInfo = ProgressBarRangeInfo(
-                    ms.toFloat(), -StreamRules.AV_OFFSET_MAX_MS.toFloat()..StreamRules.AV_OFFSET_MAX_MS.toFloat(),
-                    steps = 2 * StreamRules.AV_OFFSET_MAX_MS / StreamRules.AV_OFFSET_STEP_MS - 1,
+                    ms.toFloat(), minMs.toFloat()..StreamRules.AV_OFFSET_MAX_MS.toFloat(),
+                    steps = (StreamRules.AV_OFFSET_MAX_MS - minMs) / StreamRules.AV_OFFSET_STEP_MS - 1,
                 )
                 setProgress { v -> set(v.roundToInt()); true }
             },
@@ -287,12 +290,12 @@ private fun OffsetStepper(ms: Int, onChange: (Int) -> Unit) {
     ) {
         Text("Sound delay", style = FbType.row, color = c.text, modifier = Modifier.weight(1f).clearAndSetSemantics {})
         if (ms != 0) FbButton("Reset", { set(0) }, kind = FbButtonKind.Text)
-        StepKey("−", "Sound 10 ms earlier") { set(current - StreamRules.AV_OFFSET_STEP_MS) }
+        StepKey("−", "Sound 10 ms earlier", enabled = ms > minMs) { set(current - StreamRules.AV_OFFSET_STEP_MS) }
         Text(
             offsetText(ms), style = FbType.value, color = c.text, textAlign = TextAlign.Center,
             modifier = Modifier.width(88.dp).clearAndSetSemantics {},
         )
-        StepKey("+", "Sound 10 ms later") { set(current + StreamRules.AV_OFFSET_STEP_MS) }
+        StepKey("+", "Sound 10 ms later", enabled = ms < StreamRules.AV_OFFSET_MAX_MS) { set(current + StreamRules.AV_OFFSET_STEP_MS) }
     }
 }
 

@@ -42,18 +42,21 @@ private const val POCKET_BRIGHTNESS = 0.01f
 /**
  * The Pocket screen: an opaque black layer over the whole live screen, the window dimmed to [POCKET_BRIGHTNESS] (put
  * back when it goes, however it goes), and one small dim line with the pill's headline that moves every minute so it
- * never marks the screen. Trouble the streamer must notice (Reconnecting, Camera lost, the stream ending) shows at full
- * brightness. The screen stays on (the live screen keeps it on), haptics and TalkBack carry on as usual, and the
+ * never marks the screen. Trouble the streamer must notice (Reconnecting, Camera lost, the stream ending) puts the
+ * screen back to its normal brightness and shows the line in full, until the trouble is over. The screen stays on (the live screen keeps it on), haptics and TalkBack carry on as usual, and the
  * engine stops drawing the preview meanwhile (set by the live screen). A double tap leaves it: a single touch in a
  * pocket shouldn't light the screen up again.
  */
 @Composable
 internal fun PocketScreenOverlay(pill: PillModel, health: Health, ending: Boolean, onLeave: () -> Unit) {
     val view = LocalView.current
-    DisposableEffect(view) {
-        val window = view.context.findActivity()?.window
-        val before = window?.attributes?.screenBrightness ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-        window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = POCKET_BRIGHTNESS } }
+    val window = remember(view) { view.context.findActivity()?.window }
+    // Read once, before the first dimming, so a switch to an alarm and back never records the dim level as the one to
+    // put back.
+    val before = remember(window) { window?.attributes?.screenBrightness ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE }
+    val alarm = pocketAlarm(health, ending)
+    DisposableEffect(window, alarm) {
+        window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = if (alarm) before else POCKET_BRIGHTNESS } }
         onDispose { window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = before } } }
     }
     var minute by remember { mutableLongStateOf(System.currentTimeMillis() / 60_000) }
@@ -63,7 +66,6 @@ internal fun PocketScreenOverlay(pill: PillModel, health: Health, ending: Boolea
             minute = System.currentTimeMillis() / 60_000
         }
     }
-    val alarm = pocketAlarm(health, ending)
     val headline = if (health == Health.OFF && !ending) "Ended" else pill.headline
     BoxWithConstraints(
         Modifier

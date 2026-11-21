@@ -61,6 +61,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -127,6 +128,7 @@ import app.irlsupreme.ui.live.LiveDetails
 import app.irlsupreme.ui.live.LONG_NOTICE_MS
 import app.irlsupreme.ui.live.NOTICE_MS
 import app.irlsupreme.ui.live.PocketScreenOverlay
+import app.irlsupreme.ui.live.pocketHintDue
 import app.irlsupreme.ui.live.externalCameraNotice
 import app.irlsupreme.ui.live.msToNextSecond
 import app.irlsupreme.ui.live.NotOnCameraFrame
@@ -220,7 +222,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
 
     // The Pocket screen: black and dimmed for a phone in a pocket, the preview no longer drawn (the stream carries on).
     // Offered once a stream when the phone first warms up; entered from Scenes; a double tap leaves it.
-    var pocketScreen by remember { mutableStateOf(false) }
+    // Saveable: a dark-mode or font change recreates the activity, and the screen mustn't light up in a pocket for it.
+    var pocketScreen by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = pocketScreen) { pocketScreen = false }
     DisposableEffect(pocketScreen, state.running) {
         engine.setPreviewSuppressed(pocketScreen)
@@ -231,8 +234,9 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         }
     }
     var pocketHintAt by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(state.thermalRung >= 1) {
-        if (state.thermalRung >= 1 && !pocketScreen && PocketHintOnce.claim(engine.lastSession.value)) {
+    val warm = pocketHintDue(state.thermalRung, state.thermalStatus, state.thermalHeadroom)
+    LaunchedEffect(warm) {
+        if (warm && !pocketScreen && PocketHintOnce.claim(engine.lastSession.value)) {
             pocketHintAt = System.currentTimeMillis()
             delay(LONG_NOTICE_MS)
             pocketHintAt = 0L

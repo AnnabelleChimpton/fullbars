@@ -7,6 +7,7 @@ import app.irlsupreme.ui.live.externalCameraNotice
 import app.irlsupreme.ui.live.msToNextSecond
 import app.irlsupreme.ui.live.notice
 import app.irlsupreme.ui.live.pocketAlarm
+import app.irlsupreme.ui.live.pocketHintDue
 import app.irlsupreme.ui.live.pocketSpot
 import app.irlsupreme.ui.live.timerText
 import org.junit.Assert.assertEquals
@@ -38,7 +39,7 @@ class LivePocketAndTimerTest {
         assertEquals(pocketSpot(-1), pocketSpot(5))
     }
 
-    @Test fun `the pocket screen shows trouble and the end at full brightness`() {
+    @Test fun `the pocket screen brightens for trouble and the end`() {
         assertTrue(pocketAlarm(Health.RECONNECTING, ending = false))
         assertTrue(pocketAlarm(Health.CAMERA_LOST, ending = false))
         assertTrue(pocketAlarm(Health.FAILED, ending = false))
@@ -47,6 +48,14 @@ class LivePocketAndTimerTest {
         assertFalse(pocketAlarm(Health.GREAT, ending = false))
         assertFalse(pocketAlarm(Health.WEAK, ending = false))
         assertFalse(pocketAlarm(Health.HOT, ending = false))
+    }
+
+    @Test fun `the pocket screen is offered for heat, not for a low battery on a cool phone`() {
+        assertTrue(pocketHintDue(thermalRung = 1, thermalStatus = 2, thermalHeadroom = Float.NaN))
+        assertTrue(pocketHintDue(thermalRung = 1, thermalStatus = 0, thermalHeadroom = 0.9f))
+        assertFalse(pocketHintDue(thermalRung = 1, thermalStatus = 0, thermalHeadroom = 0.5f)) // the battery floor
+        assertFalse(pocketHintDue(thermalRung = 1, thermalStatus = 1, thermalHeadroom = Float.NaN))
+        assertFalse(pocketHintDue(thermalRung = 0, thermalStatus = 2, thermalHeadroom = 0.9f))
     }
 
     @Test fun `an external camera with no picture says so instead of a lost link`() {

@@ -7,15 +7,18 @@ import androidx.core.content.edit
 import app.irlsupreme.engine.CameraInput
 import app.irlsupreme.engine.OutputTarget
 import app.irlsupreme.engine.StreamConfig
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * How far behind live a combined-connections stream runs: the SRT buffer that rides out drops. The bitrate control
- * follows it (its thresholds scale with the buffer). A 1 s "Fast" choice stays off the list until paired servers run
- * with a 1 s floor of their own.
+ * How much delay a combined-connections stream adds: the SRT buffer that rides out drops (Twitch's own delay comes
+ * on top). The bitrate control follows it (its thresholds scale with the buffer). A 1 s "Fast" choice stays off the
+ * list until paired servers run with a 1 s floor of their own.
  */
 enum class StreamDelay(val latencyMs: Int, val title: String, val detail: String) {
-    BALANCED(2_000, "Balanced", "About 2 s behind. Rides out most drops."),
-    ROCK_SOLID(4_000, "Rock solid", "About 4 s behind. Rides out longer drops on a weak signal."),
+    BALANCED(2_000, "Balanced", "Adds about 2 s. Rides out most drops."),
+    ROCK_SOLID(4_000, "Rock solid", "Adds about 4 s. Rides out longer drops on a weak signal."),
 }
 
 /** The stream's sound quality, fixed for a whole stream. */
@@ -47,8 +50,25 @@ object StreamSettings {
     fun audio(ctx: Context): AudioQuality = MicSettings.enumOr(prefs(ctx).getString(KEY_AUDIO, null), AudioQuality.STANDARD)
     fun setAudio(ctx: Context, a: AudioQuality) = prefs(ctx).edit { putString(KEY_AUDIO, a.name) }
 
-    fun avOffsetMs(ctx: Context): Int = StreamRules.avOffsetMs(prefs(ctx).getInt(KEY_AV_OFFSET, 0))
-    fun setAvOffsetMs(ctx: Context, ms: Int) = prefs(ctx).edit { putInt(KEY_AV_OFFSET, StreamRules.avOffsetMs(ms)) }
+    private var avOffsetFlow: MutableStateFlow<Int>? = null
+
+    /**
+     * The sound's offset from the picture, ms, as it stands; a running stream follows changes ([StreamService]).
+     * Below 0 only with automatic lip sync on, since the sound can only be held back.
+     */
+    @Synchronized
+    fun avOffsetState(ctx: Context): StateFlow<Int> = (avOffsetFlow ?: MutableStateFlow(load(ctx)).also { avOffsetFlow = it }).asStateFlow()
+
+    private fun load(ctx: Context): Int = StreamRules.avOffsetMs(prefs(ctx).getInt(KEY_AV_OFFSET, 0), allowEarlier = autoLipSync(ctx))
+
+    fun avOffsetMs(ctx: Context): Int = avOffsetState(ctx).value
+
+    fun setAvOffsetMs(ctx: Context, ms: Int) {
+        val v = StreamRules.avOffsetMs(ms, allowEarlier = autoLipSync(ctx))
+        prefs(ctx).edit { putInt(KEY_AV_OFFSET, v) }
+        avOffsetState(ctx)
+        avOffsetFlow?.value = v
+    }
 
     /** Automatic lip sync: debug builds only, and only when the debug control turned it on. */
     fun autoLipSync(ctx: Context): Boolean =
@@ -77,11 +97,17 @@ internal object StreamRules {
     const val AV_OFFSET_MAX_MS = (StreamConfig.MAX_AV_OFFSET_NS / 1_000_000).toInt()
     const val AV_OFFSET_STEP_MS = 10
 
-    /** An A/V offset in range, on the 10 ms grid. */
-    fun avOffsetMs(ms: Int): Int {
-        val c = ms.coerceIn(-AV_OFFSET_MAX_MS, AV_OFFSET_MAX_MS)
+    /**
+     * An A/V offset in range, on the 10 ms grid. The sound can only be held back, so below 0 means something only on
+     * top of automatic lip sync: without [allowEarlier] the range is 0..+300.
+     */
+    fun avOffsetMs(ms: Int, allowEarlier: Boolean = false): Int {
+        val c = ms.coerceIn(avOffsetMinMs(allowEarlier), AV_OFFSET_MAX_MS)
         return Math.round(c / AV_OFFSET_STEP_MS.toFloat()) * AV_OFFSET_STEP_MS
     }
+
+    /** The lowest offset the setting offers: −300 ms with automatic lip sync on, else 0. */
+    fun avOffsetMinMs(allowEarlier: Boolean): Int = if (allowEarlier) -AV_OFFSET_MAX_MS else 0
 
     /**
      * The frame rate to ask the engine for: 60 only when it was asked for, the phone camera is the camera, and
@@ -123,7 +149,7 @@ internal object StreamRules {
             monoVoice = options && mic.monoVoice,
             micInput = if (options) mic.input else app.irlsupreme.engine.audio.InputChoice.AUTO,
             externalMicGainDb = if (options) mic.externalGainDb.toFloat() else null,
-            avOffsetNs = avOffsetMs(c.avOffsetMs) * 1_000_000L,
+            avOffsetNs = avOffsetMs(c.avOffsetMs, allowEarlier = c.autoLipSync) * 1_000_000L,
             autoLipSync = c.autoLipSync,
             channelLogin = c.channelLogin,
         )
