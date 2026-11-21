@@ -95,6 +95,8 @@ internal class MixStage(
     private var camF = FloatArray(0)
     private var mixF = FloatArray(0)
     private var fxF = FloatArray(0)
+    /** The voice before the mute and the duck while either acts, for the meter. */
+    private var meterF = FloatArray(0)
 
     /** See [AudioPipeline.playEffect]. Any thread. */
     fun playEffect(samples: ShortArray, startAtNs: Long, gain: Float = 1f, replaces: Boolean = false) {
@@ -119,7 +121,7 @@ internal class MixStage(
      * [camCovered] whether the camera really had it; null while no camera is attached. [micGainDb] is the level for
      * the mic open now (null: the user's [MicDsp.gainDb]). With [micFadeOut], the mic is about to close (a switch of
      * source): its chunk fades to silence so the cut doesn't click. Returns the level as viewers get it, before the
-     * mute.
+     * mute and before music that turns the mic off.
      *
      * After this, [pcm] is exactly what goes to the encoder, stamped [outPtsNs].
      */
@@ -135,7 +137,7 @@ internal class MixStage(
         micFadeOut: Boolean = false,
     ): MicLevel {
         val n = frames * channels
-        if (micF.size < n) { micF = FloatArray(n); camF = FloatArray(n); mixF = FloatArray(n); fxF = FloatArray(n) }
+        if (micF.size < n) { micF = FloatArray(n); camF = FloatArray(n); mixF = FloatArray(n); fxF = FloatArray(n); meterF = FloatArray(n) }
         // A mic that just (re)opened starts mid-sound after silence or another source: fade it in.
         if (micPresent && micFadeIn) { crossfade(null, pcm, pcm, frames, channels, SWITCH_FADE_FRAMES); micFadeIn = false }
         if (micPresent && micFadeOut) applyRamp(pcm, frames, channels, 1f, 0f, frames)
@@ -204,16 +206,20 @@ internal class MixStage(
         val musicOn = m != null && m.engaged
         val preMuteWas = preMute
         val preTarget = if (muted && (musicOn || preMute < 1f)) 0f else 1f
-        if (preMute != 1f || preTarget != 1f) preMute = rampF(voice, fx, frames, preMute, preTarget, MUTE_RAMP_FRAMES)
         val duckTarget = if (musicOn && m?.micOff == true) 0f else 1f
-        if (micDuck != 1f || duckTarget != 1f) micDuck = rampF(voice, null, frames, micDuck, duckTarget, DUCK_FRAMES)
+        val muting = preMute != 1f || preTarget != 1f
+        val ducking = micDuck != 1f || duckTarget != 1f
+        // The meter reads the voice as it was before either, like the plain mute (after the limiter) always has.
+        val meter = if (muting || ducking) { System.arraycopy(voice, 0, meterF, 0, n); meterF } else null
+        if (muting) preMute = rampF(voice, fx, frames, preMute, preTarget, MUTE_RAMP_FRAMES)
+        if (ducking) micDuck = rampF(voice, null, frames, micDuck, duckTarget, DUCK_FRAMES)
         if (musicOn) {
             if (fx == null) { fxF.fill(0f, 0, n); fx = fxF }
             m?.addInto(fxF, frames, channels)
         }
 
         // One limiter over the sum; it meters the voice alone.
-        val level = dsp.limit(voice, fx, frames, pcm)
+        val level = dsp.limit(voice, fx, frames, pcm, meter)
         if (level.inClipped > 0) { inputClipChunks++; inputClips += level.inClipped }
         // Mute and unmute ramp over ~10 ms: a hard cut mid-word clicks. With music on, the output stays up once the
         // voice is silent before the limiter (held where it is until then, so the voice never leaks).

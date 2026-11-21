@@ -108,6 +108,8 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
     /** The voice and the alert sound, [la] frames deep: kept apart so the meter can show the voice alone. */
     private val delay = FloatArray(la * channels)
     private val delayFx = FloatArray(la * channels)
+    /** The voice the meter reads, as deep: the voice itself, or what it was before a mute or duck ([limit]'s meter). */
+    private val delayMeter = FloatArray(la * channels)
     private var delayPos = 0
     /** The gain the sum gets. */
     private val gainSum = LimiterGain(la, hold, release)
@@ -212,9 +214,10 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
      * [CEILING]), [fx] the alert sound to add to it (null: none). Writes [frames] frames of 16-bit PCM to [out], the
      * sum of [latencyFrames] frames earlier. The meter reads the voice alone (at the gain the sum got), so a chime
      * doesn't show as the mic's level, and [MicLevel.reductionDb] is what the voice alone would have needed (the sum
-     * itself is always limited as a whole).
+     * itself is always limited as a whole). [meter], if given, is the voice to meter instead of [x]: the voice before
+     * it was muted or ducked under music, so the meter still shows the mic working.
      */
-    internal fun limit(x: FloatArray, fx: FloatArray?, frames: Int, out: ByteArray): MicLevel {
+    internal fun limit(x: FloatArray, fx: FloatArray?, frames: Int, out: ByteArray, meter: FloatArray? = null): MicLevel {
         var peak = 0f
         var sumSq = 0.0
         var minGain = 1f
@@ -227,7 +230,8 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
                 val s = if (fx != null) v + fx[base + ch] else v
                 val a = if (s < 0) -s else s
                 if (a > framePeak) framePeak = a
-                val av = if (v < 0) -v else v
+                val mv = if (meter != null) meter[base + ch] else v
+                val av = if (mv < 0) -mv else mv
                 if (av > voicePeak) voicePeak = av
             }
             val need = if (framePeak > CEILING) CEILING / framePeak else 1f
@@ -240,15 +244,17 @@ class MicDsp(private val sampleRate: Int, private val channels: Int) {
             for (ch in 0 until channels) {
                 val v = delay[d + ch]
                 val e = delayFx[d + ch]
+                val m = delayMeter[d + ch]
                 // Out: the frame from [la] ago, at the gain worked out for it. The clamp only ever trims float error.
                 val y = ((v + e) * g).coerceIn(-CEILING, CEILING)
                 delay[d + ch] = x[base + ch]
                 delayFx[d + ch] = if (fx != null) fx[base + ch] else 0f
+                delayMeter[d + ch] = if (meter != null) meter[base + ch] else x[base + ch]
                 val o = (y * 32768f).roundToInt().coerceIn(-32768, 32767)
                 val i = (base + ch) * 2
                 out[i] = (o and 0xff).toByte()
                 out[i + 1] = (o shr 8).toByte()
-                val voice = v * g
+                val voice = m * g
                 val a = if (voice < 0) -voice else voice
                 if (a > peak) peak = a
                 sumSq += (voice * voice).toDouble()

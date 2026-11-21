@@ -37,9 +37,12 @@ class MixStageMusicTest {
         var k = 0
         val pts: Long get() = 1_000_000_000L + k * chunkNs
 
+        /** The last chunk's meter reading. */
+        var level = MicLevel.SILENT
+
         fun chunk(mic: FloatArray, muted: Boolean = false, micGainDb: Float? = null): FloatArray {
             val pcm = Signals.toPcm(mic)
-            stage.process(pcm, frames, pts, null, false, micGainDb, muted, micPresent = true)
+            level = stage.process(pcm, frames, pts, null, false, micGainDb, muted, micPresent = true)
             k++
             return Signals.fromPcm(pcm)
         }
@@ -121,6 +124,25 @@ class MixStageMusicTest {
         music.on = false
         repeat(8) { out = r.chunk(voice(8 + it)) }
         assertEquals(0.25, amps(out).first, 0.01)
+    }
+
+    @Test fun `the mic meter still reads the voice while it's muted or turned off under music`() {
+        val plain = Rig()
+        repeat(10) { plain.chunk(voice(it)) }
+        val heard = plain.level.rmsDb
+        assertTrue("a -12 dB voice reads near -15 dB RMS: $heard", heard > -20f)
+        // Muted with music on: the voice is gone from the stream, not from the meter.
+        val muted = Rig(music = ToneMusic(1000.0, 0.1))
+        repeat(10) { muted.chunk(voice(it), muted = it >= 3) }
+        assertEquals(heard, muted.level.rmsDb, 0.5f)
+        // Music that turns the mic off: the same.
+        val ducked = Rig(music = ToneMusic(1000.0, 0.05).apply { off = true })
+        repeat(10) { ducked.chunk(voice(it)) }
+        assertEquals(heard, ducked.level.rmsDb, 0.5f)
+        // And silence still reads as silence.
+        val quiet = Rig(music = ToneMusic(1000.0, 0.1))
+        repeat(10) { quiet.chunk(FloatArray(frames * 2), muted = true) }
+        assertEquals(MicLevel.FLOOR_DB, quiet.level.rmsDb, 0f)
     }
 
     @Test fun `with no music, mutes behave exactly as before`() {
