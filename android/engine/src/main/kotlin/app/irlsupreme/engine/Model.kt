@@ -72,6 +72,14 @@ data class LinkInfo(
     val capPackets: Int = 0,
     /** Packets pushed past its in-flight cap because every link was full, since the stream started. */
     val overCap: Long = 0,
+    /** How long since the server last answered on this link, ms; null before it ever did. */
+    val proofAgoMs: Long? = null,
+    /** Packets this link's socket refused (lost before leaving the phone), since the stream started. */
+    val localDrops: Long = 0,
+    /** Its role in the bond: "primary", or a standby that only carries what the others can't. */
+    val priority: String = "primary",
+    /** Bytes sent on this link since the stream started (its data use). */
+    val bytesSent: Long = 0,
 )
 
 /**
@@ -267,6 +275,12 @@ data class EngineState(
     val sendErrors: Long = 0,
     /** Bonded: frames the SRT client dropped from its own queue (it couldn't send them in time), video and audio. */
     val libraryDroppedFrames: Long = 0,
+    /** Bonded: connected links the server has answered on lately (a link that only looks connected isn't counted). */
+    val provenLinks: Int = 0,
+    /** Bonded: packets from the SRT client the bonding sender couldn't take in (its socket buffer was full). */
+    val clientSendDrops: Long = 0,
+    /** Bonded: packets dropped while the links were still registering with the server. */
+    val droppedDuringHandshake: Long = 0,
     /** Render ticks the thermal ladder dropped on purpose (0 now that it lowers the rate evenly). */
     val thermalSkips: Long = 0,
     /** Unexpected errors caught inside render ticks (each cost at most that tick). */

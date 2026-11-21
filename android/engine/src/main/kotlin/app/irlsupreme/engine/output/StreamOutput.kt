@@ -20,6 +20,11 @@ interface StreamOutput {
     val queueDelayMs: Int get() = 0
     /** Bits/s measured leaving the socket, for outputs that can tell (0 otherwise). */
     val throughputBps: Long get() = 0
+    /**
+     * Counts the output's own [queueDelayMs]/[throughputBps] readings, so a reader on another timer can tell a new
+     * reading from one it has already seen (0 for outputs that don't measure).
+     */
+    val meterReadings: Long get() = 0
     /** Frames the output dropped while live (its own drops plus the protocol client's), for outputs that count them. */
     val droppedFrames: Long get() = 0
 

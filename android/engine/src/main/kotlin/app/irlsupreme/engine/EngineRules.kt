@@ -28,13 +28,16 @@ internal object EngineRules {
 
     /**
      * How late the picture on screen is against the sound, ns: the phone camera's capture-to-draw latency while it is
-     * drawn, the external camera's capture-to-screen delay while that is, else 0. Unknown counts as 0.
+     * drawn, the external camera's capture-to-screen delay while that is, else 0. Unknown counts as 0. While the
+     * external camera's own sound is used ([cameraAudio]) it is 0: that sound is played out on the same clock as its
+     * picture, so it is already in step and holding it back would make it late. Only the phone mic needs the delay.
      */
-    fun videoDelayNs(activeSource: String, cameraLatencyNs: Long?, externalDelayNs: Long?): Long = when (activeSource) {
-        "phone" -> cameraLatencyNs ?: 0L
-        "camera" -> externalDelayNs ?: 0L
-        else -> 0L
-    }.coerceAtLeast(0L)
+    fun videoDelayNs(activeSource: String, cameraLatencyNs: Long?, externalDelayNs: Long?, cameraAudio: Boolean): Long =
+        when (activeSource) {
+            "phone" -> cameraLatencyNs ?: 0L
+            "camera" -> if (cameraAudio) 0L else externalDelayNs ?: 0L
+            else -> 0L
+        }.coerceAtLeast(0L)
 
     fun clampAvOffset(ns: Long): Long = ns.coerceIn(-StreamConfig.MAX_AV_OFFSET_NS, StreamConfig.MAX_AV_OFFSET_NS)
 

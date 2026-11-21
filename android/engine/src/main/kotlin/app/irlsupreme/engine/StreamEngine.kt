@@ -84,6 +84,7 @@ class StreamEngine(private val context: Context) {
     private var resumeWatch = ResumeWatch()
     /** Direct RTMP: the backlog is past saving (the output flushes it itself); logged once per episode. */
     private var rtmpFlushing = false
+    private var rtmpReading = -1L
     private val abrEvents = RateLimit(ABR_EVENT_EVERY_MS)
     private var weak = app.irlsupreme.engine.abr.WeakSignalDetector()
     /** Thermal cap on the bitrate, refreshed by [tick]. */
@@ -198,6 +199,7 @@ class StreamEngine(private val context: Context) {
         abrStarted = false
         resumeWatch = ResumeWatch()
         rtmpFlushing = false
+        rtmpReading = -1L
         rungMs.fill(0)
         rungCountedAtMs = 0
         lastDiagMs = 0
@@ -577,6 +579,12 @@ class StreamEngine(private val context: Context) {
     /** The audio path's finer health for the session log (clips, jitter, leveler, encoder); null while not streaming. */
     fun audioDiagnostics(): AudioDiagnostics? = audio?.diagnostics()
 
+    /**
+     * Combined connections: encode and send the slates to the server again (it refused them, or they don't match the
+     * live picture). False when nothing started: not bonded, an upload still running, or none sent yet.
+     */
+    fun resendSlate(): Boolean = (output as? BondedOutput)?.resendSlate() ?: false
+
     /** The user's A/V offset, ns (+: the sound later), clamped to +-300 ms; eases in at the audio's own pace. */
     fun setAvOffsetNs(ns: Long) {
         avOffsetNs = EngineRules.clampAvOffset(ns)
@@ -726,7 +734,9 @@ class StreamEngine(private val context: Context) {
         val congested = congestedHold.update(out.phase == ConnectionPhase.LIVE && rawCongested)
         if (out.phase == ConnectionPhase.LIVE && targetBitrate < lowestBitrate) lowestBitrate = targetBitrate
         // Lip sync: the on-screen camera's delay, measured always, applied only when automatic lip sync is on.
-        val measured = EngineRules.videoDelayNs(comp.activeSource, comp.cameraLatencyNs, comp.rtmp?.clock?.micAlignDelayNs)
+        val measured = EngineRules.videoDelayNs(
+            comp.activeSource, comp.cameraLatencyNs, comp.rtmp?.clock?.micAlignDelayNs, cameraAudio = audio?.usingCamera == true,
+        )
         measuredVideoDelayNs = measured
         appliedVideoDelayNs = if (autoLipSync) measured else 0
         // One caller at a steady pace: its resend rates are per window.
@@ -814,6 +824,9 @@ class StreamEngine(private val context: Context) {
             if (EngineRules.worthSeeding(measured, ctl.targetBps)) {
                 ctl.seed(measured)
                 note("abr: starting from ${measured / 1000} kbps the links delivered while connecting")
+            } else {
+                // Before going live the links carry only the handshake, so this is the usual case: say so in the log.
+                note("abr: starting from ${ctl.targetBps / 1000} kbps (links delivered ${measured / 1000} kbps while connecting, too little to start higher)")
             }
         } else if (resumed) {
             ctl.onResume()
@@ -843,6 +856,11 @@ class StreamEngine(private val context: Context) {
     private fun rtmpTick(now: Long, out: StreamOutput) {
         val ctl = rtmpAbr ?: return
         if (out.phase != ConnectionPhase.LIVE) { weak.reset(); setWeakSignal(false); return }
+        // The output measures on its own 250 ms timer, which drifts against this one: use each reading once, or one
+        // keyframe burst read twice looks like a sustained backlog.
+        val reading = out.meterReadings
+        if (reading == rtmpReading) return
+        rtmpReading = reading
         val queue = out.queueDelayMs
         ctl.update(now, queue, out.throughputBps, thermalCeiling)
         if (ctl.flushNow != rtmpFlushing) {
@@ -967,6 +985,9 @@ class StreamEngine(private val context: Context) {
             droppedLocal = st?.droppedLocal ?: 0,
             sendErrors = st?.sendErrors ?: 0,
             libraryDroppedFrames = bonded?.libraryDroppedFrames ?: 0,
+            provenLinks = st?.provenLinks ?: 0,
+            clientSendDrops = st?.clientSendDrops ?: 0,
+            droppedDuringHandshake = st?.droppedDuringHandshake ?: 0,
             thermalSkips = comp.thermalSkips,
             renderErrors = comp.renderErrors,
             thermalHeadroom = headroom,

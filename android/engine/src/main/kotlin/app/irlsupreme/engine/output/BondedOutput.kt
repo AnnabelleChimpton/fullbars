@@ -97,6 +97,22 @@ class BondedOutput(
     @Synchronized
     private fun sendSlateOnce() {
         if (slateThread != null || stopping) return
+        startSlateUpload()
+    }
+
+    /**
+     * Encodes and sends the slates again, when the server refused the last ones or found they don't match the live
+     * picture. False (nothing started) while an upload is still running, before the first one, or while stopping.
+     */
+    @Synchronized
+    fun resendSlate(): Boolean {
+        val t = slateThread ?: return false
+        if (stopping || t.isAlive) return false
+        startSlateUpload()
+        return true
+    }
+
+    private fun startSlateUpload() {
         slateThread = Thread({
             try {
                 // Let the live stream settle first: its delivered rate steady for a while (or a timeout), so the
@@ -269,6 +285,10 @@ class BondedOutput(
                 nakRate = naks[l.linkId] ?: 0.0,
                 capPackets = s?.capPackets ?: 0,
                 overCap = s?.overCapSent ?: 0,
+                proofAgoMs = s?.proofAgoMs,
+                localDrops = s?.localDrops ?: 0,
+                priority = (s?.priority ?: LinkPriority.PRIMARY).name.lowercase(),
+                bytesSent = s?.bytesSent ?: 0,
             )
         }.sortedBy { it.kind }
     }

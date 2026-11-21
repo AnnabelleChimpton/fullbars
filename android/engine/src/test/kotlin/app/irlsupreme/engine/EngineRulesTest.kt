@@ -26,12 +26,18 @@ class EngineRulesTest {
     }
 
     @Test fun theVideoDelayFollowsTheCameraOnScreen() {
-        assertEquals(80_000_000L, EngineRules.videoDelayNs("phone", 80_000_000L, 700_000_000L))
-        assertEquals(700_000_000L, EngineRules.videoDelayNs("camera", 80_000_000L, 700_000_000L))
-        assertEquals(0L, EngineRules.videoDelayNs("none", 80_000_000L, 700_000_000L)) // a card: no camera to follow
-        assertEquals(0L, EngineRules.videoDelayNs("phone", null, null)) // not measured yet
-        assertEquals(0L, EngineRules.videoDelayNs("camera", 1L, null))
-        assertEquals(0L, EngineRules.videoDelayNs("phone", -5L, null))
+        assertEquals(80_000_000L, EngineRules.videoDelayNs("phone", 80_000_000L, 700_000_000L, cameraAudio = false))
+        assertEquals(700_000_000L, EngineRules.videoDelayNs("camera", 80_000_000L, 700_000_000L, cameraAudio = false))
+        assertEquals(0L, EngineRules.videoDelayNs("none", 80_000_000L, 700_000_000L, cameraAudio = false)) // a card
+        assertEquals(0L, EngineRules.videoDelayNs("phone", null, null, cameraAudio = false)) // not measured yet
+        assertEquals(0L, EngineRules.videoDelayNs("camera", 1L, null, cameraAudio = false))
+        assertEquals(0L, EngineRules.videoDelayNs("phone", -5L, null, cameraAudio = false))
+    }
+
+    @Test fun theExternalCamerasOwnSoundIsNeverHeldBack() {
+        // Its sound is played out on its picture's clock: already in step. Only the phone mic waits for the picture.
+        assertEquals(0L, EngineRules.videoDelayNs("camera", 80_000_000L, 300_000_000L, cameraAudio = true))
+        assertEquals(300_000_000L, EngineRules.videoDelayNs("camera", 80_000_000L, 300_000_000L, cameraAudio = false))
     }
 
     @Test fun theUserOffsetStaysWithinThreeHundredMs() {

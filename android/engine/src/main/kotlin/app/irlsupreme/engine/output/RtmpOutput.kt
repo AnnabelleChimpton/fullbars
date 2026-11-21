@@ -61,6 +61,9 @@ class RtmpOutput(
         private set
     @Volatile override var throughputBps = 0L
         private set
+    /** Goes up by one per meter reading, after [queueDelayMs] and [throughputBps] are written. */
+    @Volatile override var meterReadings = 0L
+        private set
     /** Frames dropped while live: ours (gated for a keyframe, dropped for backlog) and the client's own. */
     override val droppedFrames: Long get() = synchronized(lock) { policy.selfDropped } + clientDropped
     /** Bytes of media actually handed to the client (frames this output dropped aren't counted). */
@@ -246,6 +249,7 @@ class RtmpOutput(
             runCatching { client.clearCache() }
             queueDelayMs = 0
         }
+        meterReadings++
         if (wantKey) requestKeyframe.run()
         val idleMs = watchdog.check(
             now,

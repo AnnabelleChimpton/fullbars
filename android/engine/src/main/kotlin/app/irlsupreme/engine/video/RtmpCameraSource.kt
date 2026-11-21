@@ -144,6 +144,7 @@ class RtmpCameraSource(val clock: IngestClock) {
             val head = pending.peekFirst()
             if (head != null && (clock.backlogHopeless(head.ptsMs, ptsMs) || pending.size >= MAX_PENDING)) {
                 pending.clear()
+                queuedFrames = 0 // nothing on its way now: don't hold the frozen frame up on a stale count
                 waitingForKey = true
                 clock.noteBacklogFlush()
             }
