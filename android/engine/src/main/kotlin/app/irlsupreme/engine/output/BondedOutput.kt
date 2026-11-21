@@ -48,6 +48,9 @@ class BondedOutput(
     @Volatile private var heardFromServer = false
     /** When this phone first had a network that could look the server up (0 = not yet). */
     @Volatile private var ownLinksSinceMs = 0L
+    /** Whether any link has been up this stream; before the first one, a short wait is connecting, not a failure. */
+    @Volatile private var everLinked = false
+    private val createdAtMs = System.currentTimeMillis()
     /**
      * Link events (up, down with the reason, group lost, refused) as the plain-words lines also logged here, for the
      * session log. Called on the bonding sender's thread: keep it quick.
@@ -62,6 +65,7 @@ class BondedOutput(
             Log.i(TAG, line)
             onLinkEvent?.let { runCatching { it(line) } }
             if (e is SrtlaEvent.GroupRegistered || e is SrtlaEvent.LinkUp) heardFromServer = true
+            if (e is SrtlaEvent.LinkUp) everLinked = true
             if (e is SrtlaEvent.LinkUp && e.afterOutage) resume.onLinkUpAfterOutage()
             if (e is SrtlaEvent.LinkDown) helperHost?.linkFailed(e.linkId)
         },
@@ -210,7 +214,10 @@ class BondedOutput(
             val own = linkManager.ownLinkCount
             val now = System.currentTimeMillis()
             if (own == 0) ownLinksSinceMs = 0 else if (ownLinksSinceMs == 0L) ownLinksSinceMs = now
-            return noLinkReason(own, heardFromServer, if (ownLinksSinceMs == 0L) 0 else now - ownLinksSinceMs, port)
+            return noLinkReason(
+                own, heardFromServer, if (ownLinksSinceMs == 0L) 0 else now - ownLinksSinceMs, port,
+                startingForMs = if (everLinked) Long.MAX_VALUE else now - createdAtMs,
+            )
         }
     override val recoveredDrops: Int get() = srt.recoveredDrops
 
@@ -322,9 +329,19 @@ class BondedOutput(
         /** REG1 retries run every few seconds: this long with no REG2 on any working network means the server is silent. */
         const val SERVER_SILENT_MS = 6_000L
 
-        fun noLinkReason(ownLinks: Int, heardFromServer: Boolean, ownLinksForMs: Long, port: Int): String =
-            if (ownLinks > 0 && !heardFromServer && ownLinksForMs >= SERVER_SILENT_MS) "Server not answering on UDP $port (check its firewall)"
-            else "No connection can reach the BRB server"
+        /** How long a stream that has never had a link up may wait for its first one before that's a failure. */
+        const val FIRST_LINK_GRACE_MS = 3_000L
+
+        /**
+         * Why no link reaches the server, or null while a stream is still bringing its first link up
+         * ([startingForMs] since it started, [Long.MAX_VALUE] once a link has been up): the first SRT attempt can
+         * fail before any link has registered, and that's connecting, not an error to show.
+         */
+        fun noLinkReason(ownLinks: Int, heardFromServer: Boolean, ownLinksForMs: Long, port: Int, startingForMs: Long = Long.MAX_VALUE): String? = when {
+            startingForMs < FIRST_LINK_GRACE_MS -> null
+            ownLinks > 0 && !heardFromServer && ownLinksForMs >= SERVER_SILENT_MS -> "Server not answering on UDP $port (check its firewall)"
+            else -> "No connection can reach the BRB server"
+        }
 
         const val SHUTDOWN_GRACE_MS = 500L
         /** No connected link for this long counts as a dead zone (long enough to ignore one link's hand-over). */
