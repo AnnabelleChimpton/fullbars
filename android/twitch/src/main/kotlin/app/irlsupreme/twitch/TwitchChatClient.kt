@@ -271,7 +271,7 @@ class TwitchChatClient(
                     when (msg.subscriptionType) {
                         CHAT_MESSAGE_TYPE -> {
                             val chat = EventSubParser.parseChatMessage(msg.event)
-                            chat.bits?.let { _alerts.tryEmit(TwitchAlert.Cheer(chat.messageId, chat.chatterDisplayName, it)) }
+                            chat.bits?.let { _alerts.tryEmit(TwitchAlert.Cheer(chat.messageId, chat.chatterDisplayName, it, chat.cheerMessage)) }
                             send(chat)
                         }
                         CHAT_NOTIFICATION_TYPE -> {
