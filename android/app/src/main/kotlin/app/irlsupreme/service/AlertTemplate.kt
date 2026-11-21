@@ -30,19 +30,81 @@ object AlertTemplate {
         }
     }.filterValues { it.isNotBlank() }
 
-    /** [template] filled from [values], tidied: no doubled spaces, no space before punctuation, nothing dangling. */
+    /**
+     * [template] filled from [values]. Only the gaps left by placeholders with nothing to fill them are tidied: the
+     * space a gap leaves, a space it leaves before punctuation, "()" around it, and a separator left dangling at
+     * either end or doubled. Everything else, the streamer's text and the viewer's words, stays exactly as written.
+     */
     fun fill(template: String, values: Map<String, String>): String {
         // One pass, so a value that looks like a placeholder stays as written.
-        val filled = PLACEHOLDER.replace(template) { m -> values[m.groupValues[1].lowercase()] ?: "" }
-        return filled
-            .replace(Regex("\\s+"), " ")
-            .replace(Regex(" ([,.!?;:)])"), "$1")
-            .replace(Regex("\\( ?\\)"), "")
-            .replace(Regex(" {2,}"), " ")
-            .trim()
-            .trim { it in DANGLING }
-            .trim()
+        val parts = ArrayList<Part>()
+        var at = 0
+        for (m in PLACEHOLDER.findAll(template)) {
+            if (m.range.first > at) parts += Part(template.substring(at, m.range.first), Kind.TEXT)
+            val v = values[m.groupValues[1].lowercase()].orEmpty()
+            parts += Part(v, if (v.isEmpty()) Kind.GAP else Kind.VALUE)
+            at = m.range.last + 1
+        }
+        if (at < template.length) parts += Part(template.substring(at), Kind.TEXT)
+
+        val out = StringBuilder()
+        // The end of the last value in [out]: tidying never reaches back past it into what a viewer wrote.
+        var keep = 0
+        for ((i, p) in parts.withIndex()) {
+            when (p.kind) {
+                Kind.TEXT -> out.append(p.text)
+                Kind.VALUE -> { out.append(p.text); keep = out.length }
+                Kind.GAP -> {
+                    val rest = parts.subList(i + 1, parts.size)
+                    if (rest.all { it.kind == Kind.GAP || (it.kind == Kind.TEXT && it.text.isBlank()) }) {
+                        // Nothing follows: no space or separator dangling at the end.
+                        trimEnd(out, keep) { it.isWhitespace() || it in SEPARATORS }
+                        for (r in rest) r.text = ""
+                    } else {
+                        val next = rest.first().takeIf { it.kind == Kind.TEXT } ?: continue
+                        next.text = tidyAfterGap(out, keep, next.text)
+                    }
+                }
+            }
+        }
+        return out.toString().trim()
     }
+
+    /** Tidies where a gap meets the text after it, [next]; returns what's left of [next]. [out] ends at the gap. */
+    private fun tidyAfterGap(out: StringBuilder, keep: Int, next: String): String {
+        if (out.isBlank()) {
+            // Nothing before: no separator dangling at the start ("{message} · {name}" without a message).
+            out.setLength(0)
+            return next.replace(LEADING_SEPARATOR, "")
+        }
+        val endsWithSpace = out.length > keep && out.last().isWhitespace()
+        // "({message})" with nothing in it goes, with the space before it.
+        if (EMPTY_OPEN.containsMatchIn(out.substring(keep)) && EMPTY_CLOSE.containsMatchIn(next)) {
+            trimEnd(out, keep) { it.isWhitespace() }
+            out.setLength(out.length - 1)
+            trimEnd(out, keep) { it.isWhitespace() }
+            return next.replace(EMPTY_CLOSE, "")
+        }
+        if (endsWithSpace && next.firstOrNull()?.isWhitespace() == true) {
+            // The gap's own space goes, and a separator doubled by it: "{name} · {message} · {months}".
+            var t = next.trimStart()
+            val before = out.trimEnd().lastOrNull()
+            if (before != null && before in SEPARATORS) t = t.replace(LEADING_SEPARATOR, "")
+            return t
+        }
+        // "Thanks {name}!" without a name: no space before the punctuation.
+        if (endsWithSpace && next.firstOrNull()?.let { it in CLOSING } == true) trimEnd(out, keep) { it.isWhitespace() }
+        return next
+    }
+
+    private fun trimEnd(sb: StringBuilder, keep: Int, drop: (Char) -> Boolean) {
+        var n = sb.length
+        while (n > keep && drop(sb[n - 1])) n--
+        sb.setLength(n)
+    }
+
+    private enum class Kind { TEXT, VALUE, GAP }
+    private class Part(var text: String, val kind: Kind)
 
     /** Whether [template] shows the alert's amount in some form, so the card doesn't show it twice. */
     fun showsAmount(template: String?, kind: AlertKind): Boolean {
@@ -61,5 +123,11 @@ object AlertTemplate {
 
     private val PLACEHOLDER = Regex("\\{\\s*([A-Za-z]+)\\s*\\}")
     /** Separators left at either end when what they separated was empty: "{message} · {name}" without a message. */
-    private const val DANGLING = "-–—·|:,; "
+    private const val SEPARATORS = "-–—·|:,;"
+    /** Punctuation that sits right after a word, never after a space. */
+    private const val CLOSING = ",.!?;:)"
+    /** A separator and the space around it at the start, only when it stands alone (":)" is a smiley, not one). */
+    private val LEADING_SEPARATOR = Regex("^\\s*(?:[-–—·|:,;]+(?=\\s|$))?\\s*")
+    private val EMPTY_OPEN = Regex("\\(\\s*$")
+    private val EMPTY_CLOSE = Regex("^\\s*\\)")
 }

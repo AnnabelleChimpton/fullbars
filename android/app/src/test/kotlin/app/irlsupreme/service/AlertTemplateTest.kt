@@ -29,7 +29,10 @@ class AlertTemplateTest {
     }
 
     @Test fun `unknown and empty placeholders go, and so do the spaces they leave`() {
-        assertEquals("Thanks kit!", message(TwitchAlert.Follow("f", "kit"), "Thanks  {name} {amount} {viewers}!"))
+        assertEquals("Thanks kit!", message(TwitchAlert.Follow("f", "kit"), "Thanks {name} {amount} {viewers}!"))
+        assertEquals("Thanks!", message(TwitchAlert.Follow("f", "kit"), "Thanks {nobody}!"))
+        assertEquals("kit · 14", message(sub.copy(message = null), "{name} · {message} · {months}"))
+        assertEquals("kit cheered, thanks", message(bits.copy(message = null), "{name} cheered ({message}), thanks"))
         assertEquals("kit", message(newSub, "{message} — {name}"))
         assertEquals("hi kit", message(TwitchAlert.Follow("f", "kit"), "hi {nobody} {name} {months}"))
         assertEquals("kit", message(bits.copy(message = null), "{name}: {message}"))
@@ -37,6 +40,22 @@ class AlertTemplateTest {
         // A template that ends up empty shows the plain name, as a blank one does.
         val c = AlertText.card(TwitchAlert.Follow("f", "kit"), AlertLook(message = "{message}"), AlertKindOptions())
         assertNull(c.message)
+    }
+
+    @Test fun `with no empty placeholder, the words stay exactly as written`() {
+        val follow = TwitchAlert.Follow("f", "Bob")
+        assertEquals("Thanks Bob :)", message(follow, "Thanks {name} :)"))
+        assertEquals("Welcome , friend ( ) - enjoy  the stream !", message(TwitchAlert.Follow("f", "x"), "Welcome , friend ( ) - enjoy  the stream !"))
+        assertEquals("— Bob —", message(follow, "— {name} —"))
+    }
+
+    @Test fun `what a viewer wrote is never tidied`() {
+        assertEquals("kit: nice view :)", message(bits.copy(message = "nice view :)"), "{name}: {message}"))
+        assertEquals("kit cheered 500 bits: gg ,", message(bits.copy(message = "gg ,"), "{name} cheered {amount}: {message}"))
+        // A gap right after it tidies the template's separator, not the viewer's own.
+        assertEquals("gg —", message(sub.copy(message = "gg —"), "{message} · {nobody}"))
+        assertEquals(":) kit", message(sub.copy(message = ":)"), "{message} {nobody} kit"))
+        assertEquals(":) hi", message(newSub, "{message} :) hi"))
     }
 
     @Test fun `placeholders are any case and may have spaces inside`() {
