@@ -942,12 +942,20 @@ fun SecretField(value: String, onValueChange: (String) -> Unit, label: String, m
     )
 }
 
-/** A plain text field with the page's horizontal padding. */
+/** A plain text field with the page's horizontal padding; [keyboardOptions] for a number, [isError] for a bad one. */
 @Composable
-fun PlainField(value: String, onValueChange: (String) -> Unit, label: String, modifier: Modifier = Modifier, supporting: String? = null) {
+fun PlainField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    supporting: String? = null,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    isError: Boolean = false,
+) {
     OutlinedTextField(
         value = value, onValueChange = onValueChange, label = { Text(label) }, singleLine = true,
-        textStyle = FbType.rowValue,
+        textStyle = FbType.rowValue, keyboardOptions = keyboardOptions, isError = isError,
         supportingText = supporting?.let { { Text(it) } },
         shape = FbShape.medium, colors = fieldColors(),
         modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),

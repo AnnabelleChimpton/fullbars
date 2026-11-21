@@ -2,7 +2,6 @@ package app.irlsupreme.ui
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.util.Size
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,6 +43,12 @@ import app.irlsupreme.engine.video.SlateAudio
 import app.irlsupreme.engine.video.Slates
 import app.irlsupreme.engine.video.StreamPalette
 import app.irlsupreme.service.AlertCard
+import app.irlsupreme.service.AlertKind
+import app.irlsupreme.service.AlertOptions
+import app.irlsupreme.service.AlertOptionsStore
+import app.irlsupreme.service.AlertPlace
+import app.irlsupreme.service.AlertSize
+import app.irlsupreme.service.AlertStyles
 import app.irlsupreme.service.AlertText
 import app.irlsupreme.service.Corner
 import app.irlsupreme.service.ImageSize
@@ -117,10 +122,18 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
             checked = s.alertSound,
             onCheckedChange = { set(s.copy(alertSound = it)) },
         )
-        val styles by app.irlsupreme.service.AlertStyles.state(androidx.compose.ui.platform.LocalContext.current).collectAsState()
-        val custom = styles.values.count { it.isCustom }
+        val alertCtx = androidx.compose.ui.platform.LocalContext.current
+        val styles by AlertStyles.state(alertCtx).collectAsState()
+        val options by AlertOptionsStore.state(alertCtx).collectAsState()
+        val custom = AlertKind.entries.count { k -> styles[k]?.isCustom == true || options.of(k).isCustom }
         ValueRow(
-            "Customize alerts", if (custom == 0) "Default" else "$custom custom", valueIsFigure = false,
+            "Customize alerts",
+            when {
+                custom > 0 -> "$custom custom"
+                options.place != AlertPlace.AUTO || options.size != AlertSize.NORMAL -> "Custom"
+                else -> "Default"
+            },
+            valueIsFigure = false,
             onClick = { nav.open(Screen.ALERTS) },
         )
     }
@@ -223,11 +236,13 @@ private fun OverlayPreview(c: SetupController) {
     val ground by produceState<Bitmap?>(null, on, w, h, login) {
         value = withContext(Dispatchers.Default) { previewGround(on, w, h, login) }
     }
-    val layers by produceState<Bitmap?>(null, s, image, w, h, on, sample) {
+    val alertOptions by AlertOptionsStore.state(ctx).collectAsState()
+    val alertLooks by AlertStyles.version.collectAsState()
+    val layers by produceState<Bitmap?>(null, s, image, w, h, on, sample, alertOptions, alertLooks) {
         delay(100)
         value = withContext(Dispatchers.Default) {
             val base = OverlayComposer.compose(previewLayers(s, on), OverlayComposer.sampleChat, image, w, h)
-            if (s.alertsOn) withSampleAlert(base, sampleCard(sample), s, on, w, h) else base
+            if (s.alertsOn) withSampleAlert(base, sampleCard(sample), s, on, w, h, alertOptions) else base
         }
     }
 
@@ -279,16 +294,14 @@ private fun previewGround(on: PreviewOn, w: Int, h: Int, login: String): Bitmap 
 }
 
 /**
- * The sample follow drawn where the stream would put it: the same bitmap and position the service hands the engine's
- * alert layer, minus the wipe and the time-left rule.
+ * The sample alert drawn where the stream would put it: the same graphic the service hands the engine's alert layer
+ * (size, place, colours), fully shown with its time-left rule, minus the wipe.
  */
-private fun withSampleAlert(base: Bitmap?, card: AlertCard, s: OverlaySettings, on: PreviewOn, w: Int, h: Int): Bitmap {
+private fun withSampleAlert(base: Bitmap?, card: AlertCard, s: OverlaySettings, on: PreviewOn, w: Int, h: Int, options: AlertOptions): Bitmap {
     val out = base?.copy(Bitmap.Config.ARGB_8888, true) ?: createBitmap(w, h)
-    val (alert, _) = OverlayComposer.alertBitmap(card, w, h)
     val onCard = on == PreviewOn.BRB
     val occupied = if (onCard && !s.onCards) emptySet() else OverlayLayout.occupied(s)
-    val at = OverlayComposer.alertPosition(w, h, onCard, occupied, Size(alert.width, alert.height))
-    Canvas(out).drawBitmap(alert, at.x.toFloat(), at.y.toFloat(), null)
+    OverlayComposer.drawAlertStill(Canvas(out), OverlayComposer.alertGraphic(card, w, h, onCard, occupied, options), w, h)
     return out
 }
 
