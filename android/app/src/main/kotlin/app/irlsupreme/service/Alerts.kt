@@ -218,6 +218,24 @@ class AlertBacklog<T>(private val max: Int) {
 }
 
 /**
+ * The alert loop's next alert, taken off [queue] before it's checked, so the alert checked is the one shown: a burst
+ * can't swap another in between. While it's held it waits here, still the oldest: a burst that fills [queue] to [max]
+ * drops it first, as the queue would have, so the newest [max] are what's kept. Not thread-safe: the loop's alone.
+ */
+class AlertTurn<T>(private val queue: AlertBacklog<T>, private val max: Int) {
+    private var held: T? = null
+
+    /** The alert whose turn it is, or null with none waiting. The same one until [done]. */
+    fun next(): T? {
+        if (held != null && queue.size >= max) held = null
+        return held ?: queue.poll().also { held = it }
+    }
+
+    /** It was shown, or dropped: the next call takes the next one. */
+    fun done() { held = null }
+}
+
+/**
  * Alerts waiting to be shown, one at a time. Fed by Twitch while live (and by debug intents); shown by
  * [StreamService], which hands each to the engine's alert layer and mixes the chime into the stream. A burst (a raid
  * with many follows) keeps the newest [MAX_WAITING].
@@ -241,8 +259,8 @@ object AlertQueue {
         posted.trySend(Unit)
     }
 
-    internal fun peek(): TwitchAlert? = waiting.peek()
-    internal fun poll(): TwitchAlert? = waiting.poll()
+    /** A new turn for the alert loop (one per stream): see [AlertTurn]. */
+    internal fun turn(): AlertTurn<TwitchAlert> = AlertTurn(waiting, MAX_WAITING)
     internal suspend fun awaitPosted() { posted.receive() }
     internal fun show(card: AlertCard?) { _current.value = card }
 

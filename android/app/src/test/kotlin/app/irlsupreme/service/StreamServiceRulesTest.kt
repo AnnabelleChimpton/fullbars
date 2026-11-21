@@ -101,4 +101,22 @@ class StreamServiceRulesTest {
         assertEquals((6..25).toList(), generateSequence { b.poll() }.toList())
         assertEquals(null, b.poll())
     }
+
+    @Test fun `the alert checked is the one shown, and a held one is still the first a burst drops`() {
+        val b = AlertBacklog<Int>(AlertQueue.MAX_WAITING)
+        val turn = AlertTurn(b, AlertQueue.MAX_WAITING)
+        assertEquals(null, turn.next())
+        b.add(1); b.add(2)
+        assertEquals(1, turn.next())
+        // Held (Privacy on): a few more arrive, and it's still the same one, checked and then shown.
+        for (i in 3..10) b.add(i)
+        assertEquals(1, turn.next())
+        turn.done()
+        assertEquals(2, turn.next())
+        // A burst while held: the newest 20 in all are kept, so the held one, the oldest, goes first.
+        for (i in 11..40) b.add(i)
+        assertEquals(21, turn.next())
+        turn.done()
+        assertEquals((22..40).toList(), generateSequence { turn.next().also { turn.done() } }.toList())
+    }
 }

@@ -758,25 +758,28 @@ class StreamService : Service() {
     private fun startAlerts(width: Int, height: Int) {
         alertJob?.cancel()
         AlertQueue.clear()
+        // Each alert is taken off the queue before it's checked, so the one checked is the one shown.
+        val turn = AlertQueue.turn()
         alertJob = scope.launch {
             while (isActive) {
-                if (AlertQueue.peek() == null) { AlertQueue.awaitPosted(); continue }
+                val a = turn.next()
+                if (a == null) { AlertQueue.awaitPosted(); continue }
                 val s = OverlayStore.load(this@StreamService)
-                if (!s.alertsOn) { AlertQueue.poll(); continue }
+                if (!s.alertsOn) { turn.done(); continue }
                 // The streamer's on/off and minimums: a filtered alert is dropped at once, never shown or chimed.
                 // Test an alert's pretend ones always show, so each kind's look can be checked whatever its minimum.
-                AlertQueue.peek()?.takeUnless { SampleAlert.isSample(it) }?.let { next ->
-                    val kind = AlertKind.of(next)
-                    val verdict = AlertFilter.verdict(next, AlertOptionsStore.state(this@StreamService).value.of(kind))
+                if (!SampleAlert.isSample(a)) {
+                    val kind = AlertKind.of(a)
+                    val verdict = AlertFilter.verdict(a, AlertOptionsStore.state(this@StreamService).value.of(kind))
                     if (verdict != AlertVerdict.SHOW) {
-                        AlertQueue.poll()
+                        turn.done()
                         // The kind and why only: never who sent it.
                         sessionLog?.line(AlertFilter.logLine(kind, verdict))
                         continue
                     }
                 }
                 if (!engine.alertsAllowed || !AlertHold.allowed(engine.state.value)) { delay(AlertTiming.HOLD_POLL_MS); continue }
-                val a = AlertQueue.poll() ?: continue
+                turn.done()
                 showAlert(AlertText.card(a), s, width, height)
             }
         }
