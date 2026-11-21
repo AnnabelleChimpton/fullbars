@@ -278,7 +278,8 @@ class StreamEngine(private val context: Context) {
             it.monoVoice = monoVoice
             it.inputChoice = micInput
             it.externalGainDb = externalMicGainDb
-            val player = app.irlsupreme.engine.audio.CardMusicPlayer(config.audioSampleRate)
+            // The file's name stays out of the log; the streamer knows which card is on air.
+            val player = app.irlsupreme.engine.audio.CardMusicPlayer(config.audioSampleRate) { note("card music couldn't play") }
             music = player
             it.music = player.mixer
             it.start()

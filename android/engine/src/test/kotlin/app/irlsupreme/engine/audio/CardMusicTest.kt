@@ -173,6 +173,43 @@ class CardMusicTest {
         assertTrue(r.mixer.micOff)
     }
 
+    @Test fun `music that can't be played doesn't keep the mic off, and the next music still plays`() {
+        val r = Rig()
+        r.mixer.wanted = b // asks for the mic off
+        assertTrue(r.mixer.micOff)
+        r.run(1)
+        // The decoder couldn't open it.
+        r.ring.failedGen = r.mixer.request.gen
+        assertTrue(r.mixer.failed)
+        assertFalse(r.mixer.micOff)
+        assertFalse(r.mixer.engaged)
+        // A new volume for the same music changes nothing: it still can't play.
+        r.mixer.wanted = b.copy(gainDb = -6f)
+        assertFalse(r.mixer.micOff)
+        assertFalse(r.mixer.engaged)
+        // Other music is asked for afresh, with no fade to wait through.
+        r.mixer.wanted = a
+        assertFalse(r.mixer.failed)
+        assertTrue(r.mixer.engaged)
+        val out = r.run(60)
+        assertEquals(1f, out.last(), 1e-4f)
+    }
+
+    @Test fun `music that fails while playing goes quiet at once and lets the mic back`() {
+        val r = Rig()
+        r.mixer.wanted = b
+        r.run(50)
+        assertTrue(r.mixer.micOff)
+        r.ring.failedGen = r.mixer.request.gen
+        assertFalse(r.mixer.micOff)
+        assertFalse(r.mixer.engaged)
+        // Leaving the card: the mixer lets go without a fade over nothing.
+        r.mixer.wanted = null
+        assertTrue(r.mixer.engaged)
+        r.run(1)
+        assertFalse(r.mixer.engaged)
+    }
+
     @Test fun `a ring that runs dry plays silence and never waits`() {
         val ring = MusicRing(rate)
         val m = MusicMixer(ring, rate, prefillFrames = 100)

@@ -234,10 +234,21 @@ internal class MusicMixer(
     @Volatile var underruns = 0
         private set
 
-    override val engaged: Boolean get() = wanted != null || current != null || level > 0
-    override val micOff: Boolean get() = wanted?.micOff == true
+    /**
+     * The music wanted now couldn't be played: its file wouldn't open, or stopped decoding. It's silent, so it neither
+     * counts as playing nor keeps the mic off: viewers hear the streamer rather than nothing.
+     */
+    val failed: Boolean get() {
+        val r = request
+        return r.track != null && ring.failedGen == r.gen && r.track.sameMusic(wanted)
+    }
+
+    override val engaged: Boolean get() = !failed && (wanted != null || current != null || level > 0)
+    override val micOff: Boolean get() = wanted?.micOff == true && !failed
 
     override fun addInto(fx: FloatArray, frames: Int, channels: Int) {
+        // Music that failed is silent from here: no fade to wait for before the next one.
+        if (ring.failedGen == request.gen) { level = 0; playing = false }
         val w = wanted
         var fadingOut = false
         if (current?.sameMusic(w) == true) {
@@ -291,7 +302,11 @@ internal class MusicMixer(
  * looped by [LoopStitcher], and the [MusicMixer] the capture thread pulls from. Only one file is open at a time, and
  * only a few seconds of audio are ever in memory, however long the music is.
  */
-class CardMusicPlayer(sampleRate: Int) {
+class CardMusicPlayer(
+    sampleRate: Int,
+    /** The music asked for couldn't be played (once each time it's asked for). On the decoder thread; must not block. */
+    private val onFailed: () -> Unit = {},
+) {
     private val ring = MusicRing(sampleRate * 2)
     internal val mixer = MusicMixer(ring, sampleRate)
     @Volatile private var running = false
@@ -339,7 +354,7 @@ class CardMusicPlayer(sampleRate: Int) {
                         } catch (e: Exception) {
                             Log.w(TAG, "card music wouldn't open: ${e.javaClass.simpleName}")
                             decoder?.close(); decoder = null
-                            ring.failedGen = gen
+                            fail(gen)
                         }
                     }
                 }
@@ -347,14 +362,20 @@ class CardMusicPlayer(sampleRate: Int) {
                 if (s == null || ring.free() < BLOCK) { LockSupport.parkNanos(if (s == null) 20_000_000L else 5_000_000L); continue }
                 val n = try { s.next(block, BLOCK) } catch (e: Exception) {
                     Log.w(TAG, "card music stopped: ${e.javaClass.simpleName}")
-                    ring.failedGen = gen; stitcher = null; 0
+                    fail(gen); stitcher = null; 0
                 }
-                if (s.broken) { ring.failedGen = gen; stitcher = null }
+                if (s.broken) { fail(gen); stitcher = null }
                 if (n > 0) ring.write(block, n)
             }
         } finally {
             decoder?.close()
         }
+    }
+
+    private fun fail(gen: Int) {
+        if (ring.failedGen == gen) return
+        ring.failedGen = gen
+        onFailed()
     }
 
     private companion object {
