@@ -296,6 +296,8 @@ class StreamService : Service() {
         val startedAt = System.currentTimeMillis()
         logJob = scope.launch {
             launch { engine.micLevel.collect { mic.add(it) } }
+            // Music under the card on air, preview included.
+            launch { CardMusic.follow(this@StreamService, engine) { log.line(it) } }
             launch {
                 var prev: EngineState? = null
                 engine.state.collect { st ->
