@@ -1,5 +1,7 @@
 package app.irlsupreme.ui
 
+import androidx.compose.runtime.saveable.rememberSaveable
+import app.irlsupreme.service.ExternalCamera
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -152,7 +154,15 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
     // Re-listed when the mic in use changes (plugging one in moves the recording to it).
     val plugged = remember(input, allowed) { if (options) externalInputs(ctx) else emptyList() }
 
+    // With the Pocket 3 or another camera, viewers hear its audio; the phone mic set here only covers for it.
+    val cameraAudio = remember { ExternalCamera.kind(ctx) != ExternalCamera.Kind.PHONE }
+    if (cameraAudio) {
+        ValueRow("Viewers hear", "The camera's audio", valueIsFigure = false, modifier = Modifier.padding(top = 8.dp))
+        HelpText("Once the camera's picture arrives. Until then, and if its audio drops, viewers hear the phone mic, set below.")
+    }
+
     SectionHeader("Check your level", top = 8.dp)
+    HelpText("Level and auto level can also be changed live: tap MIC on the live screen.")
     if (!allowed) {
         HelpText("Fullbars needs the mic to show your level.")
         FbButton("Allow the mic", { ask.launch(Manifest.permission.RECORD_AUDIO) }, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary)
@@ -184,42 +194,6 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
         )
     }
 
-    if (options) {
-        SectionHeader("Input")
-        Column(Modifier.selectableGroup()) {
-            RadioRow(
-                "Automatic", supporting = "A plugged-in USB or wired mic when there is one, otherwise the phone's.",
-                selected = prefs.input == InputChoice.AUTO, onClick = { MicSettings.setInput(ctx, InputChoice.AUTO) },
-            )
-            RadioRow("Phone mic", selected = prefs.input == InputChoice.PHONE, onClick = { MicSettings.setInput(ctx, InputChoice.PHONE) })
-            RadioRow(
-                plugged.firstOrNull()?.name ?: "USB or wired mic",
-                supporting = if (plugged.isEmpty()) "Plug one in to use it. Bluetooth mics aren't used: they sound like a phone call." else null,
-                selected = prefs.input == InputChoice.EXTERNAL,
-                enabled = plugged.isNotEmpty() || prefs.input == InputChoice.EXTERNAL,
-                onClick = { MicSettings.setInput(ctx, InputChoice.EXTERNAL) },
-            )
-        }
-
-        SectionHeader("Low cut", trailing = lowCutText(prefs.lowCut, prefs.raw))
-        HelpText("Takes out rumble from wind, handling and traffic, under your voice.")
-        Column(Modifier.selectableGroup()) {
-            RadioRow(
-                "Automatic", supporting = "On with the phone's auto level off; the phone filters it otherwise.",
-                selected = prefs.lowCut == LowCut.AUTO, onClick = { MicSettings.setLowCut(ctx, LowCut.AUTO) },
-            )
-            RadioRow("80 Hz", selected = prefs.lowCut == LowCut.NORMAL, onClick = { MicSettings.setLowCut(ctx, LowCut.NORMAL) })
-            RadioRow("120 Hz", supporting = "For wind.", selected = prefs.lowCut == LowCut.WIND, onClick = { MicSettings.setLowCut(ctx, LowCut.WIND) })
-            RadioRow("Off", selected = prefs.lowCut == LowCut.OFF, onClick = { MicSettings.setLowCut(ctx, LowCut.OFF) })
-        }
-        SwitchRow(
-            "Mono voice",
-            supporting = "The same voice on both sides. Try it if you sound off to one side.",
-            checked = prefs.monoVoice,
-            onCheckedChange = { MicSettings.setMonoVoice(ctx, it) },
-        )
-    }
-
     if (allowed) {
         SectionHeader("Sound check")
         HelpText(
@@ -241,24 +215,94 @@ fun MicPage(nav: Navigator) = PageScaffold("Microphone", nav::back) {
         )
     }
 
-    SectionHeader("Sound quality")
-    Column(Modifier.selectableGroup()) {
-        AudioQuality.entries.forEach { a ->
-            RadioRow(a.title, supporting = a.detail, selected = audio == a) { audio = a; StreamSettings.setAudio(ctx, a) }
+    // The input choice matters as soon as a mic is plugged in (or one was chosen): then it stays out of the fold.
+    val inputOut = options && (plugged.isNotEmpty() || prefs.input != InputChoice.AUTO)
+    val inputRows: @Composable () -> Unit = {
+        SectionHeader("Input")
+        Column(Modifier.selectableGroup()) {
+            RadioRow(
+                "Automatic", supporting = "A plugged-in USB or wired mic when there is one, otherwise the phone's.",
+                selected = prefs.input == InputChoice.AUTO, onClick = { MicSettings.setInput(ctx, InputChoice.AUTO) },
+            )
+            RadioRow("Phone mic", selected = prefs.input == InputChoice.PHONE, onClick = { MicSettings.setInput(ctx, InputChoice.PHONE) })
+            RadioRow(
+                plugged.firstOrNull()?.name ?: "USB or wired mic",
+                supporting = if (plugged.isEmpty()) "Plug one in to use it. Bluetooth mics aren't used: they sound like a phone call." else null,
+                selected = prefs.input == InputChoice.EXTERNAL,
+                enabled = plugged.isNotEmpty() || prefs.input == InputChoice.EXTERNAL,
+                onClick = { MicSettings.setInput(ctx, InputChoice.EXTERNAL) },
+            )
         }
     }
-    HelpText("Set it before you go live. It stays the same for the whole stream.")
+    if (inputOut) inputRows()
 
-    SectionHeader("Lip sync")
-    OffsetStepper(avOffset, avOffsetMin) { avOffset = it; StreamSettings.setAvOffsetMs(ctx, it) }
-    HelpText("Delay the sound if viewers hear you before your lips move. Works while you're live too.")
-
-    Footnote(
-        null,
-        "Fullbars stops your voice from clipping: when something's too loud it turns it down for a moment instead of " +
-            "distorting. You can change all of this while you're live too: tap MIC on the live screen.",
-        Modifier.padding(top = 16.dp),
+    // Everything else, folded, its row naming any setting that isn't the default so nothing is hidden by surprise.
+    var more by rememberSaveable { mutableStateOf(false) }
+    Spacer(Modifier.height(16.dp))
+    ExpandRow(
+        moreSoundLabel(prefs.lowCut, prefs.raw, prefs.monoVoice, audio, avOffset, if (inputOut) null else prefs.input),
+        more, onToggle = { more = !more },
     )
+    if (more) {
+        if (options && !inputOut) inputRows()
+        if (options) {
+            SectionHeader("Wind and rumble filter", trailing = windFilterNow(prefs.lowCut, prefs.raw))
+            Column(Modifier.selectableGroup()) {
+                RadioRow(
+                    "Automatic", supporting = "On with the phone's auto level off; the phone filters it otherwise.",
+                    selected = prefs.lowCut == LowCut.AUTO, onClick = { MicSettings.setLowCut(ctx, LowCut.AUTO) },
+                )
+                RadioRow("Light", selected = prefs.lowCut == LowCut.NORMAL, onClick = { MicSettings.setLowCut(ctx, LowCut.NORMAL) })
+                RadioRow("Strong · for wind", supporting = "Thins a deep voice a little.", selected = prefs.lowCut == LowCut.WIND, onClick = { MicSettings.setLowCut(ctx, LowCut.WIND) })
+                RadioRow("Off", selected = prefs.lowCut == LowCut.OFF, onClick = { MicSettings.setLowCut(ctx, LowCut.OFF) })
+            }
+            SwitchRow(
+                "Mono voice",
+                supporting = "The same voice on both sides. Try it if you sound off to one side.",
+                checked = prefs.monoVoice,
+                onCheckedChange = { MicSettings.setMonoVoice(ctx, it) },
+            )
+        }
+        SectionHeader("Sound quality")
+        Column(Modifier.selectableGroup()) {
+            AudioQuality.entries.forEach { a ->
+                RadioRow(a.title, supporting = a.detail, selected = audio == a) { audio = a; StreamSettings.setAudio(ctx, a) }
+            }
+        }
+        HelpText("Set it before you go live. It stays the same for the whole stream.")
+
+        SectionHeader("Lip sync")
+        OffsetStepper(avOffset, avOffsetMin) { avOffset = it; StreamSettings.setAvOffsetMs(ctx, it) }
+        HelpText("Delay the sound if viewers hear you before your lips move.")
+    }
+}
+
+/**
+ * The fold's row: "More sound options", then whatever in it isn't the default, so a changed setting is never out of
+ * sight ("More sound options · Strong filter, Lip sync +40 ms"). [input] null: the input is shown outside the fold.
+ */
+internal fun moreSoundLabel(cut: LowCut, raw: Boolean, mono: Boolean, audio: AudioQuality, avOffsetMs: Int, input: InputChoice?): String {
+    val changed = buildList {
+        if (input != null && input != InputChoice.AUTO) add(if (input == InputChoice.PHONE) "Phone mic" else "Plugged-in mic")
+        when (cut) {
+            LowCut.NORMAL -> add("Light filter")
+            LowCut.WIND -> add("Strong filter")
+            LowCut.OFF -> add("Filter off")
+            LowCut.AUTO -> Unit
+        }
+        if (mono) add("Mono voice")
+        if (audio != AudioQuality.STANDARD) add("${audio.title} sound")
+        if (avOffsetMs != 0) add("Lip sync " + (if (avOffsetMs > 0) "+" else "−") + "${kotlin.math.abs(avOffsetMs)} ms")
+    }
+    return if (changed.isEmpty()) "More sound options" else "More sound options · " + changed.joinToString(", ")
+}
+
+/** What the wind and rumble filter is doing now, in words: Automatic follows the phone's auto level. */
+internal fun windFilterNow(cut: LowCut, raw: Boolean): String = when (cut) {
+    LowCut.AUTO -> if (raw) "on, light" else "phone's own"
+    LowCut.OFF -> "off"
+    LowCut.NORMAL -> "light"
+    LowCut.WIND -> "strong"
 }
 
 /**

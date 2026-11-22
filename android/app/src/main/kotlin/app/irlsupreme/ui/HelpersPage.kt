@@ -45,9 +45,6 @@ fun HelpersPage(c: SetupController, nav: Navigator) = PageScaffold("Helper phone
     // Not saved: leaving the page closes the pairing code again, and it never opens by itself.
     var adding by remember { mutableStateOf(false) }
     var moblinCode by remember { mutableStateOf(false) }
-    var showMoblin by rememberSaveable { mutableStateOf(false) }
-    var moblinPassword by rememberSaveable { mutableStateOf("") }
-    var moblinAddress by rememberSaveable { mutableStateOf("") }
 
     if (helping != HelperState.Off) {
         HelpingStatus(helping, c)
@@ -89,7 +86,7 @@ fun HelpersPage(c: SetupController, nav: Navigator) = PageScaffold("Helper phone
             )
         } else {
             HelpText(
-                "On the helper: Fullbars › Settings › Helper phones › Scan the streaming phone's code. " +
+                "On the helper: Fullbars › Settings › Helper phones › Use this phone as a helper › Scan. " +
                     if (c.helperHotspot && staAp) "Keep Bluetooth on for both phones." else "Then connect it to this phone's hotspot or the same Wi‑Fi.",
             )
             QrCode(c.helperLink)
@@ -107,34 +104,10 @@ fun HelpersPage(c: SetupController, nav: Navigator) = PageScaffold("Helper phone
     }
 
     SectionHeader("Help another phone")
-    HelpText("Lend this phone's mobile data to a phone that's streaming. Keep it charged; it uses data fast.")
-    // The phone this one helped last: a value row, with the one-tap way back to it.
-    c.helpingHost?.let { h ->
-        ValueRow("Streaming phone", h.name.ifEmpty { "The last phone" }, valueIsFigure = false)
-    }
-    FbButton(
-        "Scan the streaming phone's code", c::scanHelperCode,
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    NavRow(
+        "Use this phone as a helper", supporting = "Lend its mobile data to a phone that's streaming.",
+        onClick = { nav.open(Screen.HELP_ANOTHER) },
     )
-    c.helpingHost?.let { h ->
-        FbButton(
-            "Help ${h.name.ifEmpty { "the last phone" }} again", c::startHelping,
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary,
-        )
-    }
-    if (!showMoblin) {
-        FbButton("Help a phone running Moblin", { showMoblin = true }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
-    } else {
-        HelpText("In Moblin: Settings › Moblink › Streamer. Use its password here.")
-        SecretField(moblinPassword, { moblinPassword = it }, "Moblink password")
-        PlainField(moblinAddress, { moblinAddress = it }, "Its address (optional)", supporting = "Leave empty to find it automatically")
-        FbButton(
-            "Start helping", { c.useMoblinStreamer(moblinPassword, moblinAddress) },
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary,
-            enabled = moblinPassword.isNotBlank(),
-        )
-    }
-
 
     if (confirmNewCode) {
         ConfirmDialog(
@@ -196,6 +169,49 @@ internal fun helpingText(s: HelperState, lastHost: String?): HelpingText {
                 "This phone joins in when it is, and stops by itself after 2 hours without a stream.",
             )
         }
+    }
+}
+
+/**
+ * Settings › Helper phones › Use this phone as a helper: lend this phone's mobile data to a phone that's streaming,
+ * by scanning its code (or to a phone running Moblin). While it helps, the status shows here, as on Helper phones.
+ */
+@Composable
+fun HelpAnotherPage(c: SetupController, nav: Navigator) = PageScaffold("Use this phone as a helper", nav::back) {
+    val helping by HelperStatus.state.collectAsState()
+    var showMoblin by rememberSaveable { mutableStateOf(false) }
+    var moblinPassword by rememberSaveable { mutableStateOf("") }
+    var moblinAddress by rememberSaveable { mutableStateOf("") }
+    if (helping != HelperState.Off) {
+        HelpingStatus(helping, c)
+        return@PageScaffold
+    }
+    HelpText("Lend this phone's mobile data to a phone that's streaming. Keep it charged; it uses data fast.")
+    // The phone this one helped last: a value row, with the one-tap way back to it.
+    c.helpingHost?.let { h ->
+        ValueRow("Streaming phone", h.name.ifEmpty { "The last phone" }, valueIsFigure = false)
+    }
+    FbButton(
+        "Scan the streaming phone's code", c::scanHelperCode,
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+    c.helpingHost?.let { h ->
+        FbButton(
+            "Help ${h.name.ifEmpty { "the last phone" }} again", c::startHelping,
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary,
+        )
+    }
+    if (!showMoblin) {
+        FbButton("Help a phone running Moblin", { showMoblin = true }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
+    } else {
+        HelpText("In Moblin: Settings › Moblink › Streamer. Use its password here.")
+        SecretField(moblinPassword, { moblinPassword = it }, "Moblink password")
+        PlainField(moblinAddress, { moblinAddress = it }, "Its address (optional)", supporting = "Leave empty to find it automatically")
+        FbButton(
+            "Start helping", { c.useMoblinStreamer(moblinPassword, moblinAddress) },
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary,
+            enabled = moblinPassword.isNotBlank(),
+        )
     }
 }
 

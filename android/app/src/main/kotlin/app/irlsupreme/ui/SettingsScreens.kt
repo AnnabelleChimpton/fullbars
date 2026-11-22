@@ -263,42 +263,58 @@ fun SettingsScreen(c: SetupController, nav: Navigator) = PageScaffold("Settings"
     val brb = brbState(c.combine, c.pairing != null, c.brbCheck)
     var licences by rememberSaveable { mutableStateOf(false) }
 
+    val ctx = LocalContext.current
+    // A screen-off setting that would stop the stream goes first, marked failed; once allowed it drops to the end.
+    val screenOff = if (isAggressiveOem) rememberScreenOffValue() else null
+    val screenOffRow: @Composable () -> Unit = {
+        if (screenOff != null) ValueRow(
+            "Keep streaming with the screen off", screenOff, valueIsFigure = false, state = screenOffMark(screenOff),
+            onClick = { nav.open(Screen.SCREEN_OFF) },
+        )
+    }
+    if (screenOff != null && screenOff != "Allowed") {
+        SectionHeader("Needs a change")
+        screenOffRow()
+    }
+
     SectionHeader("Stream")
     ValueRow(
         "Twitch", twitchValue(c.toObs, c.serverDecides, c.useKey, c.key.isNotBlank(), c.signIn), valueIsFigure = false,
         onClick = { nav.open(Screen.TWITCH) },
     )
-    val also by AlsoStreamTo.state(LocalContext.current).collectAsState()
-    ValueRow(
-        "Also stream to", alsoStreamValue(AlsoStreamRules.onNames(also), c.combine && c.pairing != null), valueIsFigure = false,
-        onClick = { nav.open(Screen.ALSO_STREAM) },
-    )
     ValueRow("Camera", cameraValue(c.cameraKind, c.pocketDevice?.second), valueIsFigure = false, onClick = { nav.open(Screen.CAMERA) })
+    ValueRow("Video", videoValue(c.quality, c.orientation), valueIsFigure = false, onClick = { nav.open(Screen.QUALITY) })
+    val mic by MicSettings.state(ctx).collectAsState()
+    // With the Pocket 3 or another camera, viewers hear its audio; the phone mic only covers.
+    val micRow = if (c.cameraKind == ExternalCamera.Kind.PHONE) micValue(mic) else "Camera audio"
+    ValueRow("Microphone", micRow, valueIsFigure = false, onClick = { nav.open(Screen.MIC) })
+
+    SectionHeader("On screen")
+    ValueRow(
+        "Overlays", overlaysValue(c.overlays, OverlayStore.validBrowserUrl(c.overlayUrl)), valueIsFigure = false,
+        onClick = { nav.open(Screen.OVERLAYS) },
+    )
+    val cards by CardStore.state(ctx).collectAsState()
+    val socials by CardStore.socialsState(ctx).collectAsState()
+    ValueRow("Scene cards", cardsValue(cards, socials), valueIsFigure = false, onClick = { nav.open(Screen.CARDS) })
+    val captions by CaptionSettings.state(ctx).collectAsState()
+    ValueRow("Captions", captionsSettingValue(captions), valueIsFigure = false, onClick = { nav.open(Screen.CAPTIONS) })
+
+    SectionHeader("Connection")
     ValueRow("Combine connections", combineValue(c.combine, brb), valueIsFigure = false, onClick = { nav.open(Screen.CONNECTIONS) })
     ValueRow(
         "Helper phones", helpersValue(helping != HelperState.Off, c.helpersOn, c.combine), valueIsFigure = false,
         onClick = { nav.open(Screen.HELPERS) },
     )
-    ValueRow("Video", videoValue(c.quality, c.orientation), valueIsFigure = false, onClick = { nav.open(Screen.QUALITY) })
-    val mic by MicSettings.state(LocalContext.current).collectAsState()
-    ValueRow("Microphone", micValue(mic), valueIsFigure = false, onClick = { nav.open(Screen.MIC) })
+    val also by AlsoStreamTo.state(ctx).collectAsState()
     ValueRow(
-        "Overlays", overlaysValue(c.overlays, OverlayStore.validBrowserUrl(c.overlayUrl)), valueIsFigure = false,
-        onClick = { nav.open(Screen.OVERLAYS) },
+        "Also stream to", alsoStreamValue(AlsoStreamRules.onNames(also), c.combine && c.pairing != null), valueIsFigure = false,
+        onClick = { nav.open(Screen.ALSO_STREAM) },
     )
-    val cards by CardStore.state(LocalContext.current).collectAsState()
-    val socials by CardStore.socialsState(LocalContext.current).collectAsState()
-    ValueRow("Scene cards", cardsValue(cards, socials), valueIsFigure = false, onClick = { nav.open(Screen.CARDS) })
-    val captions by CaptionSettings.state(LocalContext.current).collectAsState()
-    ValueRow("Captions", captionsSettingValue(captions), valueIsFigure = false, onClick = { nav.open(Screen.CAPTIONS) })
 
-    if (isAggressiveOem) {
+    if (screenOff == "Allowed") {
         SectionHeader("Phone")
-        val screenOff = rememberScreenOffValue()
-        ValueRow(
-            "Keep streaming with the screen off", screenOff, valueIsFigure = false, state = screenOffMark(screenOff),
-            onClick = { nav.open(Screen.SCREEN_OFF) },
-        )
+        screenOffRow()
     }
 
     // The Pocket 3 (Labs) is turned on where it's chosen, Settings › Camera, with its warning confirmed there.
@@ -453,9 +469,11 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
     var confirmSignOut by remember { mutableStateOf(false) }
     var advanced by rememberSaveable { mutableStateOf(false) }
 
-    // 1. Where the stream goes
+    // 1. Where the stream goes: one row; the choice opens under it. The OBS command stays out whenever OBS is on.
+    var whereOpen by rememberSaveable { mutableStateOf(false) }
     SectionHeader("Where the stream goes")
-    Column(Modifier.selectableGroup()) {
+    ExpandRow("Sends to · ${if (c.toObs) "My OBS" else "Twitch"}", whereOpen, onToggle = { whereOpen = !whereOpen })
+    if (whereOpen) Column(Modifier.selectableGroup()) {
         // The relay is the recommended everyday path once a server is paired:
         // it keeps Twitch live through dropouts with nothing running at home. OBS is for produced streams.
         RadioRow(
@@ -471,10 +489,7 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
             enabled = c.obsAvailable,
         ) { c.changeSendToObs(true) }
     }
-    if (c.obsAvailable && !c.toObs) {
-        HelpText("Overlays and alerts are drawn on this phone (Settings › Overlays). Use My OBS for full OBS scenes.")
-    }
-    if (!c.obsAvailable) {
+    if (whereOpen && !c.obsAvailable) {
         FbButton("Set up Combine connections", { nav.open(Screen.CONNECTIONS) }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
     }
     if (c.toObs) {
@@ -486,23 +501,27 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
     val signedIn = s as? SignIn.SignedIn
     val signedOut = s is SignIn.SignedOut || s is SignIn.Waiting
 
-    // 2. How Fullbars connects (not used when the stream goes to OBS)
+    // 2. How Fullbars connects (not used when the stream goes to OBS). Signed in and using that sign-in, there's no
+    // choice to make: the account says so, with a link to use a stream key instead.
+    val settled = signedIn != null && !c.useKey && c.signInAvailable
     if (!c.toObs) {
-        SectionHeader("How Fullbars connects to Twitch")
-        Column(Modifier.selectableGroup()) {
-            // A build without a Twitch client ID can't sign in: offer only the stream key.
-            if (c.signInAvailable) RadioRow(
-                "Sign in with Twitch",
-                supporting = "Recommended. Gets your stream key for you; chat and mod commands work.",
-                selected = !c.useKey,
-            ) { c.chooseUseKey(false) }
-            // With a key and a sign-in, chat, alerts and commands follow the signed-in account: name the channel.
-            RadioRow(
-                "Stream key",
-                supporting = if (signedIn != null) "Chat, alerts and mod commands use ${signedIn.login}'s channel."
-                else "Chat and mod commands need sign-in.",
-                selected = c.useKey,
-            ) { c.chooseUseKey(true) }
+        if (!settled) {
+            SectionHeader("How Fullbars connects to Twitch")
+            Column(Modifier.selectableGroup()) {
+                // A build without a Twitch client ID can't sign in: offer only the stream key.
+                if (c.signInAvailable) RadioRow(
+                    "Sign in with Twitch",
+                    supporting = "Gets your stream key for you; chat and mod commands work.",
+                    selected = !c.useKey,
+                ) { c.chooseUseKey(false) }
+                // With a key and a sign-in, chat, alerts and commands follow the signed-in account: name the channel.
+                RadioRow(
+                    "Stream key",
+                    supporting = if (signedIn != null) "Chat, alerts and mod commands use ${signedIn.login}'s channel."
+                    else "Chat and mod commands need sign-in.",
+                    selected = c.useKey,
+                ) { c.chooseUseKey(true) }
+            }
         }
         if (c.serverDecides) {
             // In key mode only a saved key decides, signed in or not (serverDecides ignores sign-in there), so
@@ -530,7 +549,10 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
                 ValueRow("Title", ch.title.ifBlank { "None" }, valueIsFigure = false)
                 ValueRow("Category", ch.categoryName?.ifBlank { null } ?: "None", valueIsFigure = false)
             }
-            FbButton("Sign out", { confirmSignOut = true }, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Text)
+            Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                FbButton("Sign out", { confirmSignOut = true }, kind = FbButtonKind.Text)
+                if (settled && !c.toObs) FbButton("Use a stream key instead", { c.chooseUseKey(true) }, kind = FbButtonKind.Text)
+            }
         }
         is SignIn.Waiting -> ApproveBlock(s.code, onReopen = c::reopenSignInPage, onCancel = c::cancelSignIn)
         SignIn.SignedOut -> FbButton(
@@ -559,18 +581,21 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
         }
     }
 
-    SectionHeader("Read chat aloud")
-    HelpText(
-        "Into your headphones while you're live, never from the phone's speaker (it would go into your mic)." +
-            if (signedOut) " Needs Twitch sign-in." else "",
-    )
-    Column(Modifier.selectableGroup()) {
-        app.irlsupreme.service.ReadAloud.entries.forEach { r ->
-            RadioRow(r.title, supporting = if (r == app.irlsupreme.service.ReadAloud.OFF) null else "${r.detail}.", selected = c.readAloud == r) { c.changeReadAloud(r) }
+    SectionHeader("Chat and mods")
+    var readOpen by rememberSaveable { mutableStateOf(false) }
+    ExpandRow("Read chat aloud · ${c.readAloud.title}", readOpen, onToggle = { readOpen = !readOpen })
+    if (readOpen) {
+        HelpText(
+            "Into your headphones while you're live, never from the phone's speaker (it would go into your mic)." +
+                if (signedOut) " Needs Twitch sign-in." else "",
+        )
+        Column(Modifier.selectableGroup()) {
+            app.irlsupreme.service.ReadAloud.entries.forEach { r ->
+                RadioRow(r.title, supporting = if (r == app.irlsupreme.service.ReadAloud.OFF) null else "${r.detail}.", selected = c.readAloud == r) { c.changeReadAloud(r) }
+            }
         }
     }
-
-    ModsSection(c, signedOut)
+    ValueRow("Mods", modsValue(signedOut, ChatCommandParser.help(CommandPolicy()).size), valueIsFigure = false, onClick = { nav.open(Screen.MODS) })
 
     if (confirmSignOut) {
         ConfirmDialog(
@@ -1228,6 +1253,15 @@ private fun RouteTrackRow(name: String, value: String?, up: Boolean, more: Boole
 }
 
 /** What mods can do for you, in one place on the Twitch page: chat commands, then the mod remote. */
+@Composable
+internal fun ModsPage(c: SetupController, nav: Navigator) = PageScaffold("Mods", nav::back) {
+    val s = c.signIn
+    ModsSection(c, signedOut = s is SignIn.SignedOut || s is SignIn.Waiting)
+}
+
+/** The Twitch page's Mods row: how many commands and the remote, or that it needs sign-in first. */
+internal fun modsValue(signedOut: Boolean, commands: Int): String = if (signedOut) "Needs sign-in" else "$commands commands · remote"
+
 @Composable
 private fun ModsSection(c: SetupController, signedOut: Boolean) {
     val colors = LocalFbColors.current

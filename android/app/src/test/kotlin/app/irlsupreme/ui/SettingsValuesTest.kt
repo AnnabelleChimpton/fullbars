@@ -199,4 +199,28 @@ class SettingsValuesTest {
         assertTrue(brb.alertsOn)
         assertEquals(s.copy(onCards = true), previewLayers(s.copy(onCards = true), PreviewOn.BRB))
     }
+
+    @Test fun `the Mods row counts commands, or says it needs sign-in`() {
+        assertEquals("8 commands · remote", modsValue(signedOut = false, commands = 8))
+        assertEquals("Needs sign-in", modsValue(signedOut = true, commands = 8))
+    }
+
+    @Test fun `the folded sound options name whatever isn't the default`() {
+        val q = app.irlsupreme.service.AudioQuality.STANDARD
+        val lc = app.irlsupreme.engine.audio.LowCut.AUTO
+        val auto = app.irlsupreme.engine.audio.InputChoice.AUTO
+        assertEquals("More sound options", moreSoundLabel(lc, raw = false, mono = false, audio = q, avOffsetMs = 0, input = auto))
+        assertEquals(
+            "More sound options · Phone mic, Strong filter, Mono voice, High sound, Lip sync +40 ms",
+            moreSoundLabel(
+                app.irlsupreme.engine.audio.LowCut.WIND, raw = true, mono = true,
+                audio = app.irlsupreme.service.AudioQuality.HIGH, avOffsetMs = 40, input = app.irlsupreme.engine.audio.InputChoice.PHONE,
+            ),
+        )
+        // The input shown outside the fold isn't named in it.
+        assertEquals("More sound options", moreSoundLabel(lc, raw = false, mono = false, audio = q, avOffsetMs = 0, input = null))
+        assertEquals("on, light", windFilterNow(lc, raw = true))
+        assertEquals("phone's own", windFilterNow(lc, raw = false))
+        assertEquals("strong", windFilterNow(app.irlsupreme.engine.audio.LowCut.WIND, raw = false))
+    }
 }
