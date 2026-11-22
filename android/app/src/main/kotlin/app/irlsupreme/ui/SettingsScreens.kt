@@ -303,7 +303,7 @@ fun SettingsScreen(c: SetupController, nav: Navigator) = PageScaffold("Settings"
 
 /** The screen-off state, read again on every return (the user flips it in Android's settings and comes back). */
 @Composable
-private fun rememberScreenOffValue(): String {
+internal fun rememberScreenOffValue(): String {
     val ctx = LocalContext.current
     var resumed by remember { mutableIntStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { resumed++ }
@@ -573,25 +573,6 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
 }
 
 /** A row that shows or hides the rows under it, with its state spoken (TalkBack can't see a chevron's direction). */
-@Composable
-private fun ExpandRow(label: String, expanded: Boolean, onToggle: () -> Unit) {
-    val c = LocalFbColors.current
-    val source = remember { MutableInteractionSource() }
-    val pressed by source.collectIsPressedAsState()
-    Row(
-        Modifier.fillMaxWidth().bottomRule(c.rule)
-            .background(if (pressed) c.s2 else Color.Transparent)
-            .clickable(source, indication = null, role = Role.Button, onClickLabel = if (expanded) "Hide" else "Show", onClick = onToggle)
-            .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
-            .heightIn(min = FbSpace.rowTappable)
-            .padding(horizontal = FbSpace.gutter, vertical = 15.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, style = FbType.row, color = c.text, modifier = Modifier.weight(1f))
-        Icon(if (expanded) FbIcons.ExpandLess else FbIcons.ExpandMore, contentDescription = null, tint = c.text2, modifier = Modifier.size(20.dp))
-    }
-}
-
 /** The device-code step: the code on a sunk rM plate, spelled out for TalkBack. No card. */
 @Composable
 private fun ApproveBlock(code: DeviceCode, onReopen: () -> Unit, onCancel: () -> Unit) {

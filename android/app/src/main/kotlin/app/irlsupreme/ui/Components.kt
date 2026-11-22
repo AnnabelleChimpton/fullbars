@@ -1023,3 +1023,23 @@ fun TwoLine(text: String, color: Color = Color.Unspecified) =
     Text(text, maxLines = 2, overflow = TextOverflow.Ellipsis, color = color)
 
 val ContentPadding = PaddingValues(horizontal = 16.dp)
+
+/** A row that folds what follows it in or out, with the state said in words for TalkBack. */
+@Composable
+internal fun ExpandRow(label: String, expanded: Boolean, onToggle: () -> Unit) {
+    val c = LocalFbColors.current
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    Row(
+        Modifier.fillMaxWidth().bottomRule(c.rule)
+            .background(if (pressed) c.s2 else Color.Transparent)
+            .clickable(source, indication = null, role = Role.Button, onClickLabel = if (expanded) "Hide" else "Show", onClick = onToggle)
+            .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
+            .heightIn(min = FbSpace.rowTappable)
+            .padding(horizontal = FbSpace.gutter, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = FbType.row, color = c.text, modifier = Modifier.weight(1f))
+        Icon(if (expanded) FbIcons.ExpandLess else FbIcons.ExpandMore, contentDescription = null, tint = c.text2, modifier = Modifier.size(20.dp))
+    }
+}

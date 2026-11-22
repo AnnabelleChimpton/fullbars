@@ -232,7 +232,7 @@ fun HomeScreen(c: SetupController, nav: Navigator) {
                 Row(Modifier.fillMaxHeight()) {
                     Box(Modifier.fillMaxHeight().width(1.dp).background(colors.rule))
                     Column(Modifier.width(DOCK_SIDE).fillMaxHeight().navigationBarsPadding(), verticalArrangement = Arrangement.Bottom) {
-                        Dock(c, nav, ctaFocus, dockAttached, side = true)
+                        Dock(c, nav, ctaFocus, dockAttached, preflight, side = true)
                     }
                 }
             }
@@ -246,7 +246,7 @@ fun HomeScreen(c: SetupController, nav: Navigator) {
                     visible = dockShown,
                     enter = if (reduced) EnterTransition.None else slideInVertically(tween(FbMotion.ENTER_MS, easing = FbMotion.Enter)) { it },
                     exit = ExitTransition.None,
-                ) { Dock(c, nav, ctaFocus, dockAttached) }
+                ) { Dock(c, nav, ctaFocus, dockAttached, preflight) }
             },
         ) { inner ->
             if (ready) body(Modifier.fillMaxSize().padding(inner))
@@ -343,23 +343,23 @@ private fun FirstRun(c: SetupController, nav: Navigator, reduced: Boolean) {
         "Use a stream key instead", onClick = { c.chooseUseKey(true); nav.open(Screen.TWITCH) }, kind = FbButtonKind.Text,
         modifier = Modifier.padding(start = 16.dp, top = 8.dp),
     )
-    SectionHeader("Defaults", trailing = "not checked yet")
-    Hairline()
-    ValueRow(
-        label = defaultsLine(c), value = "", valueIsFigure = false, state = StateMark.UNCHECKED,
-        onClick = { nav.open(Screen.SETTINGS) }, onClickLabel = "Open settings",
-    )
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(firstRunDefaults(c.cameraKind, c.quality), style = FbType.help, color = colors.text2, modifier = Modifier.weight(1f))
+        FbButton("Settings", onClick = { nav.open(Screen.SETTINGS) }, kind = FbButtonKind.Text)
+    }
 }
 
-/** "Phone camera · this phone's connection · 1080p": what a first stream would use, in one unchecked row. */
-private fun defaultsLine(c: SetupController): String {
-    val camera = when (c.cameraKind) {
-        ExternalCamera.Kind.PHONE -> "Phone camera"
-        ExternalCamera.Kind.POCKET -> "Pocket 3"
-        ExternalCamera.Kind.RTMP -> "Other camera"
+/** What a first stream would use, in one line: "Starts with the phone camera at 1080p. Change it in Settings." */
+internal fun firstRunDefaults(kind: ExternalCamera.Kind, quality: Quality): String {
+    val camera = when (kind) {
+        ExternalCamera.Kind.PHONE -> "the phone camera"
+        ExternalCamera.Kind.POCKET -> "your Pocket 3"
+        ExternalCamera.Kind.RTMP -> "your other camera"
     }
-    val connection = if (c.combine) "combined connections" else "this phone's connection"
-    return "$camera · $connection · ${c.quality.title}"
+    return "Starts with $camera at ${quality.title}. Change it in Settings."
 }
 
 /**
@@ -425,12 +425,11 @@ private fun DeviceCodePlate(code: DeviceCode, onReopen: () -> Unit, onCancel: ()
 @Composable
 private fun RecapSlot(c: SetupController, countUp: Boolean, reduced: Boolean, onDone: () -> Unit) {
     val recap = c.recap
-    val last = c.lastStream
     AnimatedContent(
         // The fold travels with the state, so the outgoing recap keeps drawing as a recap while it shrinks away.
+        // After DONE a clean stream leaves nothing behind; one that didn't start or dropped is a line below the checklist.
         targetState = when {
             recap != null -> RecapView(recap, folded = false)
-            last != null -> RecapView(last, folded = true)
             else -> null
         },
         transitionSpec = {
@@ -445,15 +444,12 @@ private fun RecapSlot(c: SetupController, countUp: Boolean, reduced: Boolean, on
         label = "recap",
     ) { v: RecapView? ->
         when {
-            v == null -> Unit
-            v.folded -> LastStreamRow(v.summary)
-            else -> Column {
-                RecapCard(
-                    v.summary, wasTest = c.lastStartWasTest, bonded = c.lastStartWasBonded, links = c.recapLinks,
-                    countUp = countUp, onOpenInspector = c::openInspector, onDone = onDone,
-                )
-                if (c.lastStartWasTest && v.summary.liveDurationMs > 0) HearTestStream(v.summary.endedAtMs)
-            }
+            v == null || v.folded -> Unit
+            else -> RecapCard(
+                v.summary, wasTest = c.lastStartWasTest, bonded = c.lastStartWasBonded, links = c.recapLinks,
+                countUp = countUp, onOpenInspector = c::openInspector, onDone = onDone,
+                hear = if (c.lastStartWasTest && v.summary.liveDurationMs > 0) ({ HearTestStream(v.summary.endedAtMs) }) else null,
+            )
         }
     }
 }
@@ -476,10 +472,7 @@ private fun HearTestStream(endedAtMs: Long) {
         value = withContext(Dispatchers.Default) { engine.recentAudio(RECAP_AUDIO_SECONDS) }
     }
     val take = clip ?: return
-    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-        PlayClipButton("Hear how you sounded", take, player, Modifier.padding(horizontal = 16.dp))
-        HelpText("The last ${take.seconds.roundToInt()} seconds of the test, as viewers would hear them. Headphones tell you the most.")
-    }
+    PlayClipButton("Hear how you sounded", take, player)
 }
 
 /** What the recap slot shows: the full recap, or after DONE the [folded] one-line version of the same stream. */
@@ -491,7 +484,8 @@ private data class RecapView(val summary: SessionSummary, val folded: Boolean)
 private fun SignedInHome(c: SetupController, nav: Navigator, pf: Preflight?, arrival: Arrival, reduced: Boolean) {
     // Approving from Settings (key or OBS mode, where sign-in only adds chat): the plate shows here too.
     DeviceCodeSlot(c, reduced)
-    PreflightHeader(pf)
+    val verdict = readyVerdict(c.blocker, pf, c.quality)
+    PreflightHeader(pf, verdict)
     Hairline()
     // On arrival the square is drawn unchecked, then fills in one Tick, in place.
     var twitchTicked by remember(arrival == Arrival.SIGNED_IN) { mutableStateOf(arrival != Arrival.SIGNED_IN || reduced) }
@@ -515,28 +509,44 @@ private fun SignedInHome(c: SetupController, nav: Navigator, pf: Preflight?, arr
             CameraRow(c, nav)
             ConnectionRow(c, nav, pf)
             QualityRow(c, nav, pf)
-            VerdictBlock(readyVerdict(c.blocker, pf, c.quality), pf, onUse720 = { c.chooseQuality(Quality.HD720) })
+            // The readings behind the verdict, folded: the verdict itself is in the header and the dock line.
+            if (pf != null) {
+                var readings by rememberSaveable { mutableStateOf(false) }
+                ExpandRow("Readings", readings, onToggle = { readings = !readings })
+                if (readings) Readout(pf.readout, Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
+            // A stream that didn't start or dropped stays as one plain line until the next one.
+            c.lastStream?.takeIf { !cleanLastStream(it) }?.let { LastStreamRow(it, wasTest = c.lastStartWasTest) }
             if (isAggressiveOem) {
-                // Can't be read by an app, so it's a link to the page that explains it, not a checked row.
-                Spacer(Modifier.height(16.dp))
-                Hairline()
-                NavRow("Keep streaming with the screen off", onClick = { nav.open(Screen.SCREEN_OFF) })
+                // Until Android lets it run with the screen off, then it's done and leaves Home.
+                val screenOff = rememberScreenOffValue()
+                if (screenOff != "Allowed") {
+                    ValueRow(
+                        "Keep streaming with the screen off", screenOff, valueIsFigure = false,
+                        state = if (screenOff == "Restricted") StateMark.FAILED else StateMark.UNCHECKED,
+                        onClick = { nav.open(Screen.SCREEN_OFF) },
+                    )
+                }
             }
         }
     }
 }
 
-/** "PREFLIGHT ——— checked 12 s ago", ticking each second on its own so only the stamp recomposes. */
+/**
+ * "PREFLIGHT ——— Ready for 1080p": the go/no-go answer where the eye lands first. A warning goes to the dock line with
+ * its fix instead; the reading's age shows only once it's over a minute old (the preflight reruns every 30 s, so that
+ * means it stopped), and nothing ticks every second.
+ */
 @Composable
-private fun PreflightHeader(pf: Preflight?) {
+private fun PreflightHeader(pf: Preflight?, verdict: ReadyVerdict) {
     val at = pf?.checkedAtMs
     val now by produceState(System.currentTimeMillis(), at) {
         while (true) {
             value = System.currentTimeMillis()
-            delay(1_000)
+            delay(15_000)
         }
     }
-    SectionHeader("Preflight", trailing = if (at == null) "checking…" else checkedAgo(at, now))
+    SectionHeader("Preflight", trailing = preflightStamp(at, verdict, now))
 }
 
 /**
@@ -566,8 +576,8 @@ private fun DestinationRow(c: SetupController, nav: Navigator, ticked: Boolean) 
 }
 
 /**
- * Title, stacked: the label, then the whole title wrapping under it, then the category. Never truncated;
- * the row opens the title sheet.
+ * Title: the label, then "title · category" wrapping under it, never truncated; the row opens the title sheet. It
+ * carries no check mark: nothing about a title can fail.
  */
 @Composable
 private fun TitleRow(ch: ChannelInfo, onClick: () -> Unit) {
@@ -579,17 +589,15 @@ private fun TitleRow(ch: ChannelInfo, onClick: () -> Unit) {
         Modifier.fillMaxWidth().bottomRule(c.rule)
             .background(if (pressed || focused) c.s2 else Color.Transparent)
             .clickable(interactionSource = source, indication = null, role = Role.Button, onClickLabel = "Change title and category", onClick = onClick)
-            .semantics { stateDescription = StateMark.VERIFIED.spoken.orEmpty() }
             .heightIn(min = FbSpace.rowTappable)
             .padding(horizontal = FbSpace.gutter, vertical = 17.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        StateSquare(StateMark.VERIFIED, Modifier.padding(top = 5.dp))
-        Spacer(Modifier.width(12.dp))
+        // The square's slot, so the label lines up with the rows around it; nothing here is checked.
+        Spacer(Modifier.width(10.dp + 12.dp))
         Column(Modifier.weight(1f)) {
             Text("Title", style = FbType.row, color = c.text)
-            Text(ch.title.ifBlank { "No title yet" }, style = FbType.rowValue, color = c.text, modifier = Modifier.padding(top = 4.dp))
-            Text(ch.categoryName?.takeIf { it.isNotBlank() } ?: "No category", style = FbType.rowValue, color = c.text2)
+            Text(titleLine(ch.title, ch.categoryName), style = FbType.rowValue, color = c.text, modifier = Modifier.padding(top = 4.dp))
         }
         Spacer(Modifier.width(8.dp))
         Icon(FbIcons.Chevron, contentDescription = null, tint = c.text2, modifier = Modifier.size(20.dp))
@@ -607,11 +615,13 @@ private fun CameraRow(c: SetupController, nav: Navigator) {
     val rtmpUrl = remember(c.cameraKind) { if (c.cameraKind == ExternalCamera.Kind.RTMP) c.rtmpUrls.firstOrNull() else null }
     val (value, sub) = when (c.cameraKind) {
         ExternalCamera.Kind.PHONE -> "Phone" to null
-        ExternalCamera.Kind.POCKET -> "Pocket 3" to when (blocker) {
-            Blocker.HOTSPOT_OFF -> "Your hotspot is off"
-            else -> c.pocketDevice?.second ?: "Find your Pocket 3"
+        // A line under it only when there's something to do; the address and device name are on the Camera page.
+        ExternalCamera.Kind.POCKET -> "Pocket 3" to when {
+            blocker == Blocker.HOTSPOT_OFF -> "Your hotspot is off"
+            c.pocketDevice == null -> "Find your Pocket 3"
+            else -> null
         }
-        ExternalCamera.Kind.RTMP -> "Other camera" to (rtmpUrl ?: "Connect to Wi‑Fi so a camera can reach this phone")
+        ExternalCamera.Kind.RTMP -> "Other camera" to (if (rtmpUrl == null) "Connect to Wi‑Fi so a camera can reach this phone" else null)
     }
     val mark = when (c.cameraKind) {
         ExternalCamera.Kind.PHONE ->
@@ -625,7 +635,7 @@ private fun CameraRow(c: SetupController, nav: Navigator) {
     }
     ValueRow(
         label = "Camera", value = value, valueIsFigure = false, state = mark, sub = sub,
-        subIsFigure = rtmpUrl != null, onClick = { nav.open(Screen.CAMERA) },
+        onClick = { nav.open(Screen.CAMERA) },
     )
 }
 
@@ -642,7 +652,7 @@ private fun ConnectionRow(c: SetupController, nav: Navigator, pf: Preflight?) {
             c.brbCheck?.checked != true -> Triple("Combined", "Checking your server…", StateMark.UNCHECKED)
             c.brbUdpBlocked -> Triple("Combined", "UDP ${p.port} looks blocked", StateMark.FAILED)
             !c.brbOk -> Triple("Combined", c.brbStatus ?: "Can't reach your server", StateMark.FAILED)
-            else -> Triple("Combined", "Server ready", StateMark.VERIFIED)
+            else -> Triple("Combined", null, StateMark.VERIFIED)
         }
     } else {
         when {
@@ -684,7 +694,14 @@ private enum class CtaKind { TEST, LIVE, PLAIN }
  * says where the stream goes, or why it can't go yet.
  */
 @Composable
-private fun Dock(c: SetupController, nav: Navigator, ctaFocus: FocusRequester, attached: MutableState<Boolean>, side: Boolean = false) {
+private fun Dock(
+    c: SetupController,
+    nav: Navigator,
+    ctaFocus: FocusRequester,
+    attached: MutableState<Boolean>,
+    preflight: Preflight?,
+    side: Boolean = false,
+) {
     val colors = LocalFbColors.current
     // Runs after the dock's nodes (and the CTA's focus requester) are attached; see focusCtaWhenDocked.
     DisposableEffect(Unit) {
@@ -708,14 +725,14 @@ private fun Dock(c: SetupController, nav: Navigator, ctaFocus: FocusRequester, a
                 enabled = c.canGo, busy = c.busy, onClick = c::onMainButton, focus = ctaFocus,
             )
         }
-        DockLine(c, nav)
+        DockLine(c, nav, readyVerdict(c.blocker, preflight, c.quality), onUse720 = { c.chooseQuality(Quality.HD720) })
     }
 }
 
 /**
  * The bus: two 48dp tabs. The selected one is filled with the CTA colour and runs straight into the CTA (no gap, square
  * bottom corners), so the two read as one L-shaped piece; the other is a ruleStrong outline that stops short. The fill
- * slides across with Settle. The on-air dot is always on LIVE, the only red on Home.
+ * slides across with Settle. The on-air dot shows on LIVE while it's chosen, the only red on Home.
  */
 @Composable
 private fun BusTabs(test: Boolean, onSelect: (Boolean) -> Unit) {
@@ -733,7 +750,7 @@ private fun BusTabs(test: Boolean, onSelect: (Boolean) -> Unit) {
             },
     ) {
         BusTab("TEST", "private", spoken = "Test, private", selected = test, dot = false) { onSelect(true) }
-        BusTab("LIVE", "public", spoken = "Live, public", selected = !test, dot = true) { onSelect(false) }
+        BusTab("LIVE", "public", spoken = "Live, public", selected = !test, dot = !test) { onSelect(false) }
     }
 }
 
@@ -845,10 +862,11 @@ private fun GoLiveCta(
 
 /**
  * The one line under the CTA: where this stream goes, or, when it can't go, the go-live blocker's reason and its fix
- * (the same pure source as the verdict), or a verified failure from the last attempt.
+ * (the same pure source as the verdict), or a verified failure from the last attempt, or a preflight warning with its
+ * fix. Blockers win over warnings.
  */
 @Composable
-private fun DockLine(c: SetupController, nav: Navigator) {
+private fun DockLine(c: SetupController, nav: Navigator, verdict: ReadyVerdict, onUse720: () -> Unit) {
     val colors = LocalFbColors.current
     val error = c.error
     val blocker = c.blocker
@@ -886,6 +904,17 @@ private fun DockLine(c: SetupController, nav: Navigator) {
                             Blocker.APPROVING, Blocker.CHECKING -> Unit
                         }
                     })
+                }
+            }
+            // A warning from the preflight (weak upload, a hot phone): its words and the one-tap fix, by the button.
+            verdict.warning && !c.busy -> Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(verdict.text, style = FbType.help, color = colors.text, modifier = Modifier.weight(1f))
+                if (verdict.suggest720) {
+                    Spacer(Modifier.width(12.dp))
+                    FbButton("Use 720p", kind = FbButtonKind.Text, onClick = onUse720)
                 }
             }
             else -> dockLine(c)?.let {

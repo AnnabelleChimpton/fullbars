@@ -13,6 +13,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -172,6 +174,25 @@ internal fun assessPreflight(r: PreflightReadings, quality: Quality, checkedAtMs
  */
 internal fun readoutColumns(cells: Int, fontScale: Float): Int = if (fontScale >= 1.5f && cells > 2) 2 else cells
 
+/**
+ * The Preflight header's trailing words: "checking…" before the first reading, the ready verdict ("Ready for 1080p")
+ * when there is one, else the reading's age only once it's over a minute old (it reruns every 30 s, so an old one
+ * means it stopped). Null otherwise: a warning has its own line by the button.
+ */
+internal fun preflightStamp(checkedAtMs: Long?, verdict: ReadyVerdict, nowMs: Long): String? = when {
+    checkedAtMs == null -> "checking…"
+    verdict.ready -> verdict.text
+    nowMs - checkedAtMs > 60_000 -> checkedAgo(checkedAtMs, nowMs)
+    else -> null
+}
+
+/** The Title row's one line: "Saturday stroll · Just Chatting", with words for what's missing. */
+internal fun titleLine(title: String, category: String?): String =
+    title.ifBlank { "No title yet" } + " · " + (category?.takeIf { it.isNotBlank() } ?: "No category")
+
+/** A stream that went out with nothing dropped: after DONE it leaves no line behind on Home. */
+internal fun cleanLastStream(s: SessionSummary): Boolean = s.liveDurationMs > 0 && s.recoveredDrops == 0
+
 /** "checked 12 s ago", the Preflight stamp; minutes after the first one. */
 internal fun checkedAgo(checkedAtMs: Long, nowMs: Long): String {
     val s = ((nowMs - checkedAtMs) / 1000).coerceAtLeast(0)
@@ -243,39 +264,6 @@ private fun runPreflight(ctx: Context, quality: Quality, host: String, port: Int
         brbPort = brb?.port,
     )
     return assessPreflight(readings, quality, System.currentTimeMillis())
-}
-
-/**
- * "Ready for 1080p": Archivo Condensed 700 at 19sp, between a row and a CTA. A getter, so this file's pure
- * functions load in JVM unit tests without initialising the font roles.
- */
-private val VerdictStyle get() = FbType.cta.copy(fontWeight = FontWeight.Bold, fontSize = 19.sp, lineHeight = 24.sp)
-
-/**
- * The verdict line and the readout under it. The filled square shows only for [ReadyVerdict.ready], which
- * readyVerdict grants only when nothing blocks going live and every reading is good; otherwise the line is the reason,
- * with no mark. [onUse720] is the one-tap fix for a weak upload or a hot phone at 1080p.
- */
-@Composable
-internal fun VerdictBlock(verdict: ReadyVerdict, preflight: Preflight?, onUse720: () -> Unit, modifier: Modifier = Modifier) {
-    val c = LocalFbColors.current
-    Column(modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 12.dp)
-                .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
-            verticalAlignment = Alignment.Top,
-        ) {
-            if (verdict.ready) {
-                StateSquare(StateMark.VERIFIED, Modifier.padding(top = 5.dp), size = 14.dp)
-                Spacer(Modifier.width(12.dp))
-            }
-            Text(verdict.text, style = VerdictStyle, color = c.text)
-        }
-        if (verdict.suggest720) {
-            FbButton("Use 720p", onClick = onUse720, kind = FbButtonKind.Text, modifier = Modifier.padding(start = 16.dp))
-        }
-        if (preflight != null) Readout(preflight.readout, Modifier.padding(horizontal = 16.dp))
-    }
 }
 
 /**
@@ -453,6 +441,7 @@ private const val COUNT_UP_DELAY_MS = 120L
  * figures count up once (reduce motion shows them final). [onOpenInspector]: a test can't be watched on Twitch, so
  * offer the place where it can be checked. [onDone] folds the recap into one line.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RecapCard(
     s: SessionSummary,
@@ -463,6 +452,8 @@ fun RecapCard(
     onOpenInspector: () -> Unit,
     onDone: () -> Unit,
     modifier: Modifier = Modifier,
+    /** After a Test: the "Hear how you sounded" key, set in the row with the others. */
+    hear: (@Composable () -> Unit)? = null,
 ) {
     val c = LocalFbColors.current
     val reduced = FbMotion.rememberReduced()
@@ -481,50 +472,54 @@ fun RecapCard(
             // A failed start: the reason leads, and there's no verdict to give.
             InlineError("The stream didn't start" + (s.lastError?.let { ": ${recapFailure(it, bonded)}" } ?: "."))
         } else {
+            // The verdict with the duration beside it in mono: one line, not a label and a 60sp clock.
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp), verticalAlignment = Alignment.Top) {
                 MarkGlyph(MarkBar.forDrops(s.recoveredDrops), c.text, Modifier.padding(top = 2.dp), size = 28.dp)
                 Spacer(Modifier.width(12.dp))
-                Text(recapVerdict(s.recoveredDrops, bonded), style = FbType.displayS, color = c.text)
+                Text(
+                    buildAnnotatedString {
+                        append(recapVerdict(s.recoveredDrops, bonded))
+                        append("  ")
+                        withStyle(SpanStyle(fontFamily = JetMono, fontWeight = FontWeight.Medium, color = c.text2)) {
+                            append(formatDuration((s.liveDurationMs * p.toDouble()).roundToLong()))
+                        }
+                    },
+                    style = FbType.displayS, color = c.text,
+                    modifier = Modifier.clearAndSetSemantics {
+                        contentDescription = recapVerdict(s.recoveredDrops, bonded) + " " + spokenDuration(s.liveDurationMs)
+                    },
+                )
             }
             recapDropLines(s.recoveredDrops, bonded).getOrNull(1)?.let { HelpText(it, Modifier.padding(top = 4.dp)) }
             encoderLine(s.encoderRecoveries)?.let { HelpText(it) }
-            Text(
-                "DURATION", style = FbType.label, color = c.text2,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp).clearAndSetSemantics {},
-            )
-            BasicText(
-                formatDuration((s.liveDurationMs * p.toDouble()).roundToLong()),
-                style = FbType.duration.copy(color = c.text),
-                maxLines = 1,
-                // 60sp mono outgrows a 360dp phone at 200% font scale: shrink to fit rather than clip the time.
-                autoSize = TextAutoSize.StepBased(minFontSize = 28.sp, maxFontSize = FbType.duration.fontSize, stepSize = 2.sp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                    .clearAndSetSemantics { contentDescription = "Duration, " + spokenDuration(s.liveDurationMs) },
-            )
-            Readout(recapCells(s, links, p), Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
+            Readout(recapCells(s, links, p), Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp))
         }
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        FlowRow(
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
         ) {
+            hear?.invoke()
             if (wasTest && s.liveDurationMs > 0) {
-                FbButton("Check it arrived in Twitch Inspector", onClick = onOpenInspector, kind = FbButtonKind.Text, modifier = Modifier.weight(1f))
-            } else {
-                Spacer(Modifier.weight(1f))
+                FbButton("Check it in Twitch Inspector", onClick = onOpenInspector, kind = FbButtonKind.Text)
             }
             FbButton(
                 "DONE", onClick = onDone, kind = FbButtonKind.Text,
                 textStyle = FbType.label.copy(fontSize = 14.sp, lineHeight = 18.sp),
-                modifier = Modifier.padding(horizontal = 8.dp).semantics { contentDescription = "Done" },
+                modifier = Modifier.semantics { contentDescription = "Done" },
             )
         }
+        if (hear != null) HelpText("Headphones tell you the most.")
     }
 }
 
-/** The recap after DONE: one hairline row, the duration in mono and the outcome in words. */
+/**
+ * After DONE, for a stream that didn't start or dropped: one hairline row below the checklist, the duration in mono and
+ * the outcome in words. A clean stream leaves nothing ([cleanLastStream]).
+ */
 @Composable
-fun LastStreamRow(s: SessionSummary, modifier: Modifier = Modifier) {
+fun LastStreamRow(s: SessionSummary, wasTest: Boolean, modifier: Modifier = Modifier) {
     val v = lastStreamValue(s)
     val fig = if (s.liveDurationMs > 0) formatDuration(s.liveDurationMs) else ""
     val value = buildAnnotatedString {
@@ -533,7 +528,7 @@ fun LastStreamRow(s: SessionSummary, modifier: Modifier = Modifier) {
     }
     Column(modifier.fillMaxWidth().padding(top = 8.dp)) {
         Hairline()
-        ValueRow("Last stream", value, valueIsFigure = false)
+        ValueRow(if (wasTest) "Last test" else "Last stream", value, valueIsFigure = false)
     }
 }
 

@@ -126,10 +126,11 @@ enum class Blocker(val text: String, val action: String?) {
 }
 
 /**
- * The Home verdict line. [ready] is the only case that may say "Ready for 1080p" and carry the filled
- * square; [text] is otherwise the reason, so the line never claims more than the button can do.
+ * The Home verdict. [ready] is the only case that may say "Ready for 1080p" (in the Preflight header); [text] is
+ * otherwise the reason, so it never claims more than the button can do. [warning]: nothing blocks going live but a
+ * reading isn't good (weak upload, a hot phone); the dock line says so, with "Use 720p" when [suggest720].
  */
-internal data class ReadyVerdict(val text: String, val ready: Boolean, val suggest720: Boolean = false)
+internal data class ReadyVerdict(val text: String, val ready: Boolean, val suggest720: Boolean = false, val warning: Boolean = false)
 
 /**
  * One pure source for the verdict, gated on [goLiveBlocker] first: a phone with great signal still isn't "ready" while
@@ -141,7 +142,7 @@ internal fun readyVerdict(blocker: Blocker?, preflight: Preflight?, quality: Qua
     preflight == null -> ReadyVerdict("Checking your setup…", ready = false)
     preflight.verdict.level == Level.GOOD -> ReadyVerdict("Ready for ${quality.title}", ready = true)
     else -> ReadyVerdict(
-        preflight.verdict.text, ready = false, suggest720 = preflight.verdict.suggest720 && quality == Quality.HD1080,
+        preflight.verdict.text, ready = false, suggest720 = preflight.verdict.suggest720 && quality == Quality.HD1080, warning = true,
     )
 }
 

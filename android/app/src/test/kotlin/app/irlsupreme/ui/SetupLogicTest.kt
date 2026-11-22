@@ -94,6 +94,12 @@ class SetupLogicTest {
         assertEquals("live_12", normalizeStreamKey("live_12")) // typing stays as typed
     }
 
+    @Test fun `a clean stream leaves no line on Home after DONE`() {
+        assertTrue(cleanLastStream(summary()))
+        assertFalse(cleanLastStream(summary(drops = 2)))
+        assertFalse(cleanLastStream(summary(liveMs = 0)))
+    }
+
     @Test fun `the recap only takes credit for drops the BRB server covered`() {
         assertEquals(listOf("No connection drops"), recapDropLines(0, bonded = false))
         assertEquals(listOf("We kept you live through 2 connection drops"), recapDropLines(2, bonded = true))
@@ -141,6 +147,28 @@ class SetupLogicTest {
         val v = readyVerdict(null, null, Quality.HD1080)
         assertFalse(v.ready)
         assertEquals("Checking your setup…", v.text)
+    }
+
+    @Test fun `the Preflight header says ready, checking, or a stale age, and a warning goes to the dock`() {
+        val ready = readyVerdict(null, preflight(), Quality.HD1080)
+        assertEquals("checking…", preflightStamp(null, readyVerdict(null, null, Quality.HD1080), 0))
+        assertEquals("Ready for 1080p", preflightStamp(1_000, ready, 5_000))
+        val weak = readyVerdict(null, preflight(readings(upKbps = 5_000)), Quality.HD1080)
+        assertTrue(weak.warning)
+        // A fresh warning: nothing in the header, the dock line has it with its fix.
+        assertNull(preflightStamp(1_000, weak, 30_000))
+        // An old reading (the preflight stopped) says how old.
+        assertEquals("checked 2 min ago", preflightStamp(0, weak, 125_000))
+        // A blocker isn't a warning: the dock line already gives the blocker.
+        assertFalse(readyVerdict(Blocker.SIGN_IN, preflight(readings(upKbps = 5_000)), Quality.HD1080).warning)
+        assertFalse(ready.warning)
+    }
+
+    @Test fun `the title row is one line and first run says what a stream would use`() {
+        assertEquals("Saturday stroll · Just Chatting", titleLine("Saturday stroll", "Just Chatting"))
+        assertEquals("No title yet · No category", titleLine(" ", null))
+        assertEquals("Starts with the phone camera at 1080p. Change it in Settings.", firstRunDefaults(Kind.PHONE, Quality.HD1080))
+        assertEquals("Starts with your Pocket 3 at 720p. Change it in Settings.", firstRunDefaults(Kind.POCKET, Quality.HD720))
     }
 
     @Test fun `warnings and failures say why and are never ready`() {
