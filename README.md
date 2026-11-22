@@ -6,13 +6,12 @@ through dead zones with a small server you run yourself.
 **[Download the APK](../../releases)** · **[Set up a BRB server](docs/guides/BRB-SERVER.md)**
 
 <p>
-  <img src="docs/screenshots/0.6/live-brb.jpg" width="200" alt="The live screen on the BRB card: a NOT ON CAMERA tag, the stream timer, upload speed on mobile data and Wi‑Fi, the mic state, and the keys END, SCENES, MUTE and BACK LIVE">
-  <img src="docs/screenshots/0.6/live-starting-soon.jpg" width="200" alt="The live screen on the Starting soon card, a light card with the line Getting the rig ready. Not long now">
-  <img src="docs/screenshots/0.6/live-weak.jpg" width="200" alt="The live screen during a weak signal: an amber banner says viewers see your Weak signal screen and hear you, and the mobile data reading is amber">
-  <img src="docs/screenshots/0.6/settings-microphone.jpg" width="200" alt="Settings, Microphone: a live level meter saying Good level, the mic level fader at 0 dB, and the Phone's auto level switch">
+  <img src="docs/screenshots/0.7/live-captions.jpg" width="240" alt="The live screen on the Starting soon card with live captions along the bottom. The pill says Live, Starting soon, not on camera, they hear you, and the keys are END, SCENES, MUTE and TO CAMERA">
+  <img src="docs/screenshots/0.7/settings-cards.jpg" width="240" alt="Settings, Scene cards: the card chooser in two groups, Card and Automatic, and a preview of the Starting soon card">
+  <img src="docs/screenshots/0.7/settings-microphone.jpg" width="240" alt="Settings, Microphone: a live level meter, the mic level fader, the Phone's auto level switch and the sound check">
 </p>
 
-_Screenshots from a OnePlus 12 running 0.6.0._
+_Screenshots from a OnePlus 12 running 0.7.0._
 
 Website: [fullbars.app](https://fullbars.app)
 
@@ -23,8 +22,9 @@ Website: [fullbars.app](https://fullbars.app)
    so moving to a future release-signed build will need an uninstall first.
 2. **Sign in.** On Home, tap **Continue with Twitch**. Your browser opens twitch.tv/activate; approve Fullbars there.
    Or tap **Use a stream key instead**.
-3. **Test.** **TEST · only you** is selected at the bottom of Home. Start a test, walk around, try a scene card and
-   the mic sheet, then end it. Home shows a recap of how it went.
+3. **Test.** **TEST · private** is selected at the bottom of Home. Tap **Start test**: you see a preview first, with
+   the mic meter and your connections, and nothing is sent until you tap **START TEST**. Walk around, try a scene
+   card and the mic sheet, then hold **END**. Home shows a recap of how it went.
 4. **Go live.** Switch to **LIVE · public** and start.
 
 Without a BRB server, Fullbars streams straight to Twitch over RTMPS. That works anywhere you have one good
@@ -42,20 +42,26 @@ connection. For bonding and staying live through dropouts, set up a BRB server.
   connection is too weak for a moving picture, viewers see your Weak signal card and still hear you.
 - **Helper phones.** A spare phone in your pocket adds its mobile data to the stream. It speaks Moblin's Moblink
   protocol, so Moblin can be the helper, and a Fullbars phone can help a Moblin streamer.
-- **DJI Pocket 3 as a wireless camera** (Camera link, in Labs). Fullbars starts the Pocket's stream over Bluetooth
-  and takes it in over Wi‑Fi. Other cameras that stream RTMP work too.
+- **Preview before you go live.** Start opens the camera, the mic meter and the connections first. Nothing is sent
+  until you tap GO LIVE, on your camera or on your Starting soon card.
+- **DJI Pocket 3 as a wireless camera** (Settings › Camera, unofficial). Fullbars starts the Pocket's stream over
+  Bluetooth and takes it in over Wi‑Fi. Other cameras that stream RTMP work too.
 - **Your mic, your level.** A live level meter, a sound check you can play back, a level fader from -20 to +30 dB, a
   limiter that turns loud moments down instead of distorting, and a switch to turn off the phone's own auto level.
   Change any of it while live.
-- **Scene cards.** Starting soon, BRB, Privacy and Ending, plus automatic Signal lost, Weak signal and Camera lost
-  cards. Use your own words, a picture, a still or GIF background, a layout and an accent colour. Add a countdown,
-  a time-away counter, chat on the card, or show a web page instead of the card.
+- **Scene cards.** Starting soon, BRB, Privacy and Ending, up to four scenes of your own (Lunch, Q&A…), plus
+  automatic Signal lost, Weak signal and Camera lost cards. Use your own words, font, text size and colour, a
+  picture, a still or GIF background, a layout and any accent colour. Add a countdown, a time-away counter, chat on
+  the card, music under it, or show a web page instead of the card.
 - **Alerts drawn on the phone.** Follows, subs, gift subs, bits, raids, and tips through StreamElements or
-  Streamlabs, each with your own words and picture.
+  Streamlabs. For each kind: whether it shows and the smallest worth showing, how long it stays up, its words,
+  picture, colours and its own sound. Where alerts go and how big they are is yours too.
+- **Live captions.** What viewers hear you say, recognised on the phone (nothing is sent anywhere) and written on
+  the stream. Android 13 or newer.
 - **Chat with you.** Twitch chat with emotes on the live screen, and chat read aloud into your earbuds (everyone, or
   only mods, VIPs and subs). It reads only while headphones are connected, so it never goes out on stream.
-- **Help from your mods.** Chat commands (`!brb`, `!live`, `!privacy`, `!starting`, `!ending`, `!restartcam`, and
-  `!end` with a confirmation word) and a web remote they can open in a browser.
+- **Help from your mods.** Chat commands (`!brb`, `!live`, `!privacy`, `!starting`, `!ending`, `!scene <name>`,
+  `!restartcam`, and `!end` with a confirmation word) and a web remote they can open in a browser.
 - **Overlays.** Chat, a line of text, an image such as a logo, and a StreamElements or Streamlabs overlay URL.
 - **Also stream to.** Your BRB server can send the same stream to Kick, YouTube or any RTMP server, up to three at
   once. Your phone still uploads it only once. Test streams never go anywhere but Twitch's test.
@@ -77,17 +83,18 @@ docker exec -it fullbars-brb brb pair     # on the server
 The full guide, with firewall ports and troubleshooting: [docs/guides/BRB-SERVER.md](docs/guides/BRB-SERVER.md).
 The hold time is the server's `HOLD` setting (10 minutes unless you change it).
 
-**Helper phones.** Settings › Helper phones. On the streaming phone, show the code; on the spare phone, scan it. The
+**Helper phones.** Settings › Helper phones. On the streaming phone, tap **Add a helper phone** to show the code;
+on the spare phone, go to **Use this phone as a helper** and scan it. The
 helper finds the streaming phone on its hotspot (or a Wi‑Fi you share) and lends its mobile data. Helpers join a
 combined stream, so they need your BRB server too.
 
-**DJI Pocket 3.** Settings › Labs › Camera link. This is unofficial: DJI doesn't publish an SDK for it and a firmware
-update could break it.
+**DJI Pocket 3.** Settings › Camera › DJI Pocket 3. This is unofficial: DJI doesn't publish an SDK for it and a
+firmware update could break it.
 
 **Also stream to.** Settings › Also stream to. Needs Combine connections and your BRB server. Each extra destination
 adds your stream's bitrate to the server's upload, not the phone's.
 
-**Mod remote.** Settings › Twitch › Mod remote › **Get the link**, then **Share** it with your mods. Your BRB server
+**Mod remote.** Settings › Twitch › Mods › **Get the link**, then **Share** it with your mods. Your BRB server
 serves the page, so it needs one paired. Share it only with people you trust.
 
 **My OBS at home.** The BRB server can feed your home OBS instead of Twitch, with NOALBS switching scenes from the

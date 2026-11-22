@@ -63,7 +63,7 @@ have Docker yet, install it with your provider's Docker image or
    ```
 
    A QR code appears in the terminal. In Fullbars: **Settings › Combine connections**, turn on
-   **Combine connections**, tap **Scan pairing code**, and scan it. The code also comes as a `fullbars://pair` link
+   **Use Wi‑Fi and mobile data together**, tap **Scan pairing code**, and scan it. The code also comes as a `fullbars://pair` link
    you can open on the phone (or paste in the app).
 
    **Treat the code and link like a password:** whoever has them can stream through your server.
@@ -76,8 +76,9 @@ The server **restarts on its own** after a reboot or a crash. To see what it's d
 
 ## Going live
 
-- Pick **TEST · only you** or **LIVE · public** at the bottom of Home and start. A test stream is a private Twitch
-  bandwidth test: viewers can't see it.
+- Pick **TEST · private** or **LIVE · public** at the bottom of Home and start. You see a preview first; nothing is
+  sent until you tap GO LIVE (START TEST for a test). A test stream is a private Twitch bandwidth test: viewers can't
+  see it.
 - The live screen shows the health of each connection (Wi‑Fi, your carrier). "Live · Weak signal" means Fullbars has
   lowered the quality to stay live.
 - Drop out completely and, after 1.5 seconds, your viewers see your Signal lost card and you see the phone
