@@ -24,6 +24,7 @@ import app.irlsupreme.ui.live.KeyGlyph
 import app.irlsupreme.ui.live.LinkMeter
 import app.irlsupreme.ui.live.LinkState
 import app.irlsupreme.ui.live.MicCell
+import app.irlsupreme.ui.live.PillGlyph
 import app.irlsupreme.ui.live.PillLook
 import app.irlsupreme.ui.live.Rail
 import app.irlsupreme.ui.live.TIMER_PENDING
@@ -38,6 +39,8 @@ import app.irlsupreme.ui.live.keyWords
 import app.irlsupreme.ui.live.linkCells
 import app.irlsupreme.ui.live.linkPage
 import app.irlsupreme.ui.live.micCell
+import app.irlsupreme.ui.live.batteryNotice
+import app.irlsupreme.ui.live.batteryStep
 import app.irlsupreme.ui.live.muteKey
 import app.irlsupreme.ui.live.notice
 import app.irlsupreme.ui.live.noticeHeight
@@ -254,7 +257,7 @@ class LiveScreenLogicTest {
         assertTrue(muteKey(muted = true).engaged)
         assertEquals("BRB", brbKey(Scene.LIVE).label)
         for (s in listOf(Scene.BRB, Scene.PRIVACY, Scene.STARTING_SOON, Scene.ENDING)) {
-            assertEquals("BACK LIVE", brbKey(s).label)
+            assertEquals("TO CAMERA", brbKey(s).label)
             assertEquals(KeyGlyph.CAMERA, brbKey(s).glyph)
             assertTrue(brbKey(s).engaged)
         }
@@ -263,8 +266,8 @@ class LiveScreenLogicTest {
     @Test fun `at 200 percent each key grows to its widest word and the rail still fits 360dp`() {
         // Archivo Condensed Bold caps at 22dp (11sp under Android 14's non-linear 200%), no tracking:
         // CANCEL 72.6, SCENES 71.9, UNMUTE 77.3, BACK 50.0.
-        assertEquals(listOf(listOf("CANCEL", "END"), listOf("SCENES"), listOf("MUTE", "UNMUTE"), listOf("BRB", "BACK LIVE")), KEY_LABELS)
-        assertEquals(listOf("BRB", "BACK", "LIVE"), keyWords(KEY_LABELS[3]))
+        assertEquals(listOf(listOf("CANCEL", "END"), listOf("SCENES"), listOf("MUTE", "UNMUTE"), listOf("BRB", "TO CAMERA")), KEY_LABELS)
+        assertEquals(listOf("BRB", "TO", "CAMERA"), keyWords(KEY_LABELS[3]))
         val needs = floatArrayOf(keyNeed(72.6f, true), keyNeed(71.9f, true), keyNeed(77.3f, true), keyNeed(50.0f, true))
         assertArrayEquals(floatArrayOf(78f, 77f, 83f, 55f), needs, 0.01f)
         val w = railWidths(360f - 24f, needs)
@@ -281,7 +284,7 @@ class LiveScreenLogicTest {
         // One 14dp line at normal type fits the 60dp key; one 26dp line at 200% fits 84dp.
         assertEquals(60f, railKeyHeight(false, 14f), 0f)
         assertEquals(84f, railKeyHeight(true, 26f), 0f)
-        // BACK LIVE wrapped to two 26dp lines: 6 + 24 + 4 + 52 + 6 = 92, plus 1dp against rounding.
+        // TO CAMERA wrapped to two 26dp lines: 6 + 24 + 4 + 52 + 6 = 92, plus 1dp against rounding.
         assertEquals(93f, railKeyHeight(true, 52f), 0f)
         assertTrue(railKeyHeight(true, 52f) > keyHeight(true))
         // The landscape column widens only when a word needs more than its 72dp inside.
@@ -340,11 +343,22 @@ class LiveScreenLogicTest {
     }
 
     @Test fun `the MIC column shows the most important thing`() {
-        assertEquals(MicCell.Muted, micCell(muted = true, AudioInput.SILENCED, 5))
-        assertEquals(MicCell.NoAudio, micCell(muted = false, AudioInput.SILENCED, 5))
-        assertEquals(MicCell.Battery(12), micCell(muted = false, AudioInput.OK, 12))
-        assertEquals(MicCell.On, micCell(muted = false, AudioInput.OK, 15))
-        assertEquals(MicCell.On, micCell(muted = false, AudioInput.OK, null))
+        assertEquals(MicCell.Muted, micCell(muted = true, AudioInput.SILENCED))
+        assertEquals(MicCell.NoAudio, micCell(muted = false, AudioInput.SILENCED))
+        assertEquals(MicCell.On, micCell(muted = false, AudioInput.OK))
+    }
+
+    @Test fun `a low battery is said once per 5 percent step, never in place of the mic meter`() {
+        assertNull(batteryStep(null))
+        assertNull(batteryStep(15))
+        assertEquals(2, batteryStep(14))
+        assertEquals(2, batteryStep(10))
+        assertEquals(1, batteryStep(9))
+        assertEquals(0, batteryStep(4))
+        assertEquals("Phone battery 12%", batteryNotice(12))
+        // Below the mute hint, above the Pocket screen offer and the camera link.
+        assertEquals(FIRST_MUTE_HINT, notice(false, null, true, "cam", null, battery = "Phone battery 12%"))
+        assertEquals("Phone battery 12%", notice(false, null, false, "cam", null, pocketHint = true, battery = "Phone battery 12%"))
     }
 
     @Test fun `the notice slot takes one line, in priority order`() {
@@ -375,15 +389,16 @@ class LiveScreenLogicTest {
     }
 
     @Test fun `scene rows say what viewers get`() {
-        assertEquals("Your camera", sceneConsequence(Scene.LIVE, muted = false))
-        assertEquals("Card · they hear you", sceneConsequence(Scene.BRB, muted = false))
-        assertEquals("Card · mic off", sceneConsequence(Scene.ENDING, muted = true))
-        assertEquals("Card · camera and mic off", sceneConsequence(Scene.PRIVACY, muted = false))
+        // The camera row needs no line; every card says what happens to the sound.
+        assertNull(sceneConsequence(Scene.LIVE, muted = false))
+        assertEquals("They hear you", sceneConsequence(Scene.BRB, muted = false))
+        assertEquals("Mic off", sceneConsequence(Scene.ENDING, muted = true))
+        assertEquals("Camera and mic off", sceneConsequence(Scene.PRIVACY, muted = false))
         // A card whose music turns the mic off: they hear the music, not you.
-        assertEquals("Card · they hear your music", sceneConsequence(Scene.BRB, muted = false, musicMicOff = true))
-        assertEquals("Card · mic off", sceneConsequence(Scene.BRB, muted = true, musicMicOff = true))
-        assertEquals("Card · camera and mic off", sceneConsequence(Scene.PRIVACY, muted = false, musicMicOff = true))
-        assertEquals("Your camera", sceneConsequence(Scene.LIVE, muted = false, musicMicOff = true))
+        assertEquals("They hear your music", sceneConsequence(Scene.BRB, muted = false, musicMicOff = true))
+        assertEquals("Mic off", sceneConsequence(Scene.BRB, muted = true, musicMicOff = true))
+        assertEquals("Camera and mic off", sceneConsequence(Scene.PRIVACY, muted = false, musicMicOff = true))
+        assertNull(sceneConsequence(Scene.LIVE, muted = false, musicMicOff = true))
     }
 
     private fun live(vararg links: LinkInfo) = EngineState(running = true, connection = ConnectionPhase.LIVE, liveSinceMs = 1, links = links.toList())
@@ -400,7 +415,7 @@ class LiveScreenLogicTest {
         assertTrue(PillLook.RECONNECTING.fullSlot)
         assertFalse(PillLook.SCENE.fullSlot)
         val reconnecting = pillModel(live(att), Health.RECONNECTING, false, bonded = true, ending = false)
-        assertEquals("Viewers see your Signal lost screen", reconnecting.second)
+        assertEquals("Viewers see your Signal lost card", reconnecting.second)
         assertTrue(pillAssertive(Health.RECONNECTING))
         assertTrue(pillAssertive(Health.CAMERA_LOST))
         assertFalse(pillAssertive(Health.WEAK))
@@ -419,24 +434,40 @@ class LiveScreenLogicTest {
         assertFalse(p.look.lightFill)
         val brb = pillModel(live().copy(scene = Scene.BRB), Health.BRB, false, false, false)
         assertEquals(PillLook.SCENE, brb.look)
-        assertEquals("Viewers see your BRB screen and hear you", brb.second)
+        assertEquals("Live · BRB", brb.headline)
+        assertEquals("Not on camera · they hear you", brb.second)
+        assertEquals("Live, BRB. Viewers see your BRB card and hear you", brb.spoken)
+        assertEquals("Test · BRB", pillModel(live().copy(scene = Scene.BRB), Health.BRB, isTest = true, bonded = false, ending = false).headline)
+    }
+
+    @Test fun `a mute on a card keeps the card's name, and Privacy is only the Privacy card`() {
+        val muted = pillModel(live().copy(scene = Scene.STARTING_SOON, micMuted = true), Health.BRB, false, false, false)
+        assertEquals(PillLook.SCENE, muted.look)
+        assertEquals(PillGlyph.MIC_OFF, muted.glyph)
+        assertEquals("Live · Starting soon", muted.headline)
+        assertEquals("Not on camera · mic off", muted.second)
+        assertEquals("Mic off. Viewers see your Starting soon card", muted.spoken)
+        val privacy = pillModel(live().copy(scene = Scene.PRIVACY, micMuted = true), Health.BRB, false, false, false)
+        assertEquals(PillLook.PRIVACY, privacy.look)
+        assertEquals("Live · Privacy", privacy.headline)
+        assertEquals("Not on camera · mic off", privacy.second)
     }
 
     @Test fun `on a card whose music turns the mic off, the pill says viewers hear the music`() {
         val brb = live().copy(scene = Scene.BRB)
         val p = pillModel(brb, Health.BRB, false, false, false, musicMicOff = true)
         assertEquals(PillLook.SCENE, p.look)
-        assertEquals("Viewers see your BRB screen and hear your music", p.second)
-        assertEquals("BRB. Viewers see your BRB screen and hear your music", p.spoken)
+        assertEquals("Not on camera · they hear your music", p.second)
+        assertEquals("Live, BRB. Viewers see your BRB card and hear your music", p.spoken)
         // No music, or music with the mic on: as before.
-        assertEquals("Viewers see your BRB screen and hear you", pillModel(brb, Health.BRB, false, false, false, musicMicOff = false).second)
+        assertEquals("Not on camera · they hear you", pillModel(brb, Health.BRB, false, false, false, musicMicOff = false).second)
         // Privacy with the mic back on, but its music has the mic off: not the mic-on caution.
         val privacy = pillModel(live().copy(scene = Scene.PRIVACY), Health.BRB, false, false, false, musicMicOff = true)
         assertEquals(PillLook.PRIVACY, privacy.look)
-        assertEquals("Viewers see your privacy screen and hear your music", privacy.second)
+        assertEquals("Not on camera · they hear your music", privacy.second)
         // Muted: the mic is off either way, said as before.
         val muted = pillModel(brb.copy(micMuted = true), Health.BRB, false, false, false, musicMicOff = true)
-        assertEquals("Viewers see your BRB screen · mic off", muted.second)
+        assertEquals("Not on camera · mic off", muted.second)
     }
 
     @Test fun `chat is hidden from the program exactly where the compositor drops layers`() {
@@ -502,6 +533,6 @@ class LiveScreenLogicTest {
         assertEquals("GO LIVE", goLiveLabel(isTest = false))
         assertEquals("START TEST", goLiveLabel(isTest = true))
         assertEquals("Go live on camera", goLiveSpoken(isTest = false, startOnCard = false))
-        assertEquals("Start the test on your Starting soon screen", goLiveSpoken(isTest = true, startOnCard = true))
+        assertEquals("Start the test on your Starting soon card", goLiveSpoken(isTest = true, startOnCard = true))
     }
 }

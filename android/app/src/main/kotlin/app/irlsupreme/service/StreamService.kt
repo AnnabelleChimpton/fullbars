@@ -594,7 +594,7 @@ class StreamService : Service() {
 
     /** Applies a mod command (chat or the mod remote; any thread); returns a short acknowledgement for chat (null = none). */
     private fun apply(command: ChatCommand): String? = when (command) {
-        ChatCommand.Brb -> { engine.setScene(Scene.BRB); "BRB screen on" }
+        ChatCommand.Brb -> { engine.setScene(Scene.BRB); "BRB card on" }
         ChatCommand.Live -> {
             // Only leaving Privacy turns the mic back on: a streamer who muted it themselves stays muted.
             val wasPrivacy = engine.state.value.scene == Scene.PRIVACY
@@ -602,9 +602,9 @@ class StreamService : Service() {
             if (wasPrivacy) engine.setMicMuted(false)
             ModReplies.backLive(micStillOff = !wasPrivacy && engine.state.value.micMuted)
         }
-        ChatCommand.Privacy -> { engine.setScene(Scene.PRIVACY); engine.setMicMuted(true); "Privacy on: privacy screen, mic off" }
-        ChatCommand.StartingSoon -> { engine.setScene(Scene.STARTING_SOON); "Starting soon screen on" }
-        ChatCommand.Ending -> { engine.setScene(Scene.ENDING); "Ending screen on" }
+        ChatCommand.Privacy -> { engine.setScene(Scene.PRIVACY); engine.setMicMuted(true); "Privacy on: Privacy card, mic off" }
+        ChatCommand.StartingSoon -> { engine.setScene(Scene.STARTING_SOON); "Starting soon card on" }
+        ChatCommand.Ending -> { engine.setScene(Scene.ENDING); "Ending card on" }
         is ChatCommand.ShowScene -> SceneNames.match(command.name)?.let { showScene(it) }
             ?: ModReplies.noScene(SceneNames.offered().map { SceneNames.name(it) })
         ChatCommand.RestartCam -> {
@@ -1187,10 +1187,10 @@ internal object ModReplies {
         else -> "Chat connecting…"
     }
 
-    fun backLive(micStillOff: Boolean) = if (micStillOff) "Back live (mic still off)" else "Back live"
+    fun backLive(micStillOff: Boolean) = if (micStillOff) "Back on camera (mic still off)" else "Back on camera"
 
     /** A mod showed one of your own scenes. */
-    fun sceneOn(name: String) = "$name screen on"
+    fun sceneOn(name: String) = "$name card on"
 
     /** `!scene` with a name that isn't one; lists what is, so the mod can try again. */
     fun noScene(names: List<String>) = "No scene by that name. Try: ${names.joinToString(", ")}"

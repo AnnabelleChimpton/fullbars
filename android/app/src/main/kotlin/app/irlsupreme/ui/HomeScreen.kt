@@ -355,7 +355,7 @@ private fun FirstRun(c: SetupController, nav: Navigator, reduced: Boolean) {
 private fun defaultsLine(c: SetupController): String {
     val camera = when (c.cameraKind) {
         ExternalCamera.Kind.PHONE -> "Phone camera"
-        ExternalCamera.Kind.POCKET -> "Camera link"
+        ExternalCamera.Kind.POCKET -> "Pocket 3"
         ExternalCamera.Kind.RTMP -> "Other camera"
     }
     val connection = if (c.combine) "combined connections" else "this phone's connection"
@@ -597,7 +597,7 @@ private fun TitleRow(ch: ChannelInfo, onClick: () -> Unit) {
 }
 
 /**
- * Camera: "Phone", or "Camera link" with the chosen camera's name. The phone camera is VERIFIED once Android has granted
+ * Camera: "Phone", or "Pocket 3" with the chosen camera's name. The phone camera is VERIFIED once Android has granted
  * it; a hotspot the phone has checked and found off is the one verified failure here.
  */
 @Composable
@@ -607,7 +607,7 @@ private fun CameraRow(c: SetupController, nav: Navigator) {
     val rtmpUrl = remember(c.cameraKind) { if (c.cameraKind == ExternalCamera.Kind.RTMP) c.rtmpUrls.firstOrNull() else null }
     val (value, sub) = when (c.cameraKind) {
         ExternalCamera.Kind.PHONE -> "Phone" to null
-        ExternalCamera.Kind.POCKET -> "Camera link" to when (blocker) {
+        ExternalCamera.Kind.POCKET -> "Pocket 3" to when (blocker) {
             Blocker.HOTSPOT_OFF -> "Your hotspot is off"
             else -> c.pocketDevice?.second ?: "Find your Pocket 3"
         }
@@ -638,11 +638,11 @@ private fun ConnectionRow(c: SetupController, nav: Navigator, pf: Preflight?) {
     val (value, sub, mark) = if (c.combine) {
         val p = c.pairing
         when {
-            p == null -> Triple("Combined", "Pair your BRB server", StateMark.UNCHECKED)
-            c.brbCheck?.checked != true -> Triple("Combined", "Checking your BRB server…", StateMark.UNCHECKED)
+            p == null -> Triple("Combined", "Pair your server", StateMark.UNCHECKED)
+            c.brbCheck?.checked != true -> Triple("Combined", "Checking your server…", StateMark.UNCHECKED)
             c.brbUdpBlocked -> Triple("Combined", "UDP ${p.port} looks blocked", StateMark.FAILED)
-            !c.brbOk -> Triple("Combined", c.brbStatus ?: "Can't reach your BRB server", StateMark.FAILED)
-            else -> Triple("Combined", "BRB server ready", StateMark.VERIFIED)
+            !c.brbOk -> Triple("Combined", c.brbStatus ?: "Can't reach your server", StateMark.FAILED)
+            else -> Triple("Combined", "Server ready", StateMark.VERIFIED)
         }
     } else {
         when {
@@ -658,13 +658,13 @@ private fun ConnectionRow(c: SetupController, nav: Navigator, pf: Preflight?) {
     )
 }
 
-/** Quality: the figures in mono ("1080p · 6 Mb/s"), the data use as prose under it. */
+/** Video: the figures in mono ("1080p · 6 Mb/s"), the data use under it, as Settings › Video says it. */
 @Composable
 private fun QualityRow(c: SetupController, nav: Navigator, pf: Preflight?) {
     val q = c.quality
-    val perHour = "≈%.1f GB per hour".format(q.gbPerHour)
+    val perHour = "%.1f GB/h".format(q.gbPerHour)
     ValueRow(
-        label = "Quality", value = "${q.title} · ${q.rate}", valueIsFigure = true,
+        label = "Video", value = "${q.title} · ${q.rate}", valueIsFigure = true,
         state = if (pf == null) StateMark.UNCHECKED else StateMark.VERIFIED,
         sub = if (c.orientation == StreamOrientation.PORTRAIT) "Portrait · $perHour" else perHour, subIsFigure = false,
         onClick = { nav.open(Screen.QUALITY) },
@@ -732,7 +732,7 @@ private fun BusTabs(test: Boolean, onSelect: (Boolean) -> Unit) {
                 drawRect(c.cta, Offset(x, size.height - r), Size(w, r)) // square bottom: it joins the CTA
             },
     ) {
-        BusTab("TEST", "only you", spoken = "Test, only you", selected = test, dot = false) { onSelect(true) }
+        BusTab("TEST", "private", spoken = "Test, private", selected = test, dot = false) { onSelect(true) }
         BusTab("LIVE", "public", spoken = "Live, public", selected = !test, dot = true) { onSelect(false) }
     }
 }
@@ -898,7 +898,8 @@ private fun DockLine(c: SetupController, nav: Navigator) {
 /** The line for a stream that can go: private, public (and where), or the hand-on after a clean test. */
 private fun dockLine(c: SetupController): String? {
     if (!c.audienceApplies) return null
-    if (c.testMode) return "Nobody can watch a test on Twitch, not even you."
+    // The TEST tab already says "private"; a second line saying so is noise.
+    if (c.testMode) return null
     if (c.cleanTestHandoff && c.showsStreamInfo) return "The test was clean. Your title sheet comes next."
     val login = (c.signIn as? SignIn.SignedIn)?.login?.takeIf { !c.useKey && it.none(Char::isWhitespace) }
     return if (login != null) "Goes out on twitch.tv/$login." else "Everyone on your channel can see you."

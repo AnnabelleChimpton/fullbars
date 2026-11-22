@@ -4,6 +4,8 @@ import app.irlsupreme.engine.Health
 import app.irlsupreme.ui.live.MIC_LOUD_HINT
 import app.irlsupreme.ui.live.POCKET_HINT
 import app.irlsupreme.ui.live.externalCameraNotice
+import app.irlsupreme.ui.live.pocketNotice
+import app.irlsupreme.dji.PocketState
 import app.irlsupreme.ui.live.msToNextSecond
 import app.irlsupreme.ui.live.notice
 import app.irlsupreme.ui.live.pocketAlarm
@@ -59,11 +61,11 @@ class LivePocketAndTimerTest {
     }
 
     @Test fun `an external camera with no picture says so instead of a lost link`() {
-        assertEquals("Phone camera · camera connected, no video yet", externalCameraNotice("connected, no video yet", "phone"))
-        assertEquals("Phone camera · the camera sends HEVC; set it to H.264", externalCameraNotice("camera sends HEVC; set it to H.264", "phone"))
-        assertEquals("Phone camera · waiting for the camera link", externalCameraNotice("waiting for the camera", "phone"))
-        assertEquals("Phone camera · camera connecting", externalCameraNotice("connected", "phone"))
-        assertEquals("Phone camera · camera link lost", externalCameraNotice("camera disconnected", "phone"))
+        assertEquals("Phone camera on air · camera connected, no video yet", externalCameraNotice("connected, no video yet", "phone"))
+        assertEquals("Phone camera on air · the camera sends HEVC; set it to H.264", externalCameraNotice("camera sends HEVC; set it to H.264", "phone"))
+        assertEquals("Phone camera on air · waiting for the camera", externalCameraNotice("waiting for the camera", "phone"))
+        assertEquals("Phone camera on air · camera connecting", externalCameraNotice("connected", "phone"))
+        assertEquals("Phone camera on air · camera lost", externalCameraNotice("camera disconnected", "phone"))
         assertNull("on screen: nothing to say", externalCameraNotice("1920x1080 · camera audio", "camera"))
         assertNull(externalCameraNotice(null, "phone"))
     }
@@ -71,7 +73,7 @@ class LivePocketAndTimerTest {
     @Test fun `a mic change and the pocket screen offer take their place in the notice line`() {
         assertEquals("External mic disconnected", notice(false, null, false, null, null, micLoud = true, micInput = "External mic disconnected"))
         assertEquals(MIC_LOUD_HINT, notice(false, null, false, null, null, micLoud = true, pocketHint = true))
-        assertEquals(POCKET_HINT, notice(false, null, false, "Phone camera · camera link lost", null, pocketHint = true))
+        assertEquals(POCKET_HINT, notice(false, null, false, "Phone camera on air · camera lost", null, pocketHint = true))
         assertEquals("No audio", notice(false, "No audio", false, null, null, micInput = "External mic disconnected"))
     }
 
@@ -89,5 +91,20 @@ class LivePocketAndTimerTest {
         assertEquals("sound 40 milliseconds later", offsetSpoken(40))
         assertEquals("sound 20 milliseconds earlier", offsetSpoken(-20))
         assertEquals("no delay", offsetSpoken(0))
+    }
+
+    @Test fun `the Pocket 3 notice leads with what viewers get and keeps steps for when they matter`() {
+        // A step that needs you is always in full.
+        assertEquals(PocketState.ApproveOnCamera.label, pocketNotice(PocketState.ApproveOnCamera, preview = false, onCamera = true))
+        // Preview: the step count, or what going live now would mean.
+        assertEquals(PocketState.Connecting.label, pocketNotice(PocketState.Connecting, preview = true, onCamera = true))
+        assertEquals("Pocket 3 not ready: you'd go live on the phone camera",
+            pocketNotice(PocketState.Reconnecting("Can't reach the Pocket 3. Is it on and close?", 5), preview = true, onCamera = true))
+        // Live on the camera scene: the phone camera is on air meanwhile. On a card: just the Pocket.
+        assertEquals("Phone camera on air · Pocket 3 connecting", pocketNotice(PocketState.Connecting, preview = false, onCamera = true))
+        assertEquals("Pocket 3 connecting", pocketNotice(PocketState.Starting, preview = false, onCamera = false))
+        assertEquals("Phone camera on air · Pocket 3 not connected, retrying",
+            pocketNotice(PocketState.Reconnecting("Can't reach the Pocket 3. Is it on and close?", 5), preview = false, onCamera = true))
+        assertEquals("Pocket 3 didn't start", pocketNotice(PocketState.Failed("No hotspot"), preview = false, onCamera = false))
     }
 }

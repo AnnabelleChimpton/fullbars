@@ -21,7 +21,7 @@ object SceneNames {
 
     /** A built-in scene's name; null for the streamer's own. */
     fun builtInName(scene: Scene): String? = when (scene) {
-        Scene.LIVE -> "Live"
+        Scene.LIVE -> "Camera"
         Scene.BRB -> "BRB"
         Scene.PRIVACY -> "Privacy"
         Scene.STARTING_SOON -> "Starting soon"
@@ -44,7 +44,7 @@ object SceneNames {
 
     /** What each built-in answers to in `!scene`, besides its name. */
     private fun aliases(scene: Scene): List<String> = when (scene) {
-        Scene.LIVE -> listOf("Live", "camera", "cam")
+        Scene.LIVE -> listOf("Camera", "live", "cam")
         Scene.BRB -> listOf("BRB", "be right back")
         Scene.PRIVACY -> listOf("Privacy")
         Scene.STARTING_SOON -> listOf("Starting soon", "starting", "start")

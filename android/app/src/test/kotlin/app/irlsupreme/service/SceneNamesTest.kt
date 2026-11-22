@@ -14,7 +14,7 @@ class SceneNamesTest {
     private val own = mapOf(Scene.CUSTOM_1 to "Lunch", Scene.CUSTOM_3 to "Q&A", Scene.CUSTOM_4 to "Driving home")
 
     @Test fun `every scene has a name, your own by what you called them`() {
-        assertEquals(listOf("Live", "BRB", "Privacy", "Starting soon", "Ending"), SceneNames.BUILT_IN.map { SceneNames.name(it, own) })
+        assertEquals(listOf("Camera", "BRB", "Privacy", "Starting soon", "Ending"), SceneNames.BUILT_IN.map { SceneNames.name(it, own) })
         assertEquals("Lunch", SceneNames.name(Scene.CUSTOM_1, own))
         assertEquals("Q&A", SceneNames.name(Scene.CUSTOM_3, own))
         // Unnamed, or named only spaces: the slot's own name, the same words its card prints.
@@ -64,7 +64,7 @@ class SceneNamesTest {
         assertNull(SceneNames.nameProblem("", Scene.CUSTOM_2, own))
         assertNotNull(SceneNames.nameProblem("!!!", Scene.CUSTOM_2, own))
         assertEquals("BRB is already a scene. Pick another name.", SceneNames.nameProblem("brb", Scene.CUSTOM_2, own))
-        assertEquals("Live is already a scene. Pick another name.", SceneNames.nameProblem("Camera", Scene.CUSTOM_2, own))
+        assertEquals("Camera is already a scene. Pick another name.", SceneNames.nameProblem("Camera", Scene.CUSTOM_2, own))
         assertEquals("Your scene Lunch has that name. Pick another.", SceneNames.nameProblem("LUNCH!", Scene.CUSTOM_2, own))
         // Its own name isn't a clash.
         assertNull(SceneNames.nameProblem("lunch", Scene.CUSTOM_1, own))
@@ -104,7 +104,7 @@ class SceneNamesTest {
         assertEquals(ChatCommand.StartingSoon, ModScenes.command(Scene.STARTING_SOON))
         assertEquals(ChatCommand.Ending, ModScenes.command(Scene.ENDING))
         assertTrue(Scene.CUSTOM.all { ModScenes.command(it) == null })
-        assertEquals("Lunch screen on", ModReplies.sceneOn("Lunch"))
+        assertEquals("Lunch card on", ModReplies.sceneOn("Lunch"))
         assertEquals("No scene by that name. Try: Live, BRB, Lunch", ModReplies.noScene(listOf("Live", "BRB", "Lunch")))
     }
 }

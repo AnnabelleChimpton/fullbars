@@ -693,8 +693,7 @@ internal fun MicPanel(
 @Composable
 internal fun AutoLevelRow(raw: Boolean, onRaw: (Boolean) -> Unit) = SwitchRow(
     "Phone's auto level",
-    supporting = "Some phones turn everything up on their own, room noise and all, and loud talking distorts. " +
-        "Turn it off to get the raw mic and set the level here.",
+    supporting = "Turn off if loud talking distorts. You set the level yourself.",
     checked = !raw,
     onCheckedChange = { onRaw(!it) },
 )

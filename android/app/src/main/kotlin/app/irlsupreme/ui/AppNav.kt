@@ -166,7 +166,7 @@ private fun PairingDialog(c: SetupController) {
     val replaces = current != null && (current.host != p.host || current.port != p.port)
     AlertDialog(
         onDismissRequest = { if (!c.pairingBusy) c.cancelPairing() },
-        title = { Text(if (replaces) "Replace your BRB server?" else "Pair with this BRB server?") },
+        title = { Text(if (replaces) "Replace your server?" else "Pair with this server?") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (replaces && current != null) {

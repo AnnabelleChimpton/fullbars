@@ -116,9 +116,9 @@ import app.irlsupreme.service.OverlayStore
 import app.irlsupreme.service.PocketStatus
 import app.irlsupreme.service.StreamService
 import app.irlsupreme.ui.live.ChatSheet
-import app.irlsupreme.ui.live.EngagedTag
 import app.irlsupreme.ui.live.FLIP_RESERVE_DP
 import app.irlsupreme.ui.live.OncePerStream
+import app.irlsupreme.ui.live.pocketNotice
 import app.irlsupreme.ui.live.facingSpoken
 import app.irlsupreme.ui.live.flipped
 import app.irlsupreme.ui.live.startFacingChange
@@ -145,6 +145,8 @@ import app.irlsupreme.ui.live.captureSurface
 import app.irlsupreme.ui.live.endKey
 import app.irlsupreme.ui.live.linkCells
 import app.irlsupreme.ui.live.micCell
+import app.irlsupreme.ui.live.batteryNotice
+import app.irlsupreme.ui.live.batteryStep
 import app.irlsupreme.ui.live.rememberChatText
 import app.irlsupreme.ui.live.MicSheet
 import app.irlsupreme.ui.live.MIC_LOUD_NOTICE_MS
@@ -236,6 +238,9 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         }
     }
     var pocketHintAt by remember { mutableLongStateOf(0L) }
+    // A low battery is said once per 5% step down, for a few seconds, without taking the mic meter's place.
+    var batteryNoticeAt by remember { mutableLongStateOf(0L) }
+    var batteryStepSaid by remember { mutableStateOf<Int?>(null) }
     val warm = pocketHintDue(state.thermalRung, state.thermalStatus, state.thermalHeadroom)
     LaunchedEffect(warm) {
         if (warm && !pocketScreen && PocketHintOnce.claim(engine.lastSession.value)) {
@@ -406,12 +411,21 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
     LaunchedEffect(details, helperProblem) { if (details) seenProblem = helperProblem }
     val pocket by PocketStatus.state.collectAsState()
 
-    // Phone battery, for the MIC column's BAT reading below 15%. Polled: it moves slowly and a receiver is overkill.
+    // Phone battery, for the low-battery notice below 15%. Polled: it moves slowly and a receiver is overkill.
     val battery by produceState<Int?>(null) {
         val bm = ctx.getSystemService(BatteryManager::class.java)
         while (true) {
             value = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 }
             delay(30_000)
+        }
+    }
+    val lowStep = batteryStep(battery)
+    LaunchedEffect(lowStep) {
+        if (lowStep != null && lowStep != batteryStepSaid) {
+            batteryStepSaid = lowStep
+            batteryNoticeAt = System.currentTimeMillis()
+            delay(LONG_NOTICE_MS)
+            batteryNoticeAt = 0L
         }
     }
 
@@ -462,9 +476,6 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         frameShown = onCard
     }
 
-    // The NOT ON CAMERA tag says which screen viewers get, for TalkBack ("Viewers see your Lunch screen").
-    val notOnCameraSaid = notOnCameraWords(state.scene)
-
     val said = announced ?: state.health
     // Card music that turns the mic off: the pill and the Scenes sheet say viewers hear the music, not you.
     val cardMusic by app.irlsupreme.service.CardMusic.state(ctx).collectAsState()
@@ -490,17 +501,19 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         connecting = state.liveSinceMs == 0L,
         reconnecting = said == Health.RECONNECTING,
     )
-    val mic = micCell(state.micMuted, state.audioInput, battery)
+    val mic = micCell(state.micMuted, state.audioInput)
     val cameraLink = cameraLinkNotice(state, pocket)
     val noticeText = notice(
         holdHint = holdHintAt != 0L,
         noAudio = if (state.micMuted) null else audioProblem(state.audioInput),
-        firstMute = firstMuteAt != 0L,
+        // On a card the pill already says "mic off"; the hint is for the camera, where nothing else does.
+        firstMute = firstMuteAt != 0L && state.scene == Scene.LIVE,
         cameraLink = cameraLink,
         helperProblem = helperProblem?.takeIf { it != seenProblem }?.let { "No helper hotspot. Tap the pill for why." },
         micLoud = micLoud && !state.micMuted && !micOpen,
         micInput = micNoticeShown,
         pocketHint = pocketHintAt != 0L,
+        battery = if (batteryNoticeAt != 0L) battery?.let(::batteryNotice) else null,
     )
 
     val brb = state.scene != Scene.LIVE
@@ -508,8 +521,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         enabled = !ending,
         scenesState = "Viewers see ${sceneName(state.scene)}",
         muteState = if (state.micMuted) "Off. Viewers can't hear you" else "On",
-        brbName = if (brb) "${sceneName(state.scene)} screen" else "BRB screen",
-        brbState = if (brb) "On. Viewers see your ${sceneName(state.scene)} screen" else "Off",
+        brbName = if (brb) "Back to camera" else "BRB card",
+        brbState = if (brb) "Viewers see your ${sceneName(state.scene)} card" else "Off",
         onEnd = onEnd,
         onEarlyRelease = { holdHintAt = System.currentTimeMillis() },
         onScenes = { scenesOpen = !scenesOpen; micOpen = false; chatOpen = false; sheetKind = SheetKind.SCENES },
@@ -523,7 +536,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
     val showChat = !overlays.chat || programHidesChat(state.scene, state.weakSignal, overlays.onCards || cardShowsChat)
     // The ticker opens the full chat, even when the stream draws it: the overlay is just as short.
     val onChat: (() -> Unit)? = if (ending) null else ({ chatOpen = !chatOpen; scenesOpen = false; micOpen = false; sheetKind = SheetKind.CHAT })
-    val flipButton: (() -> Unit)? = if (phoneCamera && !ending) ({ flip(true) }) else null
+    // On a card the camera isn't on air, so the flip key goes (the Scenes sheet's Flip row still sets it for the return).
+    val flipButton: (() -> Unit)? = if (phoneCamera && !ending && state.scene == Scene.LIVE) ({ flip(true) }) else null
 
     Box(
         Modifier
@@ -598,7 +612,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
             val instrument: @Composable (InstrumentLayout, Modifier) -> Unit = { layout, m ->
                 InstrumentLine(
                     timer, links, mic, layout, reduced, m,
-                    micLevel = engine.micLevel,
+                    micLevel = engine.micLevel, micOnly = state.preview,
                     onMic = if (ending) null else ({ micOpen = !micOpen; scenesOpen = false; chatOpen = false; sheetKind = SheetKind.MIC }),
                 )
             }
@@ -622,11 +636,14 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                             showChat = showChat,
                             onChat = onChat,
                             flip = flipButton,
-                            notOnCamera = notOnCameraSaid.takeIf { frameShown },
                             notice = noticeText,
                             noticeHeight = noticeHeight(big).dp,
                         )
-                        SheetSlot(anySheet, reduced, fromSide = false, Modifier.align(Alignment.BottomCenter)) { sheet(Modifier.fillMaxWidth()) }
+                        // At most 60% of the space above the plate, so the pill and the picture stay in view while you choose.
+                        BoxWithConstraints(Modifier.align(Alignment.BottomCenter)) {
+                            val cap = maxHeight * 0.6f
+                            SheetSlot(anySheet, reduced, fromSide = false, Modifier) { sheet(Modifier.fillMaxWidth().heightIn(max = cap)) }
+                        }
                     }
                     Column(
                         Modifier
@@ -654,7 +671,6 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                             showChat = showChat,
                             onChat = onChat,
                             flip = flipButton,
-                            notOnCamera = notOnCameraSaid.takeIf { frameShown },
                             notice = noticeText,
                             noticeHeight = noticeHeight(big).dp,
                             bottom = bottomPad,
@@ -726,8 +742,6 @@ private fun Slots(
     showChat: Boolean,
     onChat: (() -> Unit)?,
     flip: (() -> Unit)?,
-    /** What the NOT ON CAMERA tag says to TalkBack while a card is up; null hides the tag. */
-    notOnCamera: String?,
     notice: String?,
     noticeHeight: Dp,
     bottom: Dp = 0.dp,
@@ -747,9 +761,6 @@ private fun Slots(
                 if (flip != null) FlipButton(flip)
             }
             Spacer(Modifier.height(8.dp))
-            if (notOnCamera != null) {
-                EngagedTag("Not on camera", Modifier.padding(bottom = 8.dp).absorbTouches().clearAndSetSemantics { contentDescription = notOnCamera })
-            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (details) detailsContent(Modifier.widthIn(max = 420.dp).verticalScroll(rememberScrollState()))
             }
@@ -847,7 +858,7 @@ private fun Modifier.absorbTouches(): Modifier = pointerInput(Unit) {
  * camera has taken over; null while the camera link streams or isn't in use. A notice line, since the chips are gone.
  */
 private fun cameraLinkNotice(state: EngineState, pocket: PocketState?): String? = when {
-    pocket != null && pocket !is PocketState.Streaming -> "Camera link · ${pocket.label}"
+    pocket != null && pocket !is PocketState.Streaming -> pocketNotice(pocket, state.preview, onCamera = state.scene == Scene.LIVE)
     else -> externalCameraNotice(state.externalCamera, state.activeSource)
 }
 
@@ -888,12 +899,9 @@ internal fun hapticFor(prev: Health, now: Health, ownSceneTap: Boolean): HapticP
     else -> null
 }
 
-/** [s]'s name as the streamer knows it: "Live", "BRB", or what they called their own ("Lunch"). */
+/** [s]'s name as the streamer knows it: "Camera", "BRB", or what they called their own ("Lunch"). */
 fun sceneName(s: Scene) = app.irlsupreme.service.SceneNames.name(s)
 
-/** The NOT ON CAMERA tag's spoken words while [s] is up: "Not on camera. Viewers see your Lunch screen". */
-internal fun notOnCameraWords(s: Scene): String =
-    if (s == Scene.LIVE) "Not on camera" else "Not on camera. Viewers see your ${if (s == Scene.PRIVACY) "privacy" else sceneName(s)} screen"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Chat ticker

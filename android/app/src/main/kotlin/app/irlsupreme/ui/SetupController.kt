@@ -111,7 +111,7 @@ sealed interface SignIn {
 
 /** Why the main button is disabled, with where to fix it. */
 enum class Blocker(val text: String, val action: String?) {
-    PAIR_SERVER("Pair your BRB server, or turn off Combine connections", "Set up"),
+    PAIR_SERVER("Pair your server, or turn off Combine connections", "Set up"),
     SIGN_IN("Sign in to Twitch to go live", "Sign in"),
     /** Device-code sign-in in progress: no action, or a second tap would throw away the code being approved. */
     APPROVING("Approve the sign-in on Twitch to continue", null),
@@ -356,7 +356,7 @@ class SetupController internal constructor(private val ctx: Context, private val
     var snackbar by mutableStateOf<String?>(null)
 
     /**
-     * After DONE: the recap folded into one line ("0:01:22 · held"), until the next stream. In memory only: it's a
+     * After DONE: the recap folded into one line ("0:01:22 · no drops"), until the next stream. In memory only: it's a
      * reminder of what just happened, not a record.
      */
     var lastStream by mutableStateOf<SessionSummary?>(null); private set
@@ -419,10 +419,10 @@ class SetupController internal constructor(private val ctx: Context, private val
         get() {
             val s = signIn
             return when {
-                sendsToObs -> "Through your BRB server" + ((s as? SignIn.SignedIn)?.let { " · chat as ${it.login}" } ?: "")
-                serverOnlyRecords -> if (useKey) "No stream key yet · your BRB server would only record"
-                else "Not signed in · your BRB server would only record"
-                serverDecides -> if (useKey) "No stream key, so your BRB server's own settings" else "Your BRB server's own settings"
+                sendsToObs -> "Through your server" + ((s as? SignIn.SignedIn)?.let { " · chat as ${it.login}" } ?: "")
+                serverOnlyRecords -> if (useKey) "No stream key yet · your server would only record"
+                else "Not signed in · your server would only record"
+                serverDecides -> if (useKey) "No stream key, so your server's own settings" else "Your server's own settings"
                 // Key mode with a sign-in: chat, alerts and mod commands follow the signed-in account, so name it.
                 useKey -> when {
                     key.isBlank() -> "Stream key · not added yet"
@@ -541,7 +541,7 @@ class SetupController internal constructor(private val ctx: Context, private val
     internal suspend fun refreshBrbStatus() {
         val p = pairing ?: return
         if (!combine) return
-        if (brbStatus == null) brbStatus = "Checking your BRB server…"
+        if (brbStatus == null) brbStatus = "Checking your server…"
         try {
             val t0 = System.nanoTime()
             val st = withContext(Dispatchers.IO) { BrbClient(p).status() }
@@ -550,11 +550,11 @@ class SetupController internal constructor(private val ctx: Context, private val
             if (pairing != p) return
             brbOk = true; brbServerStatus = st; brbLatencyMs = ms; brbUdpBlocked = !udp
             brbStatus = if (!udp) "Answers, but UDP ${p.port} looks blocked"
-            else "Ready · sends to ${st.outputLabel}" + if (st.phoneSlate) " · has your BRB screen" else ""
+            else "Ready · sends to ${st.outputLabel}" + if (st.phoneSlate) " · has your Signal lost card" else ""
         } catch (e: java.io.IOException) {
             if (pairing != p) return
             brbOk = false; brbServerStatus = null; brbUdpBlocked = false; brbLatencyMs = null
-            brbStatus = (e as? BrbException)?.message ?: "Can't reach your BRB server right now."
+            brbStatus = (e as? BrbException)?.message ?: "Can't reach your server right now."
         }
         brbChecked = true
     }
@@ -914,7 +914,7 @@ class SetupController internal constructor(private val ctx: Context, private val
             try {
                 remoteLink = withContext(Dispatchers.IO) { op(BrbClient(p)) }
             } catch (e: java.io.IOException) {
-                remoteError = (e as? BrbException)?.message ?: "Can't reach your BRB server right now."
+                remoteError = (e as? BrbException)?.message ?: "Can't reach your server right now."
             }
         }
     }
@@ -1054,7 +1054,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                 pasteLink = ""
                 snackbar = pairedMessage(p, udpOk)
             } catch (e: java.io.IOException) {
-                pairingError = (e as? BrbException)?.message ?: "Couldn't reach that BRB server. Is it running, and is TCP port ${p.port} open?"
+                pairingError = (e as? BrbException)?.message ?: "Couldn't reach that server. Is it running, and is TCP port ${p.port} open?"
             } finally {
                 pairingBusy = false
             }
@@ -1183,7 +1183,7 @@ class SetupController internal constructor(private val ctx: Context, private val
         brbOk = false
         errorNeedsServer = true
         error = (e as? BrbException)?.message
-            ?: "Couldn't reach your BRB server. Try again, or turn off Combine connections to go live straight to Twitch."
+            ?: "Couldn't reach your server. Try again, or turn off Combine connections to go live straight to Twitch."
     }
 
     private fun goLive() {
@@ -1192,7 +1192,7 @@ class SetupController internal constructor(private val ctx: Context, private val
         if (combine) {
             // "Combine connections": tell the paired BRB server where to send the stream (the same Twitch ingest URL
             // this phone would use directly; it never leaves the phone otherwise), then bond to it.
-            val p = pairing ?: run { error = "Pair your BRB server first."; return }
+            val p = pairing ?: run { error = "Pair your server first."; return }
             busy = true
             scope.launch {
                 try {
@@ -1223,7 +1223,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                             val st = withContext(Dispatchers.IO) { client.status() }
                             brbServerStatus = st
                             if (st.outputKind == "record") {
-                                error = "Your BRB server would only record. Sign in to Twitch or add a stream key first."
+                                error = "Your server would only record. Sign in to Twitch or add a stream key first."
                                 errorNeedsSignIn = !useKey && signInAvailable
                                 return@launch
                             }
@@ -1236,7 +1236,7 @@ class SetupController internal constructor(private val ctx: Context, private val
                     val extras = if (test) emptyList() else AlsoStreamTo.toSend(ctx)
                     val extrasSent = withContext(Dispatchers.IO) { client.setExtraOutputs(extras) }
                     if (!extrasSent && extras.isNotEmpty()) {
-                        error = "Your BRB server needs an update for Also stream to. Update it, or turn off Also stream to in Settings."
+                        error = "Your server needs an update for Also stream to. Update it, or turn off Also stream to in Settings."
                         return@launch
                     }
                     startService(test, bonded = true) {
@@ -1358,7 +1358,7 @@ fun rememberSetupController(running: Boolean, links: Int = 0): SetupController {
 
 private fun scanOptions() = ScanOptions()
     .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-    .setPrompt("Scan the code your BRB server shows")
+    .setPrompt("Scan the code your server shows")
     .setBeepEnabled(false)
     .setOrientationLocked(false)
 

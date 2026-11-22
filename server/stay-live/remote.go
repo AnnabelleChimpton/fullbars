@@ -259,12 +259,12 @@ button:disabled{opacity:.45}#live{grid-column:1/-1;min-height:72px}
 </style></head><body><main>
 <h1>Mod remote</h1><p id="st">Connecting…</p>
 <div class="grid">
-<button id="live" data-s="LIVE">Live</button>
+<button id="live" data-s="LIVE">Camera</button>
 <button data-s="BRB">BRB</button><button data-s="PRIVACY">Privacy (mic off)</button>
 <button data-s="STARTING_SOON">Starting soon</button><button data-s="ENDING">Ending</button>
 </div><div class="grid" id="own"></div><p id="msg"></p></main>
 <script>
-var base=location.pathname.replace(/\/$/,''),names={LIVE:'Live',BRB:'BRB',PRIVACY:'Privacy',STARTING_SOON:'Starting soon',ENDING:'Ending'};
+var base=location.pathname.replace(/\/$/,''),names={LIVE:'Camera',BRB:'BRB',PRIVACY:'Privacy',STARTING_SOON:'Starting soon',ENDING:'Ending'};
 var own={},ownKey='',grid=document.getElementById('own'),st=document.getElementById('st'),msg=document.getElementById('msg');
 function nameOf(id){return names[id]||own[id]||id}
 function send(b){msg.textContent='Sending…';

@@ -127,12 +127,12 @@ class SettingsValuesTest {
     @Test fun `route reads as one sentence`() {
         val two = listOf(RouteLink("Wi‑Fi", true, 18_000), RouteLink("AT&T", true, 6_000))
         assertEquals(
-            "Path: phone, 2 links, BRB server ready, Twitch.",
+            "Path: phone, 2 links, your server ready, Twitch.",
             RouteRules.describe(RouteRules.route(two, BrbState.READY, 38, "Twitch", null, StateMark.VERIFIED)),
         )
         val oneDown = listOf(RouteLink("Wi‑Fi", true), RouteLink("AT&T", false))
         assertEquals(
-            "Path: phone, 1 of 2 links up, BRB server not checked yet, Twitch, test.",
+            "Path: phone, 1 of 2 links up, your server not checked yet, Twitch, test.",
             RouteRules.describe(RouteRules.route(oneDown, BrbState.CHECKING, null, "Twitch", "test", StateMark.VERIFIED)),
         )
     }

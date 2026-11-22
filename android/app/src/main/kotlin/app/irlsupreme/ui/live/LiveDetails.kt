@@ -54,18 +54,25 @@ private fun cameraLabel(c: CameraPhase) = when (c) {
     CameraPhase.OFF -> "off"; CameraPhase.OPENING -> "opening"; CameraPhase.LIVE -> "on"; CameraPhase.LOST -> "lost"
 }
 
-/** The stream rows, then a rule, then one row per link (built separately so the rule can sit between them). */
-internal fun detailRows(state: EngineState, cameraLink: String?): List<DetailRow> = buildList {
-    add(DetailRow("VIDEO OUT", "${mb(state.measuredVideoBitrate)} / ${mb(state.targetVideoBitrate.toLong())} Mb/s", true))
-    add(DetailRow("SENT", "${mb(state.sentBitrate)} Mb/s", true))
-    add(DetailRow("CONGESTED", if (state.congested) "yes" else "no", false))
-    add(DetailRow("DROPPED FRAMES", "${state.droppedFrames}", true))
-    add(DetailRow("ENCODER RECOVERIES", "${state.encoderRecoveries}", true))
-    add(DetailRow("RECONNECTS", "${state.reconnectAttempt}", true))
-    val onAir = when (state.activeSource) { "camera" -> "Camera link"; "phone" -> "Phone camera"; else -> "Card (no camera)" }
-    add(DetailRow("CAMERA", "$onAir · phone camera ${cameraLabel(state.camera)}", false))
-    (cameraLink ?: state.externalCamera)?.let { add(DetailRow("CAMERA LINK", it, false)) }
+/**
+ * The stream rows, then a rule, then one row per link (built separately so the rule can sit between them). What's on
+ * air and the heat come first; the upload figure is the instrument line's, so it isn't repeated; the counters that are
+ * zero on a healthy stream show only once they aren't. [pocket]: the Pocket 3's own line, with the full reason when it
+ * fails (the live notice keeps it short).
+ */
+internal fun detailRows(state: EngineState, pocket: String?): List<DetailRow> = buildList {
+    val external = if (pocket != null) "Pocket 3" else "Other camera"
+    val onAir = when (state.activeSource) { "camera" -> external; "phone" -> "Phone camera"; else -> "Card (no camera)" }
+    // The phone camera's own state only when it's on air and not running as it should.
+    val phase = if (state.activeSource == "phone" && state.camera != CameraPhase.LIVE) " · ${cameraLabel(state.camera)}" else ""
+    add(DetailRow("CAMERA", onAir + phase, false))
+    (pocket ?: state.externalCamera)?.let { add(DetailRow(external.uppercase(Locale.ROOT), it, false)) }
     add(DetailRow("TEMPERATURE", thermalLabel(state.thermalStatus), false))
+    add(DetailRow("VIDEO OUT", "${mb(state.measuredVideoBitrate)} / ${mb(state.targetVideoBitrate.toLong())} Mb/s", true))
+    if (state.congested) add(DetailRow("CONGESTED", "yes", false))
+    if (state.droppedFrames > 0) add(DetailRow("DROPPED FRAMES", "${state.droppedFrames}", true))
+    if (state.encoderRecoveries > 0) add(DetailRow("ENCODER RECOVERIES", "${state.encoderRecoveries}", true))
+    if (state.reconnectAttempt > 0) add(DetailRow("RECONNECTS", "${state.reconnectAttempt}", true))
 }
 
 /** `up  0.4 Mb/s  125 ms`, or `down`; a helper phone adds its battery and heat. */

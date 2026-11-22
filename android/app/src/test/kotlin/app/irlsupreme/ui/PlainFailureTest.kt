@@ -12,15 +12,15 @@ class PlainFailureTest {
     }
 
     @Test fun `the BRB server out of reach is named`() {
-        assertEquals("Can't reach your BRB server", plainFailure("No connection can reach the BRB server", bonded = false))
+        assertEquals("Can't reach your server", plainFailure("No connection can reach the BRB server", bonded = false))
         assertEquals(
-            "Your BRB server refused the stream, try pairing again",
+            "Your server refused the stream, try pairing again",
             plainFailure("BRB server rejected the stream", bonded = true),
         )
     }
 
     @Test fun `timeouts, refusals and DNS say whose server and what to check`() {
-        val bonded = "Can't reach your BRB server, check the address or signal"
+        val bonded = "Can't reach your server, check the address or signal"
         val direct = "Can't reach Twitch, check your signal"
         assertEquals(bonded, plainFailure("Connect timed out", bonded = true))
         assertEquals(bonded, plainFailure("failed to connect to /203.0.113.5 (port 5000): ECONNREFUSED (Connection refused)", bonded = true))
@@ -42,7 +42,7 @@ class PlainFailureTest {
     @Test fun `the first-connect hint waits for three tries`() {
         assertNull(firstConnectHint(0, bonded = true))
         assertNull(firstConnectHint(2, bonded = false))
-        assertEquals("Is your BRB server running?", firstConnectHint(3, bonded = true))
+        assertEquals("Is your server running?", firstConnectHint(3, bonded = true))
         assertEquals("Check your stream key and internet", firstConnectHint(7, bonded = false))
     }
 

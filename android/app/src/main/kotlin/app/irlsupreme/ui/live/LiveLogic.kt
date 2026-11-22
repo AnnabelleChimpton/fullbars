@@ -149,26 +149,30 @@ internal fun linkPage(cells: List<LinkCell>, page: Int): Pair<List<LinkCell?>, S
 // --- MIC column ------------------------------------------------------------------------------------------------------
 
 /**
- * What the MIC column shows, by priority: the user's mute, a mic that isn't delivering, low battery, else the live level.
- * Heat isn't here: the pill already says "Phone is hot", and the level is what you need to see while you talk.
+ * What the MIC column shows, by priority: the user's mute, a mic that isn't delivering, else the live level. Heat and
+ * a low battery aren't here (the pill says "Phone is hot"; the battery is a notice line), so the level you need while
+ * you talk is never swapped out.
  */
 internal sealed interface MicCell {
     /** The mic is on: the column draws its live level ([app.irlsupreme.engine.StreamEngine.micLevel]). */
     data object On : MicCell
     data object Muted : MicCell
     data object NoAudio : MicCell
-    data class Battery(val percent: Int) : MicCell
 }
 
-/** Phone battery under this replaces the mic level (a health colour only when it matters). */
+/** Phone battery under this gets a notice line, once per 5% step down ([batteryStep]). */
 internal const val LOW_BATTERY = 15
 
-internal fun micCell(muted: Boolean, input: AudioInput, batteryPercent: Int?): MicCell = when {
+internal fun micCell(muted: Boolean, input: AudioInput): MicCell = when {
     muted -> MicCell.Muted
     audioProblem(input) != null -> MicCell.NoAudio
-    batteryPercent != null && batteryPercent < LOW_BATTERY -> MicCell.Battery(batteryPercent)
     else -> MicCell.On
 }
+
+/** Which 5% step a low battery is on (14..10 -> 2, 9..5 -> 1, 4..0 -> 0), or null while it isn't low. */
+internal fun batteryStep(percent: Int?): Int? = if (percent != null && percent < LOW_BATTERY) percent / 5 else null
+
+internal fun batteryNotice(percent: Int): String = "Phone battery $percent%"
 
 // --- Timer -----------------------------------------------------------------------------------------------------------
 
@@ -211,9 +215,9 @@ internal fun scenesKey(open: Boolean): KeyFace = KeyFace("SCENES", KeyGlyph.LAYE
 internal fun muteKey(muted: Boolean): KeyFace =
     if (muted) KeyFace("UNMUTE", KeyGlyph.MIC_OFF, engaged = true) else KeyFace("MUTE", KeyGlyph.MIC)
 
-/** Any chosen card (BRB, Privacy, Starting soon, Ending) turns BRB into BACK LIVE, and a tap returns to Live. */
+/** Any chosen card (BRB, Privacy, Starting soon, Ending) turns BRB into TO CAMERA, and a tap goes back to the camera. */
 internal fun brbKey(scene: Scene): KeyFace =
-    if (scene != Scene.LIVE) KeyFace("BACK LIVE", KeyGlyph.CAMERA, engaged = true) else KeyFace("BRB", KeyGlyph.CARD)
+    if (scene != Scene.LIVE) KeyFace("TO CAMERA", KeyGlyph.CAMERA, engaged = true) else KeyFace("BRB", KeyGlyph.CARD)
 
 // --- Layout ----------------------------------------------------------------------------------------------------------
 
@@ -285,7 +289,7 @@ internal fun bigType(fontScale: Float): Boolean = fontScale >= BIG_TYPE_SCALE
 internal fun keyHeight(big: Boolean): Float = if (big) Rail.KEY_HEIGHT_BIG else Rail.KEY_HEIGHT
 
 /**
- * The height all four keys share: the base height, or taller when the tallest label (a wrapped BACK LIVE at 200% is
+ * The height all four keys share: the base height, or taller when the tallest label (a wrapped TO CAMERA at 200% is
  * two 26dp lines) needs it. The face is padding, the 24dp glyph, the gap and the label, so a wrapped label grows the
  * keys instead of being clipped. Every key grows together; none is ever drawn shorter than [keyHeight].
  */
@@ -344,7 +348,7 @@ internal class OncePerStream {
 
 // --- Notice slot -----------------------------------------------------------------------------------------------------
 
-internal const val HOLD_HINT = "Hold to end. Keep holding for 2 seconds."
+internal const val HOLD_HINT = "Hold END for 2 seconds to end the stream"
 internal const val FIRST_MUTE_HINT = "Viewers can't hear you"
 internal const val MIC_LOUD_HINT = "You're too loud. Tap MIC to turn it down."
 /** How long the limiter must keep working hard before the notice says so: one shout isn't a problem. */
@@ -367,12 +371,14 @@ internal fun notice(
     micLoud: Boolean = false,
     micInput: String? = null,
     pocketHint: Boolean = false,
+    battery: String? = null,
 ): String? = when {
     holdHint -> HOLD_HINT
     noAudio != null -> noAudio
     micInput != null -> micInput
     micLoud -> MIC_LOUD_HINT
     firstMute -> FIRST_MUTE_HINT
+    battery != null -> battery
     pocketHint -> POCKET_HINT
     cameraLink != null -> cameraLink
     helperProblem != null -> helperProblem
@@ -427,12 +433,31 @@ internal fun pocketAlarm(health: Health, ending: Boolean): Boolean =
  */
 internal fun externalCameraNotice(externalCamera: String?, activeSource: String): String? = when {
     externalCamera == null || activeSource != "phone" -> null
-    externalCamera.startsWith("waiting") -> "Phone camera · waiting for the camera link"
-    externalCamera == "connected" -> "Phone camera · camera connecting"
-    externalCamera == "connected, no video yet" -> "Phone camera · camera connected, no video yet"
-    externalCamera.startsWith("camera sends") -> "Phone camera · ${externalCamera.replaceFirst("camera sends", "the camera sends")}"
-    externalCamera.startsWith("can't listen") -> "Phone camera · $externalCamera"
-    else -> "Phone camera · camera link lost"
+    externalCamera.startsWith("waiting") -> "Phone camera on air · waiting for the camera"
+    externalCamera == "connected" -> "Phone camera on air · camera connecting"
+    externalCamera == "connected, no video yet" -> "Phone camera on air · camera connected, no video yet"
+    externalCamera.startsWith("camera sends") -> "Phone camera on air · ${externalCamera.replaceFirst("camera sends", "the camera sends")}"
+    externalCamera.startsWith("can't listen") -> "Phone camera on air · $externalCamera"
+    else -> "Phone camera on air · camera lost"
+}
+
+/**
+ * The Pocket 3's line in the notice slot while it starts, leading with what viewers get. A step that needs the
+ * streamer (tap OK on the Pocket 3) shows in full with its "n of 5"; so does every step in preview, where there's time
+ * to watch them. Live, it's short: on the camera scene it says the phone camera is on air meanwhile, on a card just
+ * the Pocket's state. The long reason for a failure is in Details (tap the pill).
+ */
+internal fun pocketNotice(pocket: app.irlsupreme.dji.PocketState, preview: Boolean, onCamera: Boolean): String {
+    val failing = pocket is app.irlsupreme.dji.PocketState.Failed || pocket is app.irlsupreme.dji.PocketState.Reconnecting
+    if (pocket is app.irlsupreme.dji.PocketState.ApproveOnCamera) return pocket.label
+    if (preview) return if (failing) "Pocket 3 not ready: you'd go live on the phone camera" else pocket.label
+    val short = when (pocket) {
+        is app.irlsupreme.dji.PocketState.Failed -> "Pocket 3 didn't start"
+        is app.irlsupreme.dji.PocketState.Reconnecting -> "Pocket 3 not connected, retrying"
+        app.irlsupreme.dji.PocketState.Stopped -> "Pocket 3 stopped"
+        else -> "Pocket 3 connecting"
+    }
+    return if (onCamera) "Phone camera on air · $short" else short
 }
 
 // --- Hold to end -----------------------------------------------------------------------------------------------------

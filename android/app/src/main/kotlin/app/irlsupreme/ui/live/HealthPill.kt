@@ -101,7 +101,7 @@ internal enum class PillLook {
 }
 
 /** The pill's glyph, named so the model stays pure. */
-internal enum class PillGlyph { METER_STEPPING, METER_FULL, METER_ONE, THERMO, CAM_OFF, ARROWS, X, EYE_OFF, CARD, CARD_CUE, CARD_STOP, STOP }
+internal enum class PillGlyph { METER_STEPPING, METER_FULL, METER_ONE, THERMO, CAM_OFF, ARROWS, X, EYE_OFF, CARD, CARD_CUE, CARD_STOP, STOP, MIC_OFF }
 
 /**
  * What the pill says. [spoken] is what TalkBack announces: the category and plain reason only, never the attempt count
@@ -118,8 +118,11 @@ internal data class PillModel(
 )
 
 /**
- * The pill for [health] (the announced health; see LiveScreen). Every card line says
- * what viewers see *and* hear: cards hide the camera, never the mic, so a pill must not imply silence it isn't giving.
+ * The pill for [health] (the announced health; see LiveScreen). On a card the headline keeps saying Test or Live and
+ * names the card ("Live · Starting soon"), and the second line says what the camera and the sound are doing ("Not on
+ * camera · they hear you"): cards hide the camera, never the mic, so a pill must not imply silence it isn't giving.
+ * Privacy (its look and its name) is only for the Privacy card; a mute on another card keeps that card's name, with
+ * the mic-off glyph. TalkBack gets the whole sentence ("Viewers see your BRB card and hear you").
  * [musicMicOff]: the card on air has music that turns the mic off, so viewers hear the music and not you.
  */
 internal fun pillModel(
@@ -148,38 +151,45 @@ internal fun pillModel(
         Health.GREAT -> PillModel(PillLook.GREAT, PillGlyph.METER_FULL, "$live · Great", null, "$live, great")
         Health.WEAK -> PillModel(PillLook.WEAK, PillGlyph.METER_ONE, "$live · Weak signal", "Quality lowered", "$live, weak signal. Quality lowered")
         Health.HOT -> PillModel(PillLook.HOT, PillGlyph.THERMO, "$live · Phone is hot", "Quality lowered", "$live, phone is hot. Quality lowered")
-        Health.CAMERA_LOST -> PillModel(PillLook.CAMERA_LOST, PillGlyph.CAM_OFF, "Camera lost", "Viewers see a slate", "Camera lost. Viewers see a slate")
-        Health.WEAK_SCREEN -> PillModel(
-            PillLook.WEAK, PillGlyph.METER_ONE, "$live · Weak signal", "Viewers see your Weak signal screen$hear",
-            "$live, weak signal. Viewers see your Weak signal screen$hear",
+        Health.CAMERA_LOST -> PillModel(
+            PillLook.CAMERA_LOST, PillGlyph.CAM_OFF, "Camera lost", "Viewers see the Camera lost card", "Camera lost. Viewers see the Camera lost card",
         )
-        Health.BRB -> when {
-            // Privacy promises silence; with the mic back on it says so, with a hatched (caution) cap.
-            // Its music has the mic off: viewers hear the music, not you.
-            state.scene == Scene.PRIVACY && !state.micMuted && musicMicOff -> PillModel(
-                PillLook.PRIVACY, PillGlyph.EYE_OFF, "Privacy", "Viewers see your privacy screen and hear your music",
-                "Privacy. Viewers see your privacy screen and hear your music",
-            )
-            state.scene == Scene.PRIVACY && !state.micMuted -> PillModel(
-                PillLook.PRIVACY_MIC_ON, PillGlyph.EYE_OFF, "Privacy · mic ON", "Viewers see your privacy screen and hear you",
-                "Privacy, mic on. Viewers see your privacy screen and hear you",
-            )
-            state.scene == Scene.PRIVACY || state.micMuted -> {
-                val sees = if (state.scene == Scene.PRIVACY) "privacy screen" else "${sceneName(state.scene)} screen"
-                PillModel(PillLook.PRIVACY, PillGlyph.EYE_OFF, "Privacy", "Viewers see your $sees · mic off", "Privacy. Viewers see your $sees, mic off")
+        Health.WEAK_SCREEN -> PillModel(
+            PillLook.WEAK, PillGlyph.METER_ONE, "$live · Weak signal", "Viewers see your Weak signal card$hear",
+            "$live, weak signal. Viewers see your Weak signal card$hear",
+        )
+        Health.BRB -> {
+            val name = sceneName(state.scene)
+            val second = "Not on camera · " + when {
+                state.micMuted -> "mic off"
+                musicMicOff -> "they hear your music"
+                else -> "they hear you"
             }
-            else -> {
-                val name = sceneName(state.scene)
-                val glyph = when (state.scene) {
-                    Scene.STARTING_SOON -> PillGlyph.CARD_CUE
-                    Scene.ENDING -> PillGlyph.CARD_STOP
-                    else -> PillGlyph.CARD
-                }
-                val hears = if (musicMicOff) "your music" else "you"
-                PillModel(
-                    PillLook.SCENE, glyph, name, "Viewers see your $name screen and hear $hears",
-                    "$name. Viewers see your $name screen and hear $hears",
+            val andHear = when {
+                state.micMuted -> ", mic off"
+                musicMicOff -> " and hear your music"
+                else -> " and hear you"
+            }
+            when {
+                // Privacy promises silence; with the mic back on it says so, with a hatched (caution) cap. With music
+                // that turns the mic off, viewers hear the music, not you, so no caution.
+                state.scene == Scene.PRIVACY && !state.micMuted && !musicMicOff -> PillModel(
+                    PillLook.PRIVACY_MIC_ON, PillGlyph.EYE_OFF, "Privacy · mic ON", second,
+                    "Privacy, mic on. Viewers see your Privacy card and hear you",
                 )
+                state.scene == Scene.PRIVACY -> PillModel(
+                    PillLook.PRIVACY, PillGlyph.EYE_OFF, "$live · Privacy", second, "$live, Privacy. Viewers see your Privacy card$andHear",
+                )
+                // A mute on any other card: that card's name, the mic-off glyph, "mic off" said first.
+                state.micMuted -> PillModel(PillLook.SCENE, PillGlyph.MIC_OFF, "$live · $name", second, "Mic off. Viewers see your $name card")
+                else -> {
+                    val glyph = when (state.scene) {
+                        Scene.STARTING_SOON -> PillGlyph.CARD_CUE
+                        Scene.ENDING -> PillGlyph.CARD_STOP
+                        else -> PillGlyph.CARD
+                    }
+                    PillModel(PillLook.SCENE, glyph, "$live · $name", second, "$live, $name. Viewers see your $name card$andHear")
+                }
             }
         }
         Health.CONNECTING ->
@@ -190,7 +200,7 @@ internal fun pillModel(
             else {
                 // Bonded: the BRB server shows the Signal lost card this phone uploaded (BondedOutput.sendSlateOnce), not
                 // the BRB card, which would tell viewers you chose to step away.
-                val sees = if (bonded) "Viewers see your Signal lost screen" else "Viewers see a frozen frame"
+                val sees = if (bonded) "Viewers see your Signal lost card" else "Viewers see a frozen frame"
                 PillModel(PillLook.RECONNECTING, PillGlyph.ARROWS, "Reconnecting", sees, "Reconnecting. $sees")
             }
         Health.FAILED -> PillModel(
@@ -359,6 +369,7 @@ private fun iconFor(g: PillGlyph): ImageVector = when (g) {
     PillGlyph.CAM_OFF -> FbIcons.CamOff
     PillGlyph.X -> FbIcons.X
     PillGlyph.EYE_OFF -> FbIcons.EyeOff
+    PillGlyph.MIC_OFF -> FbIcons.MicOff
     PillGlyph.CARD -> FbIcons.Card
     PillGlyph.CARD_CUE -> FbIcons.CardCue
     PillGlyph.CARD_STOP -> FbIcons.CardStop

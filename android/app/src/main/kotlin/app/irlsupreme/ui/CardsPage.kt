@@ -206,10 +206,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     // The card styles reach the engine once at start (MainActivity); make sure they're loaded before the first preview.
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { CardStore.apply(ctx) } }
 
-    HelpText(
-        "What viewers see instead of your camera. The small label at the top and the sound line at the bottom stay, so " +
-            "viewers always know when a card switched on by itself and what they can hear.",
-    )
+    HelpText("What viewers see instead of your camera.")
     KeyChoice("Card", cardOrder(created), card, { cardName(it, created) }) { picked = it.name; pictureError = false; backgroundError = null }
     if (created.size < Scene.CUSTOM.size) {
         FbButton(
@@ -222,6 +219,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     }
 
     CardPreview(c, card, t)
+    HelpText("The label and sound line stay unless you use a web page.")
 
     // --- Your own scene: its name ---
     if (scene != null && card.isCustom) {
@@ -287,7 +285,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     SectionHeader("Background")
     HelpText(
         if (CardRules.loopsGif(card)) "Behind the whole card, cropped to fill. A GIF loops."
-        else "Behind the whole card, cropped to fill. Your BRB server shows this card as a still, so a GIF shows its first frame.",
+        else "Behind the whole card, cropped to fill. Your server shows this card as a still, so a GIF shows its first frame.",
     )
     if (t.background != CardBackground.NONE) {
         ValueRow("Background", backgroundValue(card, t.background), valueIsFigure = false)
@@ -319,7 +317,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     // --- Live ---
     SectionHeader("Live")
     if (!CardRules.hasLiveElements(card)) {
-        HelpText("Your BRB server shows this card as a still, so it can't show timers or chat.")
+        HelpText("Your server shows this card as a still, so it can't show timers or chat.")
     } else {
         val e = t.elements
         if (CardRules.hasCountdown(card)) {
@@ -347,7 +345,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     // --- Web page ---
     SectionHeader("Web page")
     if (!CardRules.canUseWebPage(card)) {
-        HelpText("Signal lost and Weak signal can't use a web page: your BRB server shows them as a still.")
+        HelpText("Signal lost and Weak signal can't use a web page: your server shows them as a still.")
     } else {
         HelpText("A page shown instead of this whole card on stream, label and sound line included. A StreamElements scene or your own HTML.")
         WebUrlField(t.webUrl) { CardStore.setWebUrl(ctx, card, it) }
@@ -394,7 +392,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
 
     Footnote(
         null,
-        "Signal lost and Weak signal are also sent to your BRB server when each stream starts, so viewers see your " +
+        "Signal lost and Weak signal are also sent to your server when each stream starts, so viewers see your " +
             "version during dropouts too. Changes here show from your next stream.",
         Modifier.padding(top = 16.dp),
     )

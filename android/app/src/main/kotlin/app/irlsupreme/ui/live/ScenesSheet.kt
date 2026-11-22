@@ -50,15 +50,15 @@ import app.irlsupreme.ui.theme.LocalFbColors
  */
 
 /**
- * What choosing [scene] does, in one line. Cards hide the camera, never the mic, unless the mic is already off or the
- * card's music turns it off ([musicMicOff]).
+ * What choosing [scene] does to the sound, in one line (null for the camera, which needs none). Cards hide the camera,
+ * never the mic, unless the mic is already off or the card's music turns it off ([musicMicOff]).
  */
-internal fun sceneConsequence(scene: Scene, muted: Boolean, musicMicOff: Boolean = false): String = when {
-    scene == Scene.LIVE -> "Your camera"
-    scene == Scene.PRIVACY -> "Card · camera and mic off"
-    muted -> "Card · mic off"
-    musicMicOff -> "Card · they hear your music"
-    else -> "Card · they hear you"
+internal fun sceneConsequence(scene: Scene, muted: Boolean, musicMicOff: Boolean = false): String? = when {
+    scene == Scene.LIVE -> null
+    scene == Scene.PRIVACY -> "Camera and mic off"
+    muted -> "Mic off"
+    musicMicOff -> "They hear your music"
+    else -> "They hear you"
 }
 
 /**
@@ -101,7 +101,6 @@ internal fun ScenesSheet(
         Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
             Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 10.dp)) {
                 Text("SCENES", style = FbType.label, color = c.text2, modifier = Modifier.semantics { heading() })
-                Text("Weak signal and Camera lost switch on their own.", style = FbType.help, color = c.text2)
             }
             Column(Modifier.selectableGroup()) {
                 scenes.forEach { s ->
@@ -109,20 +108,21 @@ internal fun ScenesSheet(
                     SceneRow(s, s == scene, sceneConsequence(s, muted, s in musicMicOff), thumbs[s], landscapeThumbs) { onChoose(s) }
                 }
             }
-        }
-        if (onTestAlert != null) {
+            // The tools scroll with the scenes, so at a large font size they never squeeze the scene list away.
+            if (onTestAlert != null) {
+                Hairline(color = c.rule)
+                TestAlertRow(alertsOn, onTestAlert)
+            }
             Hairline(color = c.rule)
-            TestAlertRow(alertsOn, onTestAlert)
-        }
-        Hairline(color = c.rule)
-        FlipRow(flipValue, onFlip)
-        if (onCaptions != null) {
-            Hairline(color = c.rule)
-            CaptionsRow(captionsOn, captionStatus, onCaptions)
-        }
-        if (onPocketScreen != null) {
-            Hairline(color = c.rule)
-            PocketRow(onPocketScreen)
+            FlipRow(flipValue, onFlip)
+            if (onCaptions != null) {
+                Hairline(color = c.rule)
+                CaptionsRow(captionsOn, captionStatus, onCaptions)
+            }
+            if (onPocketScreen != null) {
+                Hairline(color = c.rule)
+                PocketRow(onPocketScreen)
+            }
         }
     }
 }
@@ -170,7 +170,7 @@ private fun PocketRow(onClick: () -> Unit) {
     ) {
         Column(Modifier.weight(1f)) {
             Text("Pocket screen", style = FbType.row, color = c.text)
-            Text("Black screen, stream carries on. Keeps the phone cooler.", style = FbType.help, color = c.text2)
+            Text("Black screen, keeps the phone cool", style = FbType.help, color = c.text2)
         }
     }
 }
@@ -212,7 +212,7 @@ private fun TestAlertRow(alertsOn: Boolean, onTestAlert: (app.irlsupreme.service
 }
 
 @Composable
-private fun SceneRow(scene: Scene, selected: Boolean, consequence: String, thumb: ImageBitmap?, landscape: Boolean, onClick: () -> Unit) {
+private fun SceneRow(scene: Scene, selected: Boolean, consequence: String?, thumb: ImageBitmap?, landscape: Boolean, onClick: () -> Unit) {
     val c = LocalFbColors.current
     Row(
         Modifier
@@ -234,7 +234,7 @@ private fun SceneRow(scene: Scene, selected: Boolean, consequence: String, thumb
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
             Text(sceneName(scene), style = FbType.row, color = c.text)
-            Text(consequence, style = FbType.help, color = c.text2)
+            if (consequence != null) Text(consequence, style = FbType.help, color = c.text2)
         }
         Spacer(Modifier.width(12.dp))
         FbRadio(selected)
@@ -259,6 +259,6 @@ private fun FlipRow(value: String?, onFlip: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text("Flip camera", style = FbType.row, color = if (value != null) c.text else c.text2, modifier = Modifier.clearAndSetSemantics {})
-        Text(value ?: "Camera link", style = FbType.rowValue, color = c.text2, modifier = Modifier.clearAndSetSemantics {})
+        Text(value ?: "Other camera", style = FbType.rowValue, color = c.text2, modifier = Modifier.clearAndSetSemantics {})
     }
 }

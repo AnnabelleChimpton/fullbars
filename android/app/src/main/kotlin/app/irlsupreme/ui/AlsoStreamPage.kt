@@ -25,12 +25,12 @@ fun AlsoStreamPage(c: SetupController, nav: Navigator) = PageScaffold("Also stre
     val reported = c.brbServerStatus?.extras.orEmpty()
 
     HelpText(
-        "Your BRB server sends the same stream to these as well, so your phone still uploads it only once. " +
+        "Your server sends the same stream to these as well, so your phone still uploads it only once. " +
             "Test streams stay on Twitch's private test and go nowhere else.",
     )
     if (!ready) {
         InlineError(
-            "Needs Combine connections and your BRB server. Without them, the phone streams straight to Twitch only.",
+            "Needs Combine connections and your server. Without them, the phone streams straight to Twitch only.",
             actionLabel = "Set up Combine connections",
             onAction = { nav.open(Screen.CONNECTIONS) },
         )

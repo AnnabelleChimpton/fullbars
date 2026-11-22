@@ -294,9 +294,9 @@ fun SettingsScreen(c: SetupController, nav: Navigator) = PageScaffold("Settings"
     }
 
     SectionHeader("Labs")
-    SwitchRow("Camera link${footnoteMark(1)}", checked = c.labsDji, onCheckedChange = c::setLabs)
+    SwitchRow("DJI Pocket 3${footnoteMark(1)}", checked = c.labsDji, onCheckedChange = c::setLabs)
 
-    Footnote(1, "Camera link: Fullbars starts your DJI Pocket 3 and its stream over Bluetooth. $UNOFFICIAL")
+    Footnote(1, "DJI Pocket 3: Fullbars starts it and its stream over Bluetooth. $UNOFFICIAL")
     AboutFootnotes(onLicences = { licences = true })
     if (licences) LicencesDialog(onDismiss = { licences = false })
 }
@@ -443,13 +443,13 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
         // it keeps Twitch live through dropouts with nothing running at home. OBS is for produced streams.
         RadioRow(
             if (c.obsAvailable) "Twitch (recommended)" else "Twitch",
-            supporting = if (c.obsAvailable) "Your BRB server sends to Twitch and covers dropouts. Nothing runs at home." else null,
+            supporting = if (c.obsAvailable) "Your server sends to Twitch and covers dropouts. Nothing runs at home." else null,
             selected = !c.toObs,
         ) { c.changeSendToObs(false) }
         RadioRow(
             if (c.obsAvailable) "My OBS (advanced)" else "My OBS",
             supporting = if (c.obsAvailable) "Your home OBS adds scenes and alerts. Your PC must stay on while you stream."
-            else "Needs Combine connections and a BRB server.",
+            else "Needs Combine connections and your server.",
             selected = c.toObs,
             enabled = c.obsAvailable,
         ) { c.changeSendToObs(true) }
@@ -491,8 +491,8 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
             // In key mode only a saved key decides, signed in or not (serverDecides ignores sign-in there), so
             // the fix is the key. Only in sign-in mode does signing in change where the stream goes.
             HelpText(
-                if (c.useKey) "Without a key, your BRB server decides where the stream goes. Add one to choose Test or Live."
-                else "Without sign-in or a key, your BRB server decides where the stream goes. Sign in to choose Test or Live.",
+                if (c.useKey) "Without a key, your server decides where the stream goes. Add one to choose Test or Live."
+                else "Without sign-in or a key, your server decides where the stream goes. Sign in to choose Test or Live.",
             )
         }
     }
@@ -549,7 +549,7 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
     )
     Column(Modifier.selectableGroup()) {
         app.irlsupreme.service.ReadAloud.entries.forEach { r ->
-            RadioRow(r.title, supporting = "${r.detail}.", selected = c.readAloud == r) { c.changeReadAloud(r) }
+            RadioRow(r.title, supporting = if (r == app.irlsupreme.service.ReadAloud.OFF) null else "${r.detail}.", selected = c.readAloud == r) { c.changeReadAloud(r) }
         }
     }
 
@@ -557,8 +557,8 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
 
     Footnote(
         1,
-        "The mod remote switches Live, BRB, Privacy, Starting soon and Ending. It's served by your BRB server, so it " +
-            "works while you're live with Combine connections. Share the link only with people you trust.",
+        "The mod remote switches Camera, BRB, Privacy, Starting soon, Ending and your own scenes. It's served by your " +
+            "server, so it works while you're live with Combine connections. Share the link only with people you trust.",
     )
 
     if (confirmSignOut) {
@@ -831,7 +831,7 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
     // Master-switch rule: the label says what the switch does, never the page title again.
     SwitchRow(
         "Use Wi‑Fi and mobile data together",
-        supporting = "Needs your own BRB server.${footnoteMark(1)}",
+        supporting = "Needs your own server.${footnoteMark(1)}",
         checked = c.combine,
         onCheckedChange = c::changeCombine,
     )
@@ -840,7 +840,6 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
 
     if (c.combine) {
         SectionHeader("Delay")
-        HelpText("More delay rides out longer drops; viewers see you that much later.")
         Column(Modifier.selectableGroup()) {
             StreamDelay.entries.forEach { d ->
                 RadioRow(d.title, supporting = d.detail, selected = c.delay == d) { c.chooseDelay(d) }
@@ -848,7 +847,7 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
         }
     }
 
-    SectionHeader("BRB server", trailing = rememberCheckedStamp(check)?.let { "checked $it" })
+    SectionHeader("Your server", trailing = rememberCheckedStamp(check)?.let { "checked $it" })
     if (p != null) {
         BrbStatusRow(state, failure = c.brbStatus, port = p.port, justPaired = justPaired)
         ValueRow(
@@ -858,7 +857,7 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
         // Only what the server told us: no "Sends to" until it has answered.
         c.brbServerStatus?.takeIf { state == BrbState.READY || state == BrbState.UDP_BLOCKED }?.let { st ->
             ValueRow("Sends to", sendsToValue(st), valueIsFigure = false)
-            ValueRow("BRB screen", brbScreenValue(st), valueIsFigure = false)
+            ValueRow("Signal lost card", brbScreenValue(st), valueIsFigure = false)
         }
         NavRow("Pair a different server", onClick = c::scanPairingCode)
         // Set apart by space and a rule, not by colour: it already confirms in a dialog, and red is kept for real failures.
@@ -1046,11 +1045,11 @@ internal object RouteRules {
             else -> "${r.linksUp} of ${r.linkCount} links up"
         }
         val server = when (r.server) {
-            BrbState.READY -> "BRB server ready"
-            BrbState.CHECKING, BrbState.OFF -> "BRB server not checked yet"
-            BrbState.UDP_BLOCKED -> "BRB server's UDP port blocked"
-            BrbState.UNREACHABLE -> "BRB server can't be reached"
-            BrbState.UNPAIRED -> "BRB server not paired"
+            BrbState.READY -> "your server ready"
+            BrbState.CHECKING, BrbState.OFF -> "your server not checked yet"
+            BrbState.UDP_BLOCKED -> "your server's UDP port blocked"
+            BrbState.UNREACHABLE -> "your server can't be reached"
+            BrbState.UNPAIRED -> "your server not paired"
         }
         return "Path: phone, $links, $server, ${r.end}" + (r.endValue?.let { ", $it" } ?: "") + "."
     }
@@ -1129,7 +1128,7 @@ private fun RouteReadout(c: SetupController, state: BrbState, check: BrbCheck?) 
         RouteStopRow("Phone", null, valueIsFigure = false, StateMark.VERIFIED, top = false, bottom = true)
         route.tracks.forEach { t -> RouteTrackRow(t.name, RouteRules.speed(t.upKbps), t.up) }
         if (route.extra > 0) RouteTrackRow("+${route.extra}", null, up = false, more = true)
-        RouteStopRow("BRB server", RouteRules.serverValue(state, check?.ms), valueIsFigure = false, RouteRules.serverMark(state), top = true, bottom = true)
+        RouteStopRow("Your server", RouteRules.serverValue(state, check?.ms), valueIsFigure = false, RouteRules.serverMark(state), top = true, bottom = true)
         RouteStopRow(route.end, route.endValue, valueIsFigure = false, route.endMark, top = true, bottom = false)
     }
 }
@@ -1233,7 +1232,7 @@ private fun ModRemoteSection(c: SetupController) {
     val link = c.remoteLink
     if (c.pairing == null) {
         FbButton("Get the link", {}, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary, enabled = false)
-        HelpText("Needs your BRB server: pair it in Settings › Combine connections.")
+        HelpText("Needs your server: pair it in Settings › Combine connections.")
     } else if (link == null) {
         FbButton("Get the link", c::loadRemoteLink, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary)
     } else {

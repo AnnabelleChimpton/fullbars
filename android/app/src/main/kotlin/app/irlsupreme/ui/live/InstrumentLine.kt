@@ -70,7 +70,15 @@ internal fun InstrumentLine(
     modifier: Modifier = Modifier,
     micLevel: StateFlow<MicLevel>? = null,
     onMic: (() -> Unit)? = null,
+    /** Preview: nothing is sent yet, so only the mic, full width (the timer and uplink join it at Go live). */
+    micOnly: Boolean = false,
 ) {
+    if (micOnly) {
+        Row(modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+            MicColumn(mic, micLevel, onMic, Modifier.weight(1f))
+        }
+        return
+    }
     var page by remember { mutableIntStateOf(0) }
     val pages = linkPages(links.size)
     if (pages > 1) LaunchedEffect(pages) { while (true) { delay(PAGE_MS); page = (page + 1) % pages } }
@@ -198,7 +206,6 @@ private fun MicColumn(mic: MicCell, levelFlow: StateFlow<MicLevel>?, onMic: (() 
     val spoken = when (mic) {
         MicCell.Muted -> "Mic muted"
         MicCell.NoAudio -> "Mic, no audio"
-        is MicCell.Battery -> "Battery ${mic.percent} percent"
         MicCell.On -> "Mic on. $words"
     }
     Column(
@@ -209,12 +216,11 @@ private fun MicColumn(mic: MicCell, levelFlow: StateFlow<MicLevel>?, onMic: (() 
                 if (onMic != null) onClick("Mic level") { onMic(); true }
             },
     ) {
-        Label(if (mic is MicCell.Battery) "PHONE" else "MIC")
+        Label("MIC")
         Row(Modifier.heightIn(min = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             when (mic) {
                 MicCell.Muted -> EngagedTag("MUTED")
                 MicCell.NoAudio -> EngagedTag("NO AUDIO")
-                is MicCell.Battery -> Text("BAT ${mic.percent}%", style = FbLiveType.L2Mono, color = h.weak, maxLines = 1)
                 MicCell.On -> LevelBar(
                     { reading.value }, Modifier.padding(end = 4.dp), segments = 10, floorDb = -50f, height = 12.dp,
                     on = OverVideo.text, off = OverVideo.keyOutline, target = false,

@@ -99,12 +99,12 @@ class SetupLogicTest {
         assertEquals(listOf("We kept you live through 2 connection drops"), recapDropLines(2, bonded = true))
         val direct = recapDropLines(1, bonded = false)
         assertEquals("Reconnected 1 time. Viewers saw a pause each time.", direct[0])
-        assertTrue(direct[1].contains("BRB screen"))
+        assertTrue(direct[1].contains("Signal lost card"))
     }
 
     @Test fun `stream failures read as plain words`() {
         assertEquals("Twitch refused the stream key.", recapFailure("stream key rejected", bonded = false))
-        assertEquals("your BRB server refused the stream. Pair it again.", recapFailure("BRB server rejected the stream", bonded = true))
+        assertEquals("your server refused the stream. Pair it again.", recapFailure("BRB server rejected the stream", bonded = true))
         assertEquals("your mic isn't working.", recapFailure("microphone unavailable", bonded = false))
         assertFalse(recapFailure("java.net.SocketTimeoutException: timeout", bonded = false).contains("Exception"))
     }
@@ -152,7 +152,7 @@ class SetupLogicTest {
         assertEquals("No internet connection", readyVerdict(null, preflight(readings(online = false)), Quality.HD1080).text)
         assertEquals("Can't reach Twitch right now", readyVerdict(null, preflight(readings(ingestMs = null)), Quality.HD1080).text)
         assertEquals(
-            "UDP 5000 is blocked on your BRB server",
+            "UDP 5000 is blocked on your server",
             readyVerdict(null, preflight(readings(udpBlocked = true, brbPort = 5000)), Quality.HD1080).text,
         )
         assertEquals("Ready, but the battery is low", readyVerdict(null, preflight(readings(battery = 12)), Quality.HD1080).text)
@@ -290,10 +290,10 @@ class SetupLogicTest {
 
     @Test fun `stats are DROPS, SENT and LINKS, with TEMP only after the first thermal rung`() {
         val cells = recapCells(summary(), links = 2, locale = Locale.US)
-        assertEquals(listOf("Drops", "Sent", "Links"), cells.map { it.label })
+        assertEquals(listOf("Connection drops", "Sent", "Links"), cells.map { it.label })
         assertEquals("48", cells[1].figure)
         assertEquals("MB", cells[1].unit)
-        assertEquals(listOf("Drops", "Sent"), recapCells(summary(), links = null, locale = Locale.US).map { it.label })
+        assertEquals(listOf("Connection drops", "Sent"), recapCells(summary(), links = null, locale = Locale.US).map { it.label })
         assertEquals("warm", recapCells(summary(heat = 2), links = 1, locale = Locale.US).last().figure)
         assertEquals("hot", recapCells(summary(heat = 4), links = 1, locale = Locale.US).last().figure)
         // The count-up starts from zero and lands on the real figures.
@@ -317,7 +317,7 @@ class SetupLogicTest {
     }
 
     @Test fun `DONE folds the recap into one line`() {
-        assertEquals("0:01:22 · held", lastStreamValue(summary()))
+        assertEquals("0:01:22 · no drops", lastStreamValue(summary()))
         assertEquals("0:01:22 · 1 drop", lastStreamValue(summary(drops = 1)))
         assertEquals("0:01:22 · 2 drops", lastStreamValue(summary(drops = 2)))
         assertEquals("didn't start", lastStreamValue(summary(liveMs = 0, error = "timeout")))

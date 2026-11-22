@@ -17,14 +17,14 @@ fun plainFailure(lastError: String?, bonded: Boolean): String? {
     val e = raw.lowercase()
     return when {
         // BondedOutput's own wording: no network link could register with srtla_rec at all.
-        "no connection can reach the brb server" in e -> "Can't reach your BRB server"
+        "no connection can reach the brb server" in e -> "Can't reach your server"
         // SRT handshake refused: wrong passphrase or stream id, i.e. the server was paired with something else.
-        "brb server rejected" in e -> "Your BRB server refused the stream, try pairing again"
+        "brb server rejected" in e -> "Your server refused the stream, try pairing again"
         "stream key rejected" in e || "auth" in e || "unauthorized" in e || "forbidden" in e ->
             "Twitch refused the stream key"
         "disconnected" in e || "broken pipe" in e || "connection reset" in e -> "The connection dropped"
         REACH_WORDS.any { it in e } ->
-            if (bonded) "Can't reach your BRB server, check the address or signal" else "Can't reach Twitch, check your signal"
+            if (bonded) "Can't reach your server, check the address or signal" else "Can't reach Twitch, check your signal"
         "microphone" in e || "audiorecord" in e -> "Your mic isn't working"
         // Something we don't have words for: the pill opens Details, which shows the raw reason.
         else -> "Tap for details"
@@ -43,7 +43,7 @@ private val REACH_WORDS = listOf(
  */
 fun firstConnectHint(attempt: Int, bonded: Boolean): String? = when {
     attempt < 3 -> null
-    bonded -> "Is your BRB server running?"
+    bonded -> "Is your server running?"
     else -> "Check your stream key and internet"
 }
 

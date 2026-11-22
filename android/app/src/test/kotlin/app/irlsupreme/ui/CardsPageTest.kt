@@ -48,13 +48,10 @@ class CardsPageTest {
         assertEquals(listOf("Bone", "Ink"), TEXT_PRESETS.map(::textPresetName))
     }
 
-    @Test fun `the not on camera tag names the screen viewers see`() {
+    @Test fun `scenes go by their names`() {
         val before = app.irlsupreme.service.SceneNames.created
         try {
             app.irlsupreme.service.SceneNames.created = mapOf(Scene.CUSTOM_1 to "Lunch")
-            assertEquals("Not on camera. Viewers see your Lunch screen", notOnCameraWords(Scene.CUSTOM_1))
-            assertEquals("Not on camera. Viewers see your BRB screen", notOnCameraWords(Scene.BRB))
-            assertEquals("Not on camera. Viewers see your privacy screen", notOnCameraWords(Scene.PRIVACY))
             assertEquals("Lunch", sceneName(Scene.CUSTOM_1))
             assertEquals("Scene 2", sceneName(Scene.CUSTOM_2))
         } finally {

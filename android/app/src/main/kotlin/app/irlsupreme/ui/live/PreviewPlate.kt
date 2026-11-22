@@ -39,7 +39,7 @@ internal fun goLiveLabel(isTest: Boolean): String = if (isTest) "START TEST" els
 /** What TalkBack reads for the main key, with the scene viewers will see first. */
 internal fun goLiveSpoken(isTest: Boolean, startOnCard: Boolean): String {
     val what = if (isTest) "Start the test" else "Go live"
-    return if (startOnCard) "$what on your Starting soon screen" else "$what on camera"
+    return if (startOnCard) "$what on your Starting soon card" else "$what on camera"
 }
 
 /**

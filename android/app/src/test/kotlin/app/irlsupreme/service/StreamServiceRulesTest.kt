@@ -21,8 +21,8 @@ class StreamServiceRulesTest {
     }
 
     @Test fun `a mod's Live keeps the streamer's own mute and says so`() {
-        assertEquals("Back live", ModReplies.backLive(micStillOff = false))
-        assertEquals("Back live (mic still off)", ModReplies.backLive(micStillOff = true))
+        assertEquals("Back on camera", ModReplies.backLive(micStillOff = false))
+        assertEquals("Back on camera (mic still off)", ModReplies.backLive(micStillOff = true))
     }
 
     @Test fun `restart camera names what it restarts`() {

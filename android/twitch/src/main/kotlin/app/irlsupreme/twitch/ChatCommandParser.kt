@@ -67,12 +67,12 @@ object ChatCommandParser {
      * checks that each usage parses). The end word comes from [policy], so the list never names a word that fails.
      */
     fun help(policy: CommandPolicy = CommandPolicy()): List<CommandHelp> = listOf(
-        CommandHelp("!brb", "Shows your BRB screen."),
+        CommandHelp("!brb", "Shows your BRB card."),
         CommandHelp("!live", "Back to your camera (and your mic, after !privacy)."),
-        CommandHelp("!privacy", "Shows the privacy screen and turns your mic off."),
+        CommandHelp("!privacy", "Shows your Privacy card and turns your mic off."),
         CommandHelp("!starting", "Shows Starting soon."),
-        CommandHelp("!ending", "Shows the Ending screen."),
-        CommandHelp("!scene <name>", "Shows any scene by its name, your own too. !scene live goes back to your camera."),
+        CommandHelp("!ending", "Shows your Ending card."),
+        CommandHelp("!scene <name>", "Shows any scene by its name, your own too. !scene camera goes back to your camera."),
         CommandHelp("!restartcam", "Restarts the camera."),
         CommandHelp("!end ${policy.endConfirmationWord}", "Ends the stream."),
     )

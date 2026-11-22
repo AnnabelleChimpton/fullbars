@@ -98,7 +98,7 @@ object FbIcons {
     val Chevron = glyph("chevron") { stroke("M9,5.5l6.5,6.5L9,18.5") }
     val External = glyph("external") { stroke("M13.5,4.5h6v6M19.5,4.5l-9,9M17,13.5v6H4.5V7h6") }
     val Copy = glyph("copy") { stroke("M8.75,8.75h11.5v11.5h-11.5z"); stroke("M15.25,5.75v-2H3.75v11.5h2") }
-    /** BACK LIVE: the camera, back on. */
+    /** TO CAMERA: the camera, back on. */
     val Camera = glyph("camera") { stroke("M3.75,7.25h9.5v9.5h-9.5zM13.25,10.5l6.5,-3.25v9.5l-6.5,-3.25") }
     /** "Continue with Twitch" only. */
     val Twitch = glyph("twitch") {

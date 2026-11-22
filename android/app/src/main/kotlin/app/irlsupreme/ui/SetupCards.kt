@@ -130,12 +130,12 @@ private const val THERMAL_RUNG_1 = PowerManager.THERMAL_STATUS_MODERATE
  */
 internal fun assessPreflight(r: PreflightReadings, quality: Quality, checkedAtMs: Long, locale: Locale = Locale.getDefault()): Preflight {
     val needKbps = quality.bitrate / 1000 + 128
-    val target = if (r.brbPort != null) "your BRB server" else "Twitch"
+    val target = if (r.brbPort != null) "your server" else "Twitch"
     val lowBattery = r.battery in 0..19 && !r.charging
     val verdict = when {
         !r.online -> Check(Level.BAD, "No internet connection")
         r.ingestMs == null -> Check(Level.BAD, "Can't reach $target right now")
-        r.udpBlocked -> Check(Level.BAD, "UDP ${r.brbPort} is blocked on your BRB server")
+        r.udpBlocked -> Check(Level.BAD, "UDP ${r.brbPort} is blocked on your server")
         r.thermal >= PowerManager.THERMAL_STATUS_SEVERE -> Check(Level.WARN, "Ready, but the phone is hot", suggest720 = true)
         lowBattery -> Check(Level.WARN, "Ready, but the battery is low")
         r.upKbps != null && r.upKbps < needKbps * 1.3 && quality == Quality.HD1080 ->
@@ -330,7 +330,7 @@ internal fun recapDropLines(drops: Int, bonded: Boolean): List<String> = when {
     bonded -> listOf(if (drops == 1) "We kept you live through 1 connection drop" else "We kept you live through $drops connection drops")
     else -> listOf(
         (if (drops == 1) "Reconnected 1 time" else "Reconnected $drops times") + ". Viewers saw a pause each time.",
-        "With a BRB server, viewers see your BRB screen instead.",
+        "With your own server, viewers see your Signal lost card instead.",
     )
 }
 
@@ -352,11 +352,11 @@ internal fun recapFailure(lastError: String, bonded: Boolean): String {
         return p.replaceFirstChar { it.lowercase() } + "."
     }
     return when {
-        "rejected" in e && bonded -> "your BRB server refused the stream. Pair it again."
+        "rejected" in e && bonded -> "your server refused the stream. Pair it again."
         "rejected" in e || "auth" in e || "key" in e -> "Twitch refused the stream key."
-        "brb" in e || "no connection" in e -> "can't reach your BRB server."
+        "brb" in e || "no connection" in e -> "can't reach your server."
         "timeout" in e || "timed out" in e || "refused" in e || "unreachable" in e || "resolve" in e || "host" in e ->
-            if (bonded) "can't reach your BRB server. Check the signal." else "can't reach Twitch. Check the signal."
+            if (bonded) "can't reach your server. Check the signal." else "can't reach Twitch. Check the signal."
         "microphone" in e || "audiorecord" in e -> "the microphone wasn't available."
         else -> "something went wrong. Try again."
     }
@@ -412,7 +412,7 @@ internal fun recapCells(s: SessionSummary, links: Int?, progress: Float = 1f, lo
     val sent = recapBytes((s.bytesSent * p.toDouble()).roundToLong(), locale)
     val (sentFigure, sentUnit) = sent.substringBeforeLast(' ') to sent.substringAfterLast(' ')
     return buildList {
-        add(ReadoutCell("Drops", "$drops", spoken = "Drops, ${s.recoveredDrops}"))
+        add(ReadoutCell("Connection drops", "$drops", spoken = "Connection drops, ${s.recoveredDrops}"))
         add(ReadoutCell("Sent", sentFigure, sentUnit, spoken = "Sent, " + recapBytes(s.bytesSent, locale)))
         if (links != null) add(ReadoutCell("Links", "$links", spoken = "Links, $links"))
         when {
@@ -433,10 +433,10 @@ internal fun recapAnnouncement(s: SessionSummary, wasTest: Boolean, bonded: Bool
         spokenDuration(s.liveDurationMs) + ". " + drops + ", " + recapBytes(s.bytesSent) + " sent."
 }
 
-/** The recap folded by DONE: "0:01:22 · held", "0:31:40 · 2 drops", or "didn't start". */
+/** The recap folded by DONE: "0:01:22 · no drops", "0:31:40 · 2 drops", or "didn't start". */
 internal fun lastStreamValue(s: SessionSummary): String = when {
     s.liveDurationMs == 0L -> "didn't start"
-    s.recoveredDrops == 0 -> formatDuration(s.liveDurationMs) + " · held"
+    s.recoveredDrops == 0 -> formatDuration(s.liveDurationMs) + " · no drops"
     s.recoveredDrops == 1 -> formatDuration(s.liveDurationMs) + " · 1 drop"
     else -> formatDuration(s.liveDurationMs) + " · ${s.recoveredDrops} drops"
 }
