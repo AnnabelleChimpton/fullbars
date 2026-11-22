@@ -223,6 +223,20 @@ class SetupLogicTest {
         assertTrue(Blocker.entries.none { "Camera link" in it.text || "your camera" in it.text })
     }
 
+    @Test fun `going live with the Pocket 3 is one line, keeping your network where it's yours`() {
+        assertEquals(
+            "Start from Home. Keep your hotspot on. Turn the Pocket 3 on and keep it close; the first time, tap OK on it. " +
+                "Viewers see the phone camera until its picture arrives.",
+            PocketSteps.goLiveLine(CameraNet.PHONE_HOTSPOT),
+        )
+        assertTrue(PocketSteps.goLiveLine(CameraNet.WIFI).contains("Keep this phone on that Wi‑Fi."))
+        assertTrue(PocketSteps.goLiveLine(CameraNet.PRIVATE).startsWith("Start from Home. Turn the Pocket 3 on"))
+        // The Go live step says it when it's the step to do now.
+        assertEquals(PocketSteps.goLiveLine(CameraNet.PRIVATE), steps(chosen = true, net = CameraNet.PRIVATE)[2].detail)
+        assertEquals("Fullbars hotspot", cameraNetName(CameraNet.PRIVATE))
+        assertEquals("Your hotspot", cameraNetName(CameraNet.PHONE_HOTSPOT))
+    }
+
     // --- Pocket 3 setup steps (Camera page) ---
 
     private fun steps(

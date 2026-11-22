@@ -1071,3 +1071,9 @@ internal fun ExpandRow(label: String, expanded: Boolean, onToggle: () -> Unit) {
         Icon(if (expanded) FbIcons.ExpandLess else FbIcons.ExpandMore, contentDescription = null, tint = c.text2, modifier = Modifier.size(20.dp))
     }
 }
+
+/** The visible name over a [KeyChoice] row ("Text size", "Where alerts go"), so a row of keys never stands unlabelled. */
+@Composable
+internal fun ChoiceLabel(text: String) {
+    Text(text, style = FbType.rowValue, color = LocalFbColors.current.text, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
+}

@@ -323,10 +323,6 @@ private fun paletteName(argb: Int): String = when (argb) {
     else -> ColorMath.name(argb)
 }
 
-@Composable
-private fun ChoiceLabel(text: String) {
-    Text(text, style = FbType.rowValue, color = LocalFbColors.current.text, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
-}
 
 /**
  * The sample alert of [kind] with everything the streamer set, drawn by the stream's own code where the stream puts it

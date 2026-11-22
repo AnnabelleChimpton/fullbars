@@ -213,6 +213,9 @@ internal fun overlaysValue(s: OverlaySettings, webValid: Boolean): String {
  * Whether Android will let the stream run with the screen off. Restricted (the app's own "background usage" switch)
  * wins; then exempt from battery optimisation reads as Allowed. Anything else hasn't been allowed yet.
  */
+/** Allowed is the one good state; anything else means the stream stops about 5 minutes after the screen goes off. */
+internal fun screenOffMark(value: String): StateMark = if (value == "Allowed") StateMark.VERIFIED else StateMark.FAILED
+
 internal fun screenOffValue(restricted: Boolean, exempt: Boolean): String = when {
     restricted -> "Restricted"
     exempt -> "Allowed"
@@ -291,7 +294,11 @@ fun SettingsScreen(c: SetupController, nav: Navigator) = PageScaffold("Settings"
 
     if (isAggressiveOem) {
         SectionHeader("Phone")
-        ValueRow("Keep streaming with the screen off", rememberScreenOffValue(), valueIsFigure = false, onClick = { nav.open(Screen.SCREEN_OFF) })
+        val screenOff = rememberScreenOffValue()
+        ValueRow(
+            "Keep streaming with the screen off", screenOff, valueIsFigure = false, state = screenOffMark(screenOff),
+            onClick = { nav.open(Screen.SCREEN_OFF) },
+        )
     }
 
     // The Pocket 3 (Labs) is turned on where it's chosen, Settings › Camera, with its warning confirmed there.
@@ -714,7 +721,7 @@ private fun PocketSetup(c: SetupController) {
     SectionHeader("Set up your Pocket 3")
     step(0)
     if (chosen != null) {
-        ValueRow("Pocket 3", chosen.second, valueIsFigure = false, sub = "…${chosen.first.takeLast(5)}", subIsFigure = true)
+        ValueRow("Pocket 3", chosen.second, valueIsFigure = false)
         FbButton("Find another", c::findPocket, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text, enabled = !c.scanning)
     } else {
         FbButton(
@@ -734,7 +741,11 @@ private fun PocketSetup(c: SetupController) {
     c.scanError?.let { InlineError(it, actionLabel = "Try again", onAction = c::findPocket) }
 
     step(1)
-    Column(Modifier.selectableGroup()) {
+    // Done means summarised: a network that's ready folds to one row (an off hotspot keeps it open, as not done).
+    var netOpen by remember { mutableStateOf(false) }
+    val netDone = steps[1].status == StepStatus.DONE
+    if (netDone) ExpandRow("Network · ${cameraNetName(net)}", netOpen, onToggle = { netOpen = !netOpen })
+    if (!netDone || netOpen) Column(Modifier.selectableGroup()) {
         // "(recommended)" moves to Fullbars hotspot on Android 16+ only once a Pocket is confirmed to join it on
         // 5 GHz, the same gate as the default change in SetupController.
         RadioRow(
@@ -754,7 +765,7 @@ private fun PocketSetup(c: SetupController) {
             selected = net == ExternalCamera.CameraNet.WIFI,
         ) { c.chooseCameraNet(ExternalCamera.CameraNet.WIFI) }
     }
-    if (net != ExternalCamera.CameraNet.PRIVATE) {
+    if (net != ExternalCamera.CameraNet.PRIVATE && (!netDone || netOpen)) {
         val what = if (net == ExternalCamera.CameraNet.WIFI) "Wi‑Fi" else "Hotspot"
         PlainField(c.camSsid, c::updateCamSsid, "$what name")
         SecretField(c.camPassword, c::updateCamPassword, "$what password")
@@ -769,10 +780,20 @@ private fun PocketSetup(c: SetupController) {
     }
 
     step(2)
+    // The five things that happen once live, in order, for whoever wants them; the line above says what you do.
+    var order by remember { mutableStateOf(false) }
+    ExpandRow("What happens when you go live", order, onToggle = { order = !order })
+    if (order) {
+        HelpText("Fullbars does these in order. The live screen shows each one as it happens.")
+        PocketStep.entries.forEach { s -> StepRow(s.number, PocketStep.entries.size, s.title(net), status = null, detail = s.guide(net)) }
+    }
+}
 
-    SectionHeader("When you go live")
-    HelpText("Fullbars does these in order. The live screen shows each one as it happens.")
-    PocketStep.entries.forEach { s -> StepRow(s.number, PocketStep.entries.size, s.title(net), status = null, detail = s.guide(net)) }
+/** The network the Pocket 3 joins, as the folded step names it. */
+internal fun cameraNetName(net: ExternalCamera.CameraNet): String = when (net) {
+    ExternalCamera.CameraNet.PHONE_HOTSPOT -> "Your hotspot"
+    ExternalCamera.CameraNet.PRIVATE -> "Fullbars hotspot"
+    ExternalCamera.CameraNet.WIFI -> "Other Wi‑Fi"
 }
 
 @Composable
@@ -831,8 +852,27 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
         }
     }
 
-    SectionHeader("Your server", trailing = rememberCheckedStamp(check)?.let { "checked $it" })
-    if (p != null) {
+    // Off and unpaired: nothing to show until Combine is on. On and ready: the path above already says so, so the
+    // server's details fold away. Anything else (checking, a failure, off but paired) stays open.
+    if (!c.combine && p == null) {
+        // Nothing to show until Combine connections is on.
+    } else if (p != null && c.combine && state == BrbState.READY) {
+        SectionHeader("Your server")
+        var details by remember { mutableStateOf(false) }
+        ExpandRow("Server details", details, onToggle = { details = !details })
+        if (details) {
+            ValueRow(
+                "Address", p.host, valueIsFigure = true,
+                sub = p.name?.takeIf { it.isNotBlank() && it != p.host }, subIsFigure = false,
+            )
+            c.brbServerStatus?.let { st -> ValueRow("Signal lost card", brbScreenValue(st), valueIsFigure = false) }
+            NavRow("Pair a different server", onClick = c::scanPairingCode)
+            Spacer(Modifier.height(24.dp))
+            Hairline()
+            NavRow("Forget server", trailing = null) { confirmForget = true }
+        }
+    } else if (p != null) {
+        SectionHeader("Your server", trailing = if (c.combine) null else rememberCheckedStamp(check)?.let { "checked $it" })
         BrbStatusRow(state, failure = c.brbStatus, port = p.port, justPaired = justPaired)
         ValueRow(
             "Address", p.host, valueIsFigure = true,
@@ -849,6 +889,7 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
         Hairline()
         NavRow("Forget server", trailing = null) { confirmForget = true }
     } else {
+        SectionHeader("Your server")
         BrbStatusRow(state, failure = null, port = 0, justPaired = false)
         // The only way in without a server: say what it is and what it costs (footnote) before asking for a command.
         HelpText(
@@ -1099,7 +1140,7 @@ private fun RouteReadout(c: SetupController, state: BrbState, check: BrbCheck?) 
     }
     val (end, endValue, endMark) = routeEnd(c)
     val route = RouteRules.route(links, state, check?.ms, end, endValue, endMark)
-    SectionHeader("Path")
+    SectionHeader("Path", trailing = rememberCheckedStamp(check)?.let { "checked $it" })
     Column(
         Modifier.fillMaxWidth().padding(vertical = 4.dp)
             .clearAndSetSemantics { contentDescription = RouteRules.describe(route) },
@@ -1255,13 +1296,18 @@ fun QualityPage(c: SetupController, nav: Navigator) = PageScaffold("Video", nav:
             RadioRow(q.title, supporting = "${q.detail}.", value = qualityValue(q), selected = c.quality == q) { c.chooseQuality(q) }
         }
     }
-    SectionHeader("Frame rate")
     LaunchedEffect(c.quality, c.orientation, c.startFacing, c.cameraKind) { c.checkFps() }
     val phone = c.cameraKind == ExternalCamera.Kind.PHONE
     val can60 = c.can60 == true
-    Column(Modifier.selectableGroup()) {
-        RadioRow("30 fps", supporting = "Steadiest on a weak signal.", selected = !(c.fps == 60 && can60)) { c.chooseFps(30) }
-        RadioRow("60 fps", supporting = fps60Help(phone, c.can60), selected = c.fps == 60 && can60, enabled = can60) { c.chooseFps(60) }
+    SectionHeader("Frame rate")
+    if (phone) {
+        Column(Modifier.selectableGroup()) {
+            RadioRow("30 fps", selected = !(c.fps == 60 && can60)) { c.chooseFps(30) }
+            RadioRow("60 fps", supporting = fps60Help(phone, c.can60), selected = c.fps == 60 && can60, enabled = can60) { c.chooseFps(60) }
+        }
+    } else {
+        // Another camera sets its own rate: one row that says so (the phone's choice is kept for when it's back).
+        ValueRow("30 fps", "Set by the camera", valueIsFigure = false)
     }
 
     SectionHeader("When the signal is too weak")
@@ -1277,16 +1323,25 @@ fun QualityPage(c: SetupController, nav: Navigator) = PageScaffold("Video", nav:
 
 @Composable
 fun ScreenOffPage(c: SetupController, nav: Navigator) = PageScaffold("Keep streaming with the screen off", nav::back) {
-    ValueRow("Background activity", rememberScreenOffValue(), valueIsFigure = false, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-    HelpText(
-        "Your phone stops background apps about 5 minutes after the screen turns off. " +
-            "Open settings › Battery usage › turn on “Allow background activity”.",
-        modifier = Modifier.padding(top = 8.dp),
+    val value = rememberScreenOffValue()
+    ValueRow(
+        "Background activity", value, valueIsFigure = false, state = screenOffMark(value),
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
     )
-    FbButton(
-        "Open settings", c::openAppSettings, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary,
-        trailing = {
-            Icon(FbIcons.External, contentDescription = null, tint = LocalFbColors.current.text, modifier = Modifier.size(20.dp))
-        },
-    )
+    if (value == "Allowed") {
+        // Done: no need for the steps, only a way back to the setting.
+        FbButton("Open settings", c::openAppSettings, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Text)
+    } else {
+        HelpText(
+            "Your phone stops background apps about 5 minutes after the screen turns off. " +
+                "Open settings › Battery usage › turn on “Allow background activity”.",
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        FbButton(
+            "Open settings", c::openAppSettings, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary,
+            trailing = {
+                Icon(FbIcons.External, contentDescription = null, tint = LocalFbColors.current.text, modifier = Modifier.size(20.dp))
+            },
+        )
+    }
 }

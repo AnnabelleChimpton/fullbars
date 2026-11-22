@@ -523,7 +523,7 @@ private fun SignedInHome(c: SetupController, nav: Navigator, pf: Preflight?, arr
                 if (screenOff != "Allowed") {
                     ValueRow(
                         "Keep streaming with the screen off", screenOff, valueIsFigure = false,
-                        state = if (screenOff == "Restricted") StateMark.FAILED else StateMark.UNCHECKED,
+                        state = screenOffMark(screenOff),
                         onClick = { nav.open(Screen.SCREEN_OFF) },
                     )
                 }

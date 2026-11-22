@@ -25,22 +25,24 @@ fun AlsoStreamPage(c: SetupController, nav: Navigator) = PageScaffold("Also stre
     val reported = c.brbServerStatus?.extras.orEmpty()
 
     HelpText(
-        "Your server sends the same stream to these as well, so your phone still uploads it only once. " +
+        "Your server sends the same stream to these too, so your phone uploads it once. " +
             "Test streams stay on Twitch's private test and go nowhere else.",
     )
     if (!ready) {
+        // Nothing here can work yet: the reason and the way to fix it, nothing else.
         InlineError(
             "Needs Combine connections and your server. Without them, the phone streams straight to Twitch only.",
             actionLabel = "Set up Combine connections",
             onAction = { nav.open(Screen.CONNECTIONS) },
         )
+        return@PageScaffold
     }
 
     ExtraKind.entries.forEach { kind ->
         val d = all[kind] ?: ExtraDestination()
         fun set(next: ExtraDestination) = AlsoStreamTo.set(ctx, kind, next)
-        SectionHeader(kind.title)
-        SwitchRow("Stream to ${kind.title}", supporting = whereFrom(kind), checked = d.on) { set(d.copy(on = it)) }
+        // Where to find the key shows only once you've said you want this one.
+        SwitchRow("Stream to ${kind.title}", supporting = if (d.on) whereFrom(kind) else null, checked = d.on) { set(d.copy(on = it)) }
         if (d.on) {
             if (kind.fixedServer == null) {
                 PlainField(
@@ -59,9 +61,8 @@ fun AlsoStreamPage(c: SetupController, nav: Navigator) = PageScaffold("Also stre
         }
     }
 
-    SectionHeader("Good to know")
     HelpText("Chat, alerts and mod commands stay on Twitch.")
-    HelpText("Each one adds your stream's bitrate (Settings › Video) to your server's upload, not your phone's.")
+    if (all.values.any { it.on }) HelpText("Each one adds your stream's bitrate to your server's upload, not your phone's.")
 }
 
 private fun whereFrom(kind: ExtraKind): String = when (kind) {

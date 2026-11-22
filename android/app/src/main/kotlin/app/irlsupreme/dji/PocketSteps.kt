@@ -65,6 +65,21 @@ data class SetupStep(val title: String, val status: StepStatus, val detail: Stri
  * now exactly when Home has no Pocket blocker.
  */
 object PocketSteps {
+    /**
+     * What you do once you go live, in one line (the five steps behind it are folded away on the Camera page): keep the
+     * network up where it's yours to keep, turn the Pocket 3 on, tap OK the first time, and the phone camera covers
+     * until its picture arrives.
+     */
+    fun goLiveLine(net: CameraNet): String {
+        val keep = when (net) {
+            CameraNet.PHONE_HOTSPOT -> "Keep your hotspot on. "
+            CameraNet.WIFI -> "Keep this phone on that Wi‑Fi. "
+            CameraNet.PRIVATE -> ""
+        }
+        return "Start from Home. ${keep}Turn the Pocket 3 on and keep it close; the first time, tap OK on it. " +
+            "Viewers see the phone camera until its picture arrives."
+    }
+
     fun setup(chosen: Boolean, scanning: Boolean, net: CameraNet, hasNetworkDetails: Boolean, hotspotUp: Boolean): List<SetupStep> {
         val found = chosen && !scanning
         val networkReady = net == CameraNet.PRIVATE || (hasNetworkDetails && (net != CameraNet.PHONE_HOTSPOT || hotspotUp))
@@ -87,11 +102,7 @@ object PocketSteps {
         return listOf(
             SetupStep("Find your Pocket 3", status(0), findDetail.takeIf { status(0) != StepStatus.DONE }),
             SetupStep("Choose its hotspot or Wi‑Fi", status(1), networkDetail.takeIf { status(1) != StepStatus.DONE }),
-            SetupStep(
-                "Go live", status(2),
-                if (status(2) == StepStatus.NOW) "Start a test or go live from Home. Fullbars starts the Pocket 3 for you."
-                else "Once the steps above are done.",
-            ),
+            SetupStep("Go live", status(2), if (status(2) == StepStatus.NOW) goLiveLine(net) else "Once the steps above are done."),
         )
     }
 }

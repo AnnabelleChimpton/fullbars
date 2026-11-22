@@ -247,12 +247,12 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         t.sub, { CardStore.setText(ctx, card, t.headline, it) }, "Line under it",
         supporting = (if (ownSub.isEmpty()) "Blank shows no line." else "Blank shows “$ownSub”.") + " Up to ${CardStore.MAX_SUB} characters.",
     )
-    ChoiceLabel("Font")
+    CardChoiceLabel("Font")
     FontChoice(t.font) { CardStore.setFont(ctx, card, it) }
     if (!CardTypefaces.shows(t.font)) HelpText("${t.font.label} isn't on this phone, so it shows as Sans.")
-    ChoiceLabel("Size")
+    CardChoiceLabel("Size")
     KeyChoice("Text size", CardTextSize.entries, t.textSize, { it.label }) { CardStore.setTextSize(ctx, card, it) }
-    ChoiceLabel("Text colour")
+    CardChoiceLabel("Text colour")
     ColorChoice("Text colour", t.textColor, TEXT_PRESETS, { CardStore.setTextColor(ctx, card, it) }, defaultLabel = "Automatic", presetName = ::textPresetName)
     HelpText(
         t.textColor?.let { if (it in TEXT_PRESETS) "${textPresetName(it)}." else colorHelp(it, preset = false) }
@@ -291,7 +291,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         ValueRow("Background", backgroundValue(card, t.background), valueIsFigure = false)
         FbButton("Choose another background", { pickImage(backgroundPicker) }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text, enabled = !backgroundBusy)
         FbButton("Remove background", { CardStore.clearBackground(ctx, card); backgroundError = null }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text, enabled = !backgroundBusy)
-        ChoiceLabel("Darken it")
+        CardChoiceLabel("Darken it")
         KeyChoice("Darken the background", CardRules.DIM_STEPS, CardRules.snapDim(t.dimPercent), ::dimLabel) { CardStore.setDim(ctx, card, it) }
         HelpText("Ink laid over the background so your words stay readable.")
     } else {
@@ -310,7 +310,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         }
     }
     if (t.layout == CardLayout.FULL_PICTURE && !t.hasPicture) HelpText("This layout is built around your picture. Add one under Picture.")
-    ChoiceLabel("Accent")
+    CardChoiceLabel("Accent")
     ColorChoice("Accent", t.accent, Slates.ACCENTS, { CardStore.setAccent(ctx, card, it) }, presetName = CardRules::accentName)
     HelpText(t.accent?.let { colorHelp(it, preset = it in Slates.ACCENTS) } ?: "The card's own Ink and Bone.")
 
@@ -321,7 +321,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     } else {
         val e = t.elements
         if (CardRules.hasCountdown(card)) {
-            ChoiceLabel("Countdown")
+            CardChoiceLabel("Countdown")
             KeyChoice("Countdown", CardRules.COUNTDOWN_CHOICES, e.countdownMinutes.takeIf { it in CardRules.COUNTDOWN_CHOICES } ?: 0, ::countdownLabel) {
                 CardStore.setElements(ctx, card, e.copy(countdownMinutes = it))
             }
@@ -400,7 +400,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
 
 /** A small visible name over a set of keys ("Countdown"), in the row face. The keys carry the same name for TalkBack. */
 @Composable
-private fun ChoiceLabel(text: String) {
+private fun CardChoiceLabel(text: String) {
     Text(
         text, style = FbType.row, color = LocalFbColors.current.text,
         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp).clearAndSetSemantics {},

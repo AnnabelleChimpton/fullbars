@@ -88,6 +88,10 @@ class SettingsValuesTest {
         assertEquals("Restricted", screenOffValue(restricted = true, exempt = true))
         assertEquals("Allowed", screenOffValue(restricted = false, exempt = true))
         assertEquals("Not allowed yet", screenOffValue(restricted = false, exempt = false))
+        // Only Allowed is good: the others mean the stream stops about 5 minutes after the screen goes off.
+        assertEquals(StateMark.VERIFIED, screenOffMark("Allowed"))
+        assertEquals(StateMark.FAILED, screenOffMark("Not allowed yet"))
+        assertEquals(StateMark.FAILED, screenOffMark("Restricted"))
     }
 
     // ---- Combine page ----

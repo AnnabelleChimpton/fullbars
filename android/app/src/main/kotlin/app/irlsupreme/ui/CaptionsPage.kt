@@ -60,6 +60,7 @@ fun CaptionsPage(nav: Navigator) = PageScaffold("Captions", nav::back) {
     var support by remember { mutableStateOf<CaptionLanguageSupport?>(null) }
     var checks by remember { mutableIntStateOf(0) }
     var moreLanguages by remember { mutableStateOf(false) }
+    var downloadShown = false
     LaunchedEffect(checks) { CaptionLanguages.check(ctx) { support = it } }
     // While a language downloads, look again every few seconds so it turns choosable once it's there.
     val s = support
@@ -79,6 +80,8 @@ fun CaptionsPage(nav: Navigator) = PageScaffold("Captions", nav::back) {
         )
         return@PageScaffold
     }
+    // Off means folded: the rest only matters once captions are on (the choices are kept meanwhile).
+    if (!p.on) return@PageScaffold
 
     SectionHeader("Language")
     val phoneTag = LocalConfiguration.current.locales[0].toLanguageTag()
@@ -106,27 +109,20 @@ fun CaptionsPage(nav: Navigator) = PageScaffold("Captions", nav::back) {
         if (others.isNotEmpty() && !moreLanguages) {
             ValueRow("More languages", "${others.size}", valueIsFigure = true, onClick = { moreLanguages = true })
         }
+        downloadShown = note(phoneTag) == "Download" || shown.any { note(it) == "Download" }
     }
-    HelpText("Languages marked Download are fetched by the phone's speech service the first time you choose them.")
+    if (downloadShown) HelpText("Download fetches the language the first time you choose it.")
 
-    SectionHeader("Text size")
-    Column(Modifier.selectableGroup()) {
-        CaptionSize.entries.forEach { z -> RadioRow(captionSizeTitle(z), selected = p.size == z) { CaptionSettings.setSize(ctx, z) } }
-    }
-    SectionHeader("Position")
-    Column(Modifier.selectableGroup()) {
-        RadioRow("Bottom", selected = p.position == CaptionPosition.BOTTOM) { CaptionSettings.setPosition(ctx, CaptionPosition.BOTTOM) }
-        RadioRow("Top", selected = p.position == CaptionPosition.TOP) { CaptionSettings.setPosition(ctx, CaptionPosition.TOP) }
-    }
-    SectionHeader("Words")
+    SectionHeader("Look")
+    ChoiceLabel("Text size")
+    KeyChoice("Text size", CaptionSize.entries, p.size, ::captionSizeTitle) { CaptionSettings.setSize(ctx, it) }
+    ChoiceLabel("Position")
+    KeyChoice("Position", CaptionPosition.entries, p.position, { if (it == CaptionPosition.TOP) "Top" else "Bottom" }) { CaptionSettings.setPosition(ctx, it) }
     SwitchRow(
         "Hide swear words",
         supporting = "Stars them out. People near you are captioned too.",
         checked = p.maskOffensive,
         onCheckedChange = { CaptionSettings.setMask(ctx, it) },
     )
-    HelpText(
-        "Captions show only what viewers can hear: they stop while you're muted or on Privacy, and pause if the phone " +
-            "gets too hot. Turn them on or off while live from Scenes. Recognising speech uses some battery and heat.",
-    )
+    HelpText("Captions stop while you're muted or on Privacy, and pause if the phone gets hot. Turn them on or off live from Scenes.")
 }
