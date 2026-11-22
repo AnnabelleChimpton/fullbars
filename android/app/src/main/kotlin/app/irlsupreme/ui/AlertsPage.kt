@@ -1,5 +1,8 @@
 package app.irlsupreme.ui
 
+import app.irlsupreme.service.AlertSoundSetting
+import app.irlsupreme.service.AlertSoundChoice
+import app.irlsupreme.service.AlertSoundChoices
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -74,48 +77,124 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
- * Settings > Overlays > Customize alerts. At the top, where alerts land and how big they are; then, for the kind picked,
- * whether it shows and the smallest worth showing, how long it stays up, its words, picture and colours. A live preview
- * drawn by the stream's own alert code shows the picked kind with all of it, and a Try button plays its chime. The card
- * keeps its size class (a raid stays the big slab), so viewers still read how big a moment it is.
+ * Settings > Overlays > Customize alerts: a preview, where alerts land and how big they are, then one row per kind with
+ * what's set for it. Each kind has its own page ([AlertKindPage]). The card keeps its size class (a raid stays the big
+ * slab), so viewers still read how big a moment it is.
  */
 @Composable
 fun AlertsPage(c: SetupController, nav: Navigator) = PageScaffold("Customize alerts", nav::back) {
     val ctx = LocalContext.current
     val options by AlertOptionsStore.state(ctx).collectAsState()
-    var picked by rememberSaveable { mutableStateOf(AlertKind.FOLLOW.name) }
-    val kind = AlertKind.valueOf(picked)
+    val styles by AlertStyles.state(ctx).collectAsState()
+    val sounds by AlertSoundChoices.state(ctx).collectAsState()
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { AlertStyles.apply(ctx) } }
 
-    HelpText("Make alerts your own. A raid still reads bigger than a follow, whatever you pick.")
+    AlertPreview(c, AlertKind.FOLLOW, options)
 
-    SectionHeader("Where")
+    SectionHeader("Look")
+    ChoiceLabel("Where")
     KeyChoice("Where alerts go", AlertPlace.entries, options.place, { it.title }) { AlertOptionsStore.setPlace(ctx, it) }
     HelpText(placeHelp(options.place))
-
-    SectionHeader("Size")
+    ChoiceLabel("Size")
     KeyChoice("Alert size", AlertSize.entries, options.size, { it.title }) { AlertOptionsStore.setSize(ctx, it) }
 
     SectionHeader("Each kind")
-    KeyChoice("Alert", AlertKind.entries, kind, { it.title }) { picked = it.name }
-    AlertPreview(c, kind, options)
-    val player = rememberSoundPlayer()
-    FbButton(
-        "Try it", {
-            val style = AlertText.card(SampleAlert.valueOf(kind.name).alert(0)).style
-            player.play(PcmClip(AlertSounds.chime(style, 48_000, true), 48_000, 2))
-        },
-        Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary,
+    AlertKind.entries.forEach { k ->
+        val snd = sounds[k] ?: AlertSoundSetting()
+        ValueRow(
+            k.title,
+            alertKindSummary(k, options.of(k), styles[k]?.isCustom == true, snd.choice, snd.hasFile, soundsOn = c.overlays.alertSound),
+            valueIsFigure = false,
+            onClick = { AlertKindNav.kind = k; nav.open(Screen.ALERT_KIND) },
+        )
+    }
+    HelpText(
+        "To see one move on stream, use Test an alert in Scenes during a Test stream. Test alerts ignore the minimums, " +
+            "and viewers never see them.",
     )
+}
 
-    AlertKindSettings(kind, options.of(kind))
+/** Which kind [AlertKindPage] shows: set by the row tapped on Customize alerts. */
+internal object AlertKindNav {
+    var kind by mutableStateOf(AlertKind.FOLLOW)
+}
 
-    Footnote(
-        null,
-        "To see it move on stream, start a Test stream and use Test an alert in Scenes. Test alerts always show, " +
-            "whatever the minimums, and viewers never see them.",
-        Modifier.padding(top = 16.dp),
-    )
+/**
+ * A kind's row on Customize alerts: "Off", or what's set beyond the default ("From 5 · your sound · custom look"), or
+ * "Default". [soundsOn]: Overlays' Alert sounds switch, without which no kind makes a sound.
+ */
+internal fun alertKindSummary(
+    kind: AlertKind,
+    o: AlertKindOptions,
+    lookCustom: Boolean,
+    sound: AlertSoundChoice,
+    hasFile: Boolean,
+    soundsOn: Boolean = true,
+): String {
+    if (!o.on) return "Off"
+    val parts = buildList {
+        when {
+            kind == AlertKind.TIP && o.minimum > 0 -> add("From ${TipAmount.format(o.minimum)}")
+            kind != AlertKind.TIP && o.minimum > 0 -> add("From ${o.minimum}")
+        }
+        if (kind == AlertKind.SUB && o.resubMonths > 0) add("Resubs from ${o.resubMonths} months")
+        if (kind == AlertKind.SUB && o.skipPrime) add("No Prime")
+        if (o.length != AlertLength.NORMAL) add(o.length.title)
+        if (soundsOn) when {
+            sound == AlertSoundChoice.CUSTOM && hasFile -> add("your sound")
+            sound == AlertSoundChoice.NONE -> add("no sound")
+        }
+        if (lookCustom || o.paint != AlertPaint()) add("custom look")
+    }
+    return if (parts.isEmpty()) "Default" else parts.joinToString(" · ").replaceFirstChar { it.uppercase() }
+}
+
+/**
+ * One kind's page: whether it shows and the smallest worth showing, how long it stays up, its sound, words, picture and
+ * colours. A close-up of the card, drawn by the stream's own code, stays pinned at the top while you scroll.
+ */
+@Composable
+fun AlertKindPage(c: SetupController, nav: Navigator) {
+    val kind = AlertKindNav.kind
+    val ctx = LocalContext.current
+    val options by AlertOptionsStore.state(ctx).collectAsState()
+    PageScaffold("${kind.title} alerts", nav::back, pinned = { AlertCloseUp(c, kind, options) }) {
+        AlertKindSettings(kind, options.of(kind), soundsOn = c.overlays.alertSound, onSoundsOn = { c.updateOverlays(c.overlays.copy(alertSound = true)) })
+    }
+}
+
+/** The card alone, cropped from a full-frame draw at the stream's size, over Ink: about 96dp tall. */
+@Composable
+private fun AlertCloseUp(c: SetupController, kind: AlertKind, options: AlertOptions) {
+    val (ow, oh) = c.orientation.size(c.quality)
+    val w = if (ow >= oh) 960 else 960 * ow / oh
+    val h = if (ow >= oh) 960 * oh / ow else 960
+    val version by AlertStyles.version.collectAsState()
+    val bmp by produceState<Bitmap?>(null, kind, version, options, w, h) {
+        delay(80)
+        value = withContext(Dispatchers.Default) {
+            val full = createBitmap(w, h)
+            val canvas = Canvas(full)
+            canvas.drawColor(StreamPalette.INK)
+            val card = AlertText.card(SampleAlert.valueOf(kind.name).alert(0), options = options.of(kind))
+            val g = OverlayComposer.alertGraphic(card, w, h, onCard = false, occupied = emptySet(), options = options)
+            val m = minOf(w, h) / 50
+            val x = (g.leftPx - m).coerceAtLeast(0)
+            val y = (g.topPx - m).coerceAtLeast(0)
+            val cw = minOf(g.bitmap.width + 2 * m, w - x)
+            val ch = minOf(g.bitmap.height + 2 * m, h - y)
+            OverlayComposer.drawAlertStill(canvas, g, w, h)
+            Bitmap.createBitmap(full, x, y, cw, ch).also { if (it !== full) full.recycle() }
+        }
+    }
+    Box(
+        Modifier.fillMaxWidth().height(96.dp).padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(FbShape.small).background(Color(StreamPalette.INK))
+            .semantics { contentDescription = "Close-up of a ${kind.title.lowercase()} alert as you set it" },
+        contentAlignment = Alignment.Center,
+    ) {
+        bmp?.let { Image(it.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+    }
 }
 
 /** What Where means for [place]. */
@@ -125,9 +204,9 @@ internal fun placeHelp(place: AlertPlace): String = when (place) {
     else -> "Inside the frame's safe margin. It may cover a layer in that corner."
 }
 
-/** One kind's own settings: on/off and minimums, length, words, picture, colours. */
+/** One kind's own settings: on/off and minimums, length, sound, words, picture, colours. */
 @Composable
-private fun AlertKindSettings(kind: AlertKind, o: AlertKindOptions) {
+private fun AlertKindSettings(kind: AlertKind, o: AlertKindOptions, soundsOn: Boolean, onSoundsOn: () -> Unit) {
     val ctx = LocalContext.current
     val styles by AlertStyles.state(ctx).collectAsState()
     val t = styles[kind] ?: AlertStyleText()
@@ -147,7 +226,7 @@ private fun AlertKindSettings(kind: AlertKind, o: AlertKindOptions) {
     KeyChoice("Length", AlertLength.entries, o.length, { it.title }) { set(o.copy(length = it)) }
     HelpText("Up for ${seconds(AlertTiming.dwellMs(tier, o.length))} once it's in.")
 
-    AlertSoundRow(kind)
+    AlertSoundRow(kind, soundsOn, onSoundsOn)
 
     WordsSection(kind, t)
     PictureSection(kind, t)
@@ -245,20 +324,18 @@ private fun WordsSection(kind: AlertKind, t: AlertStyleText) {
     SectionHeader("Words")
     PlainField(
         t.label, { AlertStyles.setText(ctx, kind, it, t.message) }, "Label",
-        supporting = "The small caps word on top. Blank shows “${kind.defaultLabel}”. Up to ${AlertStyles.MAX_LABEL} characters.",
-    )
-    PlainField(
-        t.message, { AlertStyles.setText(ctx, kind, t.label, it) }, "Message",
-        supporting = "Shown instead of just the name, e.g. “{name} just joined the crew!”. Blank shows the name. " +
-            "Up to ${AlertStyles.MAX_MESSAGE} characters.",
+        supporting = "Blank shows “${kind.defaultLabel}”." + nearLimit(t.label.length, AlertStyles.MAX_LABEL),
     )
     val tags = alertPlaceholders(kind)
-    HelpText(
-        "You can use ${tags.joinToString(", ")}." +
-            (if ("{message}" in tags) " {message} is what the viewer wrote, if anything, cut to fit." else "") +
-            " Anything with nothing to fill it is left out.",
+    PlainField(
+        t.message, { AlertStyles.setText(ctx, kind, t.label, it) }, "Message",
+        supporting = "Blank shows the name. You can use ${tags.joinToString(", ")}." +
+            nearLimit(t.message.length, AlertStyles.MAX_MESSAGE),
     )
 }
+
+/** " 76/80" once a field is within 5 of its limit, else nothing: a count is noise until it matters. */
+internal fun nearLimit(length: Int, max: Int): String = if (length >= max - 5) " $length/$max" else ""
 
 @Composable
 private fun PictureSection(kind: AlertKind, t: AlertStyleText) {
@@ -307,9 +384,6 @@ private fun ColorsSection(kind: AlertKind, tier: AlertTier, p: AlertPaint, set: 
             defaultLabel = null, presetName = ::paletteName,
         )
     }
-    HelpText(
-        "A keyline goes all round the ${if (kind == AlertKind.RAID) "slab" else "plate"}; a stripe runs down its left edge.",
-    )
 }
 
 /** What the page says when the text is hard to read on its plate. */

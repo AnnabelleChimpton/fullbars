@@ -223,4 +223,27 @@ class SettingsValuesTest {
         assertEquals("phone's own", windFilterNow(lc, raw = false))
         assertEquals("strong", windFilterNow(app.irlsupreme.engine.audio.LowCut.WIND, raw = false))
     }
+
+    @Test fun `the services row says what's in use from StreamElements or Streamlabs`() {
+        assertEquals("Off", servicesValue(tips = false, webOverlay = false))
+        assertEquals("Tips", servicesValue(tips = true, webOverlay = false))
+        assertEquals("Web overlay", servicesValue(tips = false, webOverlay = true))
+        assertEquals("Tips · Web overlay", servicesValue(tips = true, webOverlay = true))
+    }
+
+    @Test fun `each alert kind's row says what's set beyond the default`() {
+        val k = app.irlsupreme.service.AlertKindOptions()
+        val builtIn = app.irlsupreme.service.AlertSoundChoice.BUILT_IN
+        assertEquals("Default", alertKindSummary(app.irlsupreme.service.AlertKind.FOLLOW, k, false, builtIn, false))
+        assertEquals("Off", alertKindSummary(app.irlsupreme.service.AlertKind.RAID, k.copy(on = false), true, builtIn, true))
+        assertEquals(
+            "From 5 · your sound",
+            alertKindSummary(app.irlsupreme.service.AlertKind.TIP, k.copy(minimum = 500), false, app.irlsupreme.service.AlertSoundChoice.CUSTOM, true),
+        )
+        assertEquals("No sound · custom look", alertKindSummary(app.irlsupreme.service.AlertKind.BITS, k, true, app.irlsupreme.service.AlertSoundChoice.NONE, false))
+        // With Alert sounds off in Overlays, no kind's row talks about its sound.
+        assertEquals("Default", alertKindSummary(app.irlsupreme.service.AlertKind.BITS, k, false, app.irlsupreme.service.AlertSoundChoice.NONE, false, soundsOn = false))
+        assertEquals("", nearLimit(10, 80))
+        assertEquals(" 76/80", nearLimit(76, 80))
+    }
 }

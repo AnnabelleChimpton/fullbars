@@ -207,12 +207,18 @@ fun GlyphButton(icon: ImageVector, contentDescription: String, onClick: () -> Un
  * the keyboard.
  */
 @Composable
-fun PageScaffold(title: String, onBack: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
-    if (isWideLayout()) WidePageScaffold(title, onBack, content) else TallPageScaffold(title, onBack, content)
+fun PageScaffold(
+    title: String,
+    onBack: () -> Unit,
+    /** Stays in view while the rows scroll under it (a close-up of what the page changes). */
+    pinned: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (isWideLayout()) WidePageScaffold(title, onBack, pinned, content) else TallPageScaffold(title, onBack, pinned, content)
 }
 
 @Composable
-private fun TallPageScaffold(title: String, onBack: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+private fun TallPageScaffold(title: String, onBack: () -> Unit, pinned: (@Composable () -> Unit)?, content: @Composable ColumnScope.() -> Unit) {
     val c = LocalFbColors.current
     Column(
         Modifier.fillMaxSize().background(c.bg)
@@ -221,12 +227,21 @@ private fun TallPageScaffold(title: String, onBack: () -> Unit, content: @Compos
         Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             GlyphButton(FbIcons.Back, contentDescription = "Back", onClick = onBack)
         }
+        if (pinned != null) {
+            Text(
+                title, style = FbType.title, color = c.text,
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 8.dp)
+                    .semantics { heading() },
+            )
+            pinned()
+            Hairline()
+        }
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState())
                 .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime).only(WindowInsetsSides.Bottom))
                 .padding(bottom = 24.dp),
         ) {
-            Text(
+            if (pinned == null) Text(
                 title, style = FbType.title, color = c.text,
                 modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 8.dp)
                     .semantics { heading() },
@@ -242,7 +257,7 @@ private fun TallPageScaffold(title: String, onBack: () -> Unit, content: @Compos
  * rows stretched across 900dp put every value a long way from its label.
  */
 @Composable
-private fun WidePageScaffold(title: String, onBack: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+private fun WidePageScaffold(title: String, onBack: () -> Unit, pinned: (@Composable () -> Unit)?, content: @Composable ColumnScope.() -> Unit) {
     val c = LocalFbColors.current
     Row(
         Modifier.fillMaxSize().background(c.bg)
@@ -256,6 +271,7 @@ private fun WidePageScaffold(title: String, onBack: () -> Unit, content: @Compos
                 title, style = FbType.title.copy(lineBreak = androidx.compose.ui.text.style.LineBreak.Heading), color = c.text,
                 modifier = Modifier.padding(start = 12.dp, end = 16.dp, top = 8.dp).semantics { heading() },
             )
+            pinned?.invoke()
         }
         Box(Modifier.fillMaxHeight().width(1.dp).background(c.rule))
         Column(

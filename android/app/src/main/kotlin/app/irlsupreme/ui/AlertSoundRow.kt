@@ -1,5 +1,12 @@
 package app.irlsupreme.ui
 
+import app.irlsupreme.ui.theme.LocalFbColors
+import app.irlsupreme.ui.theme.FbType
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
@@ -33,7 +40,7 @@ import kotlinx.coroutines.withContext
  * phone first (never on stream). For Customize alerts' page for [kind].
  */
 @Composable
-fun AlertSoundRow(kind: AlertKind) {
+fun AlertSoundRow(kind: AlertKind, soundsOn: Boolean = true, onSoundsOn: () -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val all by AlertSoundChoices.state(ctx).collectAsState()
@@ -61,47 +68,47 @@ fun AlertSoundRow(kind: AlertKind) {
     }
 
     SectionHeader("Sound")
+    if (!soundsOn) {
+        // One neutral line instead of choices that would do nothing.
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Alert sounds are off in Overlays.", style = FbType.help, color = LocalFbColors.current.text2, modifier = Modifier.weight(1f))
+            FbButton("Turn on", onSoundsOn, kind = FbButtonKind.Text)
+        }
+        return
+    }
     Column(Modifier.selectableGroup()) {
         RadioRow(
             "Built-in chime", selected = s.choice == AlertSoundChoice.BUILT_IN,
             onClick = { AlertSoundChoices.setChoice(ctx, kind, AlertSoundChoice.BUILT_IN) },
         )
+        // With no file yet, choosing it picks one.
         RadioRow(
             "Your sound",
-            supporting = if (s.hasFile) null else "Pick a sound file first.",
+            supporting = when {
+                busy -> "Getting it ready…"
+                !s.hasFile -> "Pick a sound file, up to ${AlertSoundRules.MAX_SECONDS} seconds."
+                else -> null
+            },
             selected = s.choice == AlertSoundChoice.CUSTOM && s.hasFile,
-            enabled = s.hasFile && !busy,
-            onClick = { AlertSoundChoices.setChoice(ctx, kind, AlertSoundChoice.CUSTOM) },
+            enabled = !busy,
+            onClick = { if (s.hasFile) AlertSoundChoices.setChoice(ctx, kind, AlertSoundChoice.CUSTOM) else picker.launch(AudioPick.MIME_TYPES) },
         )
         RadioRow(
             "None", selected = s.choice == AlertSoundChoice.NONE,
             onClick = { AlertSoundChoices.setChoice(ctx, kind, AlertSoundChoice.NONE) },
         )
     }
-    FbButton(
-        when {
-            busy -> "Getting it ready…"
-            s.hasFile -> "Pick another sound"
-            else -> "Pick a sound file"
-        },
-        { picker.launch(AudioPick.MIME_TYPES) },
-        Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary, enabled = !busy,
-    )
     if (s.hasFile && !busy) {
-        FbButton(
-            "Remove your sound", { player.stop(); AlertSoundChoices.remove(ctx, kind); cut = false },
-            Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text,
-        )
+        Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            FbButton("Pick another sound", { picker.launch(AudioPick.MIME_TYPES) }, kind = FbButtonKind.Text)
+            FbButton("Remove your sound", { player.stop(); AlertSoundChoices.remove(ctx, kind); cut = false }, kind = FbButtonKind.Text)
+        }
     }
     error?.let { InlineError(it, modifier = Modifier.padding(top = 8.dp)) }
-    HelpText(
-        if (cut) "Cut to its first ${AlertSoundRules.MAX_SECONDS} seconds."
-        else "mp3, m4a, ogg, wav or flac. Up to ${AlertSoundRules.MAX_SECONDS} seconds; longer sounds are cut.",
-    )
+    if (cut) HelpText("Cut to its first ${AlertSoundRules.MAX_SECONDS} seconds.")
 
     if (s.choice != AlertSoundChoice.NONE) {
         SoundFader("Volume", s.gainDb, AlertSoundRules.MIN_GAIN_DB, AlertSoundRules.MAX_GAIN_DB, { AlertSoundChoices.setGain(ctx, kind, it) })
-        preview?.let { PlayClipButton("Play", it, player, Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
-        HelpText("Play is on your phone only. On stream, the sound is mixed in as the alert appears.")
+        preview?.let { PlayClipButton("Play on phone", it, player, Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
     }
 }

@@ -1,5 +1,6 @@
 package app.irlsupreme.ui
 
+import androidx.compose.foundation.layout.Row
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.compose.foundation.Image
@@ -74,35 +75,47 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
     // Chat and Twitch alerts come from the signed-in account, with a stream key too, so say so only when signed out.
     val signedOut = c.signIn is SignIn.SignedOut || c.signIn is SignIn.Waiting
 
-    HelpText("Drawn into your stream on this phone. The preview uses sample chat and a sample follow.")
+    HelpText("Drawn into your stream on this phone.")
     OverlayPreview(c)
 
-    SectionHeader("Chat")
+    SectionHeader("On your stream")
     SwitchRow(
-        "Show chat on stream",
+        "Show chat",
         supporting = if (signedOut) "Needs Twitch sign-in." else "Your newest chat lines, a minute each.",
         checked = s.chat,
         onCheckedChange = { set(s.copy(chat = it)) },
     )
-    if (s.chat) KeyChoice("Chat corner", Corner.entries, s.chatCorner, { it.title }) { set(s.copy(chatCorner = it)) }
-
-    SectionHeader("Text")
-    SwitchRow("Show text on stream", supporting = "A line like your socials or today's plan.", checked = s.textOn, onCheckedChange = { set(s.copy(textOn = it)) })
+    if (s.chat) {
+        ChoiceLabel("Corner")
+        KeyChoice("Chat corner", Corner.entries, s.chatCorner, { it.title }) { set(s.copy(chatCorner = it)) }
+    }
+    SwitchRow("Show a line of text", supporting = "Your socials or today's plan.", checked = s.textOn, onCheckedChange = { set(s.copy(textOn = it)) })
     if (s.textOn) {
         PlainField(s.text, { set(s.copy(text = it.take(80))) }, "Text")
+        ChoiceLabel("Corner")
         KeyChoice("Text corner", Corner.entries, s.textCorner, { it.title }) { set(s.copy(textCorner = it)) }
     }
-
-    SectionHeader("Image")
     if (s.imageOn) {
+        ValueRow("Image", "On", valueIsFigure = false)
+        ChoiceLabel("Corner")
         KeyChoice("Image corner", Corner.entries, s.imageCorner, { it.title }) { set(s.copy(imageCorner = it)) }
+        ChoiceLabel("Size")
         KeyChoice("Image size", ImageSize.entries, s.imageSize, { it.title }) { set(s.copy(imageSize = it)) }
-        FbButton("Choose another image", c::pickOverlayImage, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
-        FbButton("Remove image", c::removeOverlayImage, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
+        Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            FbButton("Change image", c::pickOverlayImage, kind = FbButtonKind.Text)
+            FbButton("Remove", c::removeOverlayImage, kind = FbButtonKind.Text)
+        }
     } else {
+        FbButton("Add an image", c::pickOverlayImage, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary)
         HelpText("A logo or a sponsor's mark. Transparent PNGs look best.")
-        FbButton("Choose an image", c::pickOverlayImage, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary)
     }
+    // What happens on the cards belongs with the layers it affects, at the end of their group.
+    SwitchRow(
+        "Also show on BRB, Starting soon and Ending",
+        supporting = "Never on Privacy or the Weak signal card.",
+        checked = s.onCards,
+        onCheckedChange = { set(s.copy(onCards = it)) },
+    )
 
     SectionHeader("Alerts")
     SwitchRow(
@@ -117,8 +130,8 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
     )
     if (s.alertsOn) {
         SwitchRow(
-            "Alert sound",
-            supporting = "A short chime only viewers hear, so it won't echo into your mic.",
+            "Alert sounds",
+            supporting = "Viewers hear each kind's sound; your mic doesn't pick it up.",
             checked = s.alertSound,
             onCheckedChange = { set(s.copy(alertSound = it)) },
         )
@@ -138,8 +151,37 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
         )
     }
 
+    SectionHeader("From other services")
+    ValueRow(
+        "StreamElements or Streamlabs",
+        servicesValue(c.tipsSeJwt.isNotBlank() || c.tipsSlToken.isNotBlank(), s.browserOn),
+        valueIsFigure = false,
+        onClick = { nav.open(Screen.OVERLAY_SERVICES) },
+    )
+    // Tips ride on the alerts switch: said here too, where the switch is.
+    if ((c.tipsSeJwt.isNotBlank() || c.tipsSlToken.isNotBlank()) && !s.alertsOn) {
+        InlineError("Show alerts is off, so tips won't show.", actionLabel = "Turn on", onAction = { set(s.copy(alertsOn = true)) })
+    }
+}
+
+/** The Overlays row for StreamElements and Streamlabs: what's in use from them. */
+internal fun servicesValue(tips: Boolean, webOverlay: Boolean): String = when {
+    tips && webOverlay -> "Tips · Web overlay"
+    tips -> "Tips"
+    webOverlay -> "Web overlay"
+    else -> "Off"
+}
+
+/**
+ * Settings › Overlays › StreamElements or Streamlabs: tips as alerts (a token from your account) and a web overlay (the
+ * browser-source link you'd give OBS). Both warnings about doubled alerts stay here, beside the fields they're about.
+ */
+@Composable
+fun OverlayServicesPage(c: SetupController, nav: Navigator) = PageScaffold("StreamElements or Streamlabs", nav::back) {
+    val s = c.overlays
+    fun set(n: OverlaySettings) = c.updateOverlays(n)
     SectionHeader("Tips")
-    HelpText("Tips through StreamElements or Streamlabs show as alerts too, with the name and amount (not the message).")
+    HelpText("Tips show as alerts too, with the name and amount (not the message).")
     val tipTokenSet = c.tipsSeJwt.isNotBlank() || c.tipsSlToken.isNotBlank()
     // Tips ride on the alerts switch (StreamService skips every alert while it's off): say so rather than stay silent.
     if (tipTokenSet && !s.alertsOn) {
@@ -163,12 +205,12 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
     SectionHeader("Web overlay")
     SwitchRow(
         "Show a web overlay",
-        supporting = "The StreamElements or Streamlabs link you'd add to OBS. Its alerts show without their sounds, and it isn't in the preview.",
+        supporting = "The link you'd add to OBS. Its alerts show without their sounds, and it isn't in the preview.",
         checked = s.browserOn,
         onCheckedChange = { set(s.copy(browserOn = it)) },
     )
     if (s.browserOn) {
-        if (s.alertsOn) HelpText("If this overlay has its own alerts, turn off Show alerts above so viewers don't see each one twice.")
+        if (s.alertsOn) HelpText("If this overlay has its own alerts, turn off Show alerts in Overlays so viewers don't see each one twice.")
         SecretField(
             c.overlayUrl, c::changeOverlayUrl, "Overlay link",
             supporting = when {
@@ -178,15 +220,6 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
             },
         )
     }
-
-    SectionHeader("On scene cards")
-    SwitchRow(
-        "Also show on BRB, Starting soon and Ending",
-        supporting = "Never on Privacy or the Weak signal card.",
-        checked = s.onCards,
-        onCheckedChange = { set(s.copy(onCards = it)) },
-    )
-
 }
 
 /** What the preview shows the layers over. A preview control only: it changes nothing about the stream. */
@@ -217,9 +250,8 @@ private fun OverlayPreview(c: SetupController) {
     val h = if (ow >= oh) 640 * oh / ow else 640
     val s = c.overlays
     var on by rememberSaveable { mutableStateOf(PreviewOn.CAMERA) }
-    var sample by rememberSaveable { mutableStateOf(SampleAlert.FOLLOW) }
+    val sample = SampleAlert.FOLLOW
     val login = (c.signIn as? SignIn.SignedIn)?.login.orEmpty()
-    val player = rememberSoundPlayer()
 
     // Decoding and drawing are too slow for composition, which runs on every keystroke in the Text field. So the image
     // is decoded on IO only when it changes, and the overlay is drawn on Default once typing pauses for 100 ms (a key
@@ -246,7 +278,7 @@ private fun OverlayPreview(c: SetupController) {
         Box(
             Modifier
                 // Sideways the page is only ~340dp tall: small enough that the whole preview fits on screen.
-                .widthIn(max = if (ow >= oh) (if (wide) 400.dp else 480.dp) else (if (wide) 130.dp else 220.dp))
+                .widthIn(max = if (ow >= oh) (if (wide) 400.dp else 480.dp) else (if (wide) 130.dp else 160.dp))
                 .fillMaxWidth()
                 .aspectRatio(w.toFloat() / h)
                 .border(1.dp, colors.rule, FbShape.small)
@@ -260,17 +292,6 @@ private fun OverlayPreview(c: SetupController) {
             ground?.let { Image(it.asImageBitmap(), contentDescription = null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
             layers?.let { Image(it.asImageBitmap(), contentDescription = null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
         }
-    }
-    if (s.alertsOn) {
-        // Each kind as it looks on stream, and its chime on the phone (the stream mixes the same sound in).
-        KeyChoice("Try an alert", SampleAlert.entries, sample, { it.title }) { k ->
-            sample = k
-            if (s.alertSound) {
-                val style = sampleCard(k).style
-                player.play(app.irlsupreme.engine.audio.PcmClip(app.irlsupreme.engine.audio.AlertSounds.chime(style, 48_000, true), 48_000, 2))
-            }
-        }
-        HelpText("To see one move and hear it on stream, start a Test stream and use Test an alert in Scenes.")
     }
 }
 
