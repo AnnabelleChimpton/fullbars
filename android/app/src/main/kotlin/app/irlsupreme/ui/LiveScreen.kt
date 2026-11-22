@@ -649,7 +649,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                         Modifier
                             .fillMaxWidth()
                             .absorbTouches()
-                            .background(OverVideo.scrim)
+                            // Opaque in portrait: the plate is its own band, never figures over a busy picture.
+                            .background(OverVideo.scrim.copy(alpha = 1f))
                             .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
                             .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = bottomPad),
                     ) {

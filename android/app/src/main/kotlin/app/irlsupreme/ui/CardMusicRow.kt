@@ -1,5 +1,7 @@
 package app.irlsupreme.ui
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -63,39 +65,43 @@ fun CardMusicRow(sceneName: String) {
     LaunchedEffect(s.volumeDb, s.gainDb) { preview.setGainDb(s.gainDb + s.volumeDb) }
     LaunchedEffect(sceneName) { preview.stop() }
 
-    SectionHeader("Music", trailing = if (s.hasFile) CardMusicRules.lengthText(s.durationMs) else null)
-    HelpText("Plays under your voice while this card is up, round and round. It fades in and out as the card comes and goes.")
-    FbButton(
-        when {
-            busy -> if (progress > 0f) "Getting it ready… ${(progress * 100).toInt()}%" else "Getting it ready…"
-            s.hasFile -> "Pick other music"
-            else -> "Pick a music file"
-        },
-        { picker.launch(AudioPick.MIME_TYPES) },
-        Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary, enabled = !busy,
-    )
-    error?.let { InlineError(it, modifier = Modifier.padding(top = 8.dp)) }
-    if (s.hasFile && !busy) {
-        SoundFader("Volume", s.volumeDb, CardMusicRules.MIN_VOLUME_DB, CardMusicRules.MAX_VOLUME_DB, { CardMusic.setVolume(ctx, sceneName, it) })
-        SwitchRow(
-            "Mic while music plays",
-            supporting = if (s.micOn) "Viewers hear you over the music." else "Viewers hear only the music.",
-            checked = s.micOn,
-            onCheckedChange = { CardMusic.setMicOn(ctx, sceneName, it) },
-        )
-        val playing by preview.playing.collectAsState()
+    if (!s.hasFile) {
         FbButton(
-            if (playing) "Stop" else "Play",
-            { if (playing) preview.stop() else preview.play(ctx, CardMusic.fileOf(ctx, s), s.startFrame, s.gainDb + s.volumeDb) },
-            Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary,
+            if (busy) (if (progress > 0f) "Getting it ready… ${(progress * 100).toInt()}%" else "Getting it ready…") else "Add music",
+            { picker.launch(AudioPick.MIME_TYPES) },
+            Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary, enabled = !busy,
         )
-        FbButton(
-            "Remove music", { preview.stop(); CardMusic.remove(ctx, sceneName) },
-            Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text,
-        )
+        error?.let { InlineError(it, modifier = Modifier.padding(top = 8.dp)) }
+        HelpText("Plays under your voice while this card is up. ${CardMusicRules.COPYRIGHT_NOTE}")
+        return
     }
-    HelpText(CardMusicRules.COPYRIGHT_NOTE)
+    // Picked: one row that says what it is and whether your mic stays on, opening to the rest.
+    var open by rememberSaveable(sceneName) { mutableStateOf(false) }
+    ExpandRow(musicSummary(s.durationMs, s.micOn), open, onToggle = { open = !open })
+    if (!open) return
+    error?.let { InlineError(it, modifier = Modifier.padding(top = 8.dp)) }
+    SoundFader("Volume", s.volumeDb, CardMusicRules.MIN_VOLUME_DB, CardMusicRules.MAX_VOLUME_DB, { CardMusic.setVolume(ctx, sceneName, it) })
+    SwitchRow(
+        "Mic while music plays",
+        supporting = if (s.micOn) "Viewers hear you over the music." else "Viewers hear only the music.",
+        checked = s.micOn,
+        onCheckedChange = { CardMusic.setMicOn(ctx, sceneName, it) },
+    )
+    val playing by preview.playing.collectAsState()
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        FbButton(
+            if (playing) "Stop" else "Play on phone",
+            { if (playing) preview.stop() else preview.play(ctx, CardMusic.fileOf(ctx, s), s.startFrame, s.gainDb + s.volumeDb) },
+            kind = FbButtonKind.Secondary,
+        )
+        FbButton(if (busy) "Getting it ready…" else "Change", { picker.launch(AudioPick.MIME_TYPES) }, kind = FbButtonKind.Text, enabled = !busy)
+        FbButton("Remove", { preview.stop(); CardMusic.remove(ctx, sceneName) }, kind = FbButtonKind.Text)
+    }
 }
+
+/** The music row once there's music: "Music · 2:31, mic on". The mic's state shows without opening it. */
+internal fun musicSummary(durationMs: Long, micOn: Boolean): String =
+    "Music · ${CardMusicRules.lengthText(durationMs)}, mic ${if (micOn) "on" else "off"}"
 
 /** Plays a card's music on the phone, looping, until stopped; stops when the page goes. */
 @Composable

@@ -76,6 +76,7 @@ import app.irlsupreme.engine.video.Slates
 import app.irlsupreme.engine.video.StreamPalette
 import app.irlsupreme.service.CardBackground
 import app.irlsupreme.service.CardRules
+import app.irlsupreme.service.CardElements
 import app.irlsupreme.service.CardStore
 import app.irlsupreme.service.CardText
 import app.irlsupreme.service.ColorMath
@@ -180,6 +181,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     val t = texts[card] ?: CardText()
     val scene = SceneNames.sceneOf(card)
     var deleting by remember { mutableStateOf(false) }
+    var resetting by remember { mutableStateOf(false) }
     // The scene on air, if a stream runs: that one can't be deleted.
     val engine = LocalStreamEngine.current
     val engineState by remember(engine) { engine?.state ?: MutableStateFlow(EngineState()) }.collectAsState()
@@ -207,19 +209,30 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { CardStore.apply(ctx) } }
 
     HelpText("What viewers see instead of your camera.")
-    KeyChoice("Card", cardOrder(created), card, { cardName(it, created) }) { picked = it.name; pictureError = false; backgroundError = null }
+    // The cards you choose (and your own scenes), then the three that switch on by themselves.
+    val order = cardOrder(created)
+    val chosenCards: List<Slates.Card?> = order.filter { !isAutomatic(it) }
+    val autoCards: List<Slates.Card?> = order.filter { isAutomatic(it) }
+    fun pick(next: Slates.Card?) { if (next != null) { picked = next.name; pictureError = false; backgroundError = null } }
+    CardChoiceLabel("Card")
+    KeyChoice("Card", chosenCards, card.takeIf { it in chosenCards }, { cardName(it!!, created) }, ::pick)
     if (created.size < Scene.CUSTOM.size) {
         FbButton(
-            "Add a scene of your own", {
-                CardStore.createScene(ctx)?.let { picked = it.name; pictureError = false; backgroundError = null }
-            },
-            Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text,
+            "+ Scene", { CardStore.createScene(ctx)?.let(::pick) },
+            Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Secondary,
         )
-        if (created.isEmpty()) HelpText("Up to ${Scene.CUSTOM.size}, for things like Lunch or Q&A. They show in Scenes, on the mod remote and with !scene.")
     }
+    CardChoiceLabel("Automatic")
+    KeyChoice("Automatic card", autoCards, card.takeIf { it in autoCards }, { cardName(it!!, created) }, ::pick)
 
     CardPreview(c, card, t)
-    HelpText("The label and sound line stay unless you use a web page.")
+    // Signal lost and Weak signal are drawn by your server, from a still this phone sends: said once, here.
+    val still = !CardRules.canUseWebPage(card)
+    HelpText(
+        if (still) "Your server shows this card as a still, so a GIF shows its first frame and it can't show timers, chat " +
+            "or a web page. Changes show from your next stream."
+        else "The label and sound line stay unless you use a web page.",
+    )
 
     // --- Your own scene: its name ---
     if (scene != null && card.isCustom) {
@@ -228,8 +241,7 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         val shown = SceneNames.name(scene, created)
         NameField(
             t.name, { CardStore.setSceneName(ctx, card, it) },
-            supporting = problem ?: "Shows in Scenes and on the mod remote. Mods can type !\u2060scene\u00A0${shown.lowercase()}. " +
-                "Up to ${SceneNames.MAX_NAME} characters.",
+            supporting = problem ?: "Shows in Scenes and on the mod remote. Mods can type !⁠scene ${shown.lowercase()}.",
             isError = problem != null,
             placeholder = SceneNames.defaultName(scene),
         )
@@ -240,57 +252,35 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     val ownHeadline = if (scene != null && card.isCustom) SceneNames.name(scene, created) else card.headline
     PlainField(
         t.headline, { CardStore.setText(ctx, card, it, t.sub) }, "Headline",
-        supporting = "Blank shows “$ownHeadline”. Up to ${CardStore.MAX_HEADLINE} characters.",
+        supporting = "Blank shows “$ownHeadline”." + nearLimit(t.headline.length, CardStore.MAX_HEADLINE),
     )
     val ownSub = Slates.copy(card, SlateAudio.ON, CardStyle.DEFAULT).sub
     PlainField(
         t.sub, { CardStore.setText(ctx, card, t.headline, it) }, "Line under it",
-        supporting = (if (ownSub.isEmpty()) "Blank shows no line." else "Blank shows “$ownSub”.") + " Up to ${CardStore.MAX_SUB} characters.",
+        supporting = (if (ownSub.isEmpty()) "Blank shows no line." else "Blank shows “$ownSub”.") + nearLimit(t.sub.length, CardStore.MAX_SUB),
     )
-    CardChoiceLabel("Font")
-    FontChoice(t.font) { CardStore.setFont(ctx, card, it) }
-    if (!CardTypefaces.shows(t.font)) HelpText("${t.font.label} isn't on this phone, so it shows as Sans.")
-    CardChoiceLabel("Size")
-    KeyChoice("Text size", CardTextSize.entries, t.textSize, { it.label }) { CardStore.setTextSize(ctx, card, it) }
-    CardChoiceLabel("Text colour")
-    ColorChoice("Text colour", t.textColor, TEXT_PRESETS, { CardStore.setTextColor(ctx, card, it) }, defaultLabel = "Automatic", presetName = ::textPresetName)
-    HelpText(
-        t.textColor?.let { if (it in TEXT_PRESETS) "${textPresetName(it)}." else colorHelp(it, preset = false) }
-            ?: "Bone on dark cards, Ink on light ones.",
-    )
-    // Said plainly when the words would be hard to read; the background's colour is known once it's loaded.
-    val contrast by produceState<String?>(null, card, t) {
-        repeat(3) {
-            value = CardRules.contrastProblem(card, t, CardStore.backgroundTone(card))
-            delay(500)
-        }
-    }
-    contrast?.let { Caution(it) }
 
     // --- Picture ---
     SectionHeader("Picture")
-    HelpText(
-        if (isAutomatic(card)) "Shown in place of the symbol. The coloured rule under it stays."
-        else "Shown with your headline. Square pictures and transparent PNGs look best.",
-    )
+    HelpText(if (isAutomatic(card)) "Shown in place of the symbol." else "Shown with your headline. Square or transparent PNGs look best.")
     if (t.hasPicture) {
-        FbButton("Choose another picture", { pickImage(picker) }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
-        FbButton("Remove picture", { CardStore.clearPicture(ctx, card) }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
+        Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            FbButton("Change picture", { pickImage(picker) }, kind = FbButtonKind.Text)
+            FbButton("Remove", { CardStore.clearPicture(ctx, card) }, kind = FbButtonKind.Text)
+        }
     } else {
         FbButton("Add a picture", { pickImage(picker) }, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary)
     }
     if (pictureError) InlineError("That picture couldn't be opened. Try another.", modifier = Modifier.padding(top = 8.dp))
 
     // --- Background ---
-    SectionHeader("Background")
-    HelpText(
-        if (CardRules.loopsGif(card)) "Behind the whole card, cropped to fill. A GIF loops."
-        else "Behind the whole card, cropped to fill. Your server shows this card as a still, so a GIF shows its first frame.",
-    )
+    SectionHeader("Background", trailing = if (t.background != CardBackground.NONE) backgroundValue(card, t.background) else null)
+    HelpText("Behind the whole card, cropped to fill." + if (CardRules.loopsGif(card)) " A GIF loops." else "")
     if (t.background != CardBackground.NONE) {
-        ValueRow("Background", backgroundValue(card, t.background), valueIsFigure = false)
-        FbButton("Choose another background", { pickImage(backgroundPicker) }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text, enabled = !backgroundBusy)
-        FbButton("Remove background", { CardStore.clearBackground(ctx, card); backgroundError = null }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text, enabled = !backgroundBusy)
+        Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            FbButton("Change background", { pickImage(backgroundPicker) }, kind = FbButtonKind.Text, enabled = !backgroundBusy)
+            FbButton("Remove", { CardStore.clearBackground(ctx, card); backgroundError = null }, kind = FbButtonKind.Text, enabled = !backgroundBusy)
+        }
         CardChoiceLabel("Darken it")
         KeyChoice("Darken the background", CardRules.DIM_STEPS, CardRules.snapDim(t.dimPercent), ::dimLabel) { CardStore.setDim(ctx, card, it) }
         HelpText("Ink laid over the background so your words stay readable.")
@@ -302,61 +292,90 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
     }
     backgroundError?.let { InlineError(it, modifier = Modifier.padding(top = 8.dp)) }
 
-    // --- Layout and accent ---
-    SectionHeader("Layout")
-    Column(Modifier.fillMaxWidth().semantics { contentDescription = "Layout" }.selectableGroup()) {
-        CardLayout.entries.forEach { l ->
-            LayoutRow(l, selected = t.layout == l, portrait = c.orientation == StreamOrientation.PORTRAIT) { CardStore.setLayout(ctx, card, l) }
+    // --- Style: folded, its row naming what's chosen; the contrast warning stays out where it's seen ---
+    var styleOpen by rememberSaveable(card) { mutableStateOf(false) }
+    Spacer(Modifier.height(16.dp))
+    ExpandRow(styleSummary(t), styleOpen, onToggle = { styleOpen = !styleOpen })
+    // Said plainly when the words would be hard to read; the background's colour is known once it's loaded.
+    val contrast by produceState<String?>(null, card, t) {
+        repeat(3) {
+            value = CardRules.contrastProblem(card, t, CardStore.backgroundTone(card))
+            delay(500)
         }
     }
-    if (t.layout == CardLayout.FULL_PICTURE && !t.hasPicture) HelpText("This layout is built around your picture. Add one under Picture.")
-    CardChoiceLabel("Accent")
-    ColorChoice("Accent", t.accent, Slates.ACCENTS, { CardStore.setAccent(ctx, card, it) }, presetName = CardRules::accentName)
-    HelpText(t.accent?.let { colorHelp(it, preset = it in Slates.ACCENTS) } ?: "The card's own Ink and Bone.")
-
-    // --- Live ---
-    SectionHeader("Live")
-    if (!CardRules.hasLiveElements(card)) {
-        HelpText("Your server shows this card as a still, so it can't show timers or chat.")
-    } else {
-        val e = t.elements
-        if (CardRules.hasCountdown(card)) {
-            CardChoiceLabel("Countdown")
-            KeyChoice("Countdown", CardRules.COUNTDOWN_CHOICES, e.countdownMinutes.takeIf { it in CardRules.COUNTDOWN_CHOICES } ?: 0, ::countdownLabel) {
-                CardStore.setElements(ctx, card, e.copy(countdownMinutes = it))
+    contrast?.let { Caution(it) }
+    if (styleOpen) {
+        CardChoiceLabel("Font")
+        FontChoice(t.font) { CardStore.setFont(ctx, card, it) }
+        if (!CardTypefaces.shows(t.font)) HelpText("${t.font.label} isn't on this phone, so it shows as Sans.")
+        CardChoiceLabel("Size")
+        KeyChoice("Text size", CardTextSize.entries, t.textSize, { it.label }) { CardStore.setTextSize(ctx, card, it) }
+        CardChoiceLabel("Text colour")
+        ColorChoice("Text colour", t.textColor, TEXT_PRESETS, { CardStore.setTextColor(ctx, card, it) }, defaultLabel = "Automatic", presetName = ::textPresetName)
+        HelpText(
+            t.textColor?.let { if (it in TEXT_PRESETS) "${textPresetName(it)}." else colorHelp(it, preset = false) }
+                ?: "Bone on dark cards, Ink on light ones.",
+        )
+        CardChoiceLabel("Accent")
+        ColorChoice("Accent", t.accent, Slates.ACCENTS, { CardStore.setAccent(ctx, card, it) }, presetName = CardRules::accentName)
+        HelpText(t.accent?.let { colorHelp(it, preset = it in Slates.ACCENTS) } ?: "The card's own Ink and Bone.")
+        CardChoiceLabel("Layout")
+        Column(Modifier.fillMaxWidth().semantics { contentDescription = "Layout" }.selectableGroup()) {
+            CardLayout.entries.forEach { l ->
+                LayoutRow(l, selected = t.layout == l, portrait = c.orientation == StreamOrientation.PORTRAIT) { CardStore.setLayout(ctx, card, l) }
             }
-            HelpText("Counts down from when the card appears: “${CardRules.countdownExample(card)}”.")
         }
-        SwitchRow("Show time away", "Counts up how long this card has been up.", checked = e.showTimeAway) {
-            CardStore.setElements(ctx, card, e.copy(showTimeAway = it))
-        }
-        SwitchRow("Show chat on this card", "Even when chat is off on cards in Overlays.", checked = e.showChat) {
-            CardStore.setElements(ctx, card, e.copy(showChat = it))
+        if (t.layout == CardLayout.FULL_PICTURE && !t.hasPicture) HelpText("This layout is built around your picture. Add one under Picture.")
+    }
+
+    // --- While it's up: timers, chat and music, for the cards that can have them ---
+    if (CardRules.hasLiveElements(card)) {
+        val e = t.elements
+        val music by app.irlsupreme.service.CardMusic.state(ctx).collectAsState()
+        val hasMusic = scene?.let { music[it.name]?.hasFile } == true
+        var upOpen by rememberSaveable(card) { mutableStateOf(false) }
+        ExpandRow(whileUpSummary(e, CardRules.hasCountdown(card), hasMusic), upOpen, onToggle = { upOpen = !upOpen })
+        if (upOpen) {
+            if (CardRules.hasCountdown(card)) {
+                CardChoiceLabel("Countdown")
+                KeyChoice("Countdown", CardRules.COUNTDOWN_CHOICES, e.countdownMinutes.takeIf { it in CardRules.COUNTDOWN_CHOICES } ?: 0, ::countdownLabel) {
+                    CardStore.setElements(ctx, card, e.copy(countdownMinutes = it))
+                }
+                HelpText("Counts down from when the card appears: “${CardRules.countdownExample(card)}”.")
+            }
+            SwitchRow("Show time away", "Counts up how long this card has been up.", checked = e.showTimeAway) {
+                CardStore.setElements(ctx, card, e.copy(showTimeAway = it))
+            }
+            SwitchRow("Show chat on this card", "Even when chat is off on cards in Overlays.", checked = e.showChat) {
+                CardStore.setElements(ctx, card, e.copy(showChat = it))
+            }
+            // Music: chosen cards and your own scenes only (nothing for the automatic ones).
+            scene?.let { CardMusicRow(it.name) }
         }
     }
-    PlainField(
-        socials, { CardStore.setSocials(ctx, it) }, "Socials line",
-        supporting = "Every card your phone draws, along the bottom. Like “@you everywhere”. Up to ${CardRules.MAX_SOCIALS} characters.",
-    )
-
-    // --- Music: chosen cards and your own scenes only (nothing for the automatic ones) ---
-    scene?.let { CardMusicRow(it.name) }
 
     // --- Web page ---
-    SectionHeader("Web page")
-    if (!CardRules.canUseWebPage(card)) {
-        HelpText("Signal lost and Weak signal can't use a web page: your server shows them as a still.")
-    } else {
-        HelpText("A page shown instead of this whole card on stream, label and sound line included. A StreamElements scene or your own HTML.")
-        WebUrlField(t.webUrl) { CardStore.setWebUrl(ctx, card, it) }
+    if (!still) {
+        var webOpen by rememberSaveable(card) { mutableStateOf(false) }
+        ExpandRow("Web page · ${if (t.webUrl.isBlank()) "None" else "On"}", webOpen, onToggle = { webOpen = !webOpen })
+        if (webOpen) {
+            HelpText("A page shown instead of this whole card on stream, label and sound line included. A StreamElements scene or your own HTML.")
+            WebUrlField(t.webUrl) { CardStore.setWebUrl(ctx, card, it) }
+        }
     }
 
     if (t.isCustom) {
         Spacer(Modifier.height(16.dp))
         Hairline(color = colors.rule)
-        FbButton(
-            "Back to the card's own look", { CardStore.reset(ctx, card); pictureError = false; backgroundError = null },
-            Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Text,
+        FbButton("Reset this card", { resetting = true }, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Text)
+    }
+    if (resetting) {
+        ConfirmDialog(
+            title = "Reset ${cardName(card, created)}?",
+            text = "Its words, look, picture, background and web page go back to the default. Music stays.",
+            confirmLabel = "Reset",
+            onConfirm = { CardStore.reset(ctx, card); pictureError = false; backgroundError = null },
+            onDismiss = { resetting = false },
         )
     }
     if (card.isCustom) {
@@ -390,12 +409,29 @@ fun CardsPage(c: SetupController, nav: Navigator) = PageScaffold("Scene cards", 
         )
     }
 
-    Footnote(
-        null,
-        "Signal lost and Weak signal are also sent to your server when each stream starts, so viewers see your " +
-            "version during dropouts too. Changes here show from your next stream.",
-        Modifier.padding(top = 16.dp),
+    // --- Every card: not per card, so set apart at the end ---
+    SectionHeader("On every card")
+    PlainField(
+        socials, { CardStore.setSocials(ctx, it) }, "Socials line",
+        supporting = "Along the bottom of every card your phone draws (not Signal lost or Weak signal). Like “@you everywhere”." +
+            nearLimit(socials.length, CardRules.MAX_SOCIALS),
     )
+}
+
+/** The Style row: what's chosen, so nothing in the fold is a surprise ("Style · Fullbars, Normal, Classic, no accent"). */
+internal fun styleSummary(t: CardText): String =
+    "Style · ${t.font.label}, ${t.textSize.label}, ${layoutName(t.layout)}, " +
+        (t.accent?.let { CardRules.accentName(it) } ?: "no accent")
+
+/** The "While it's up" row: what runs on the card while it's on air, or that nothing does. */
+internal fun whileUpSummary(e: CardElements, countdown: Boolean, music: Boolean): String {
+    val on = buildList {
+        if (countdown && e.countdownMinutes > 0) add("${e.countdownMinutes} min countdown")
+        if (e.showTimeAway) add("time away")
+        if (e.showChat) add("chat")
+        if (music) add("music")
+    }
+    return "While it's up · " + if (on.isEmpty()) "Nothing" else on.joinToString(", ")
 }
 
 /** A small visible name over a set of keys ("Countdown"), in the row face. The keys carry the same name for TalkBack. */
@@ -581,7 +617,7 @@ private fun CardPreview(c: SetupController, card: Slates.Card, t: CardText) {
     Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), contentAlignment = Alignment.CenterStart) {
         Box(
             Modifier
-                .widthIn(max = if (portrait) (if (wide) 150.dp else 220.dp) else (if (wide) 400.dp else 480.dp))
+                .widthIn(max = if (portrait) 150.dp else (if (wide) 400.dp else 480.dp))
                 .fillMaxWidth()
                 .aspectRatio(w.toFloat() / h)
                 .border(1.dp, colors.rule, FbShape.small)

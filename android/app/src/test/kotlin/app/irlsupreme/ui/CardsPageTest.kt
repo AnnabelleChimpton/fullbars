@@ -89,4 +89,19 @@ class CardsPageTest {
         assertEquals("GIF, first frame", backgroundValue(Card.WEAK_SIGNAL, CardBackground.GIF))
         assertEquals("Picture", backgroundValue(Card.SIGNAL_LOST, CardBackground.STILL))
     }
+
+    @Test fun `folded card sections name what's chosen, so nothing is hidden by surprise`() {
+        val t = app.irlsupreme.service.CardText()
+        assertTrue(styleSummary(t).startsWith("Style · "))
+        assertTrue(styleSummary(t).endsWith(", no accent"))
+        val e = app.irlsupreme.service.CardElements()
+        assertEquals("While it's up · Nothing", whileUpSummary(e, countdown = true, music = false))
+        assertEquals(
+            "While it's up · 5 min countdown, time away, chat, music",
+            whileUpSummary(e.copy(countdownMinutes = 5, showTimeAway = true, showChat = true), countdown = true, music = true),
+        )
+        // A card without a countdown never says it has one.
+        assertEquals("While it's up · Nothing", whileUpSummary(e.copy(countdownMinutes = 5), countdown = false, music = false))
+        assertEquals("Music · 2:31, mic off", musicSummary(151_000, micOn = false))
+    }
 }
