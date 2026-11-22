@@ -56,6 +56,9 @@ internal class MixStage(
     private var outHold = 0
     private var outFadeLeft = 0
 
+    /** Live captions' feed: gets the voice each chunk, before alert sounds, music and the mute. Read once per chunk. */
+    @Volatile var voiceTap: app.irlsupreme.engine.captions.VoiceTap? = null
+
     /** Card music, when the stream has a player; null in tests that don't use it. Read once per chunk. */
     @Volatile var music: MusicSource? = null
     /** The voice's (and alert sounds') own mute, before the limiter: used only while music plays. 1 = heard. */
@@ -211,6 +214,9 @@ internal class MixStage(
         val ducking = micDuck != 1f || duckTarget != 1f
         // The meter reads the voice as it was before either, like the plain mute (after the limiter) always has.
         val meter = if (muting || ducking) { System.arraycopy(voice, 0, meterF, 0, n); meterF } else null
+        // Captions hear the voice alone (never the alert sounds or the music), and only what viewers can hear: a mute,
+        // or music that turns the mic off, sends them silence.
+        voiceTap?.onVoice(voice, frames, channels, audible = !muted && duckTarget == 1f)
         if (muting) preMute = rampF(voice, fx, frames, preMute, preTarget, MUTE_RAMP_FRAMES)
         if (ducking) micDuck = rampF(voice, null, frames, micDuck, duckTarget, DUCK_FRAMES)
         if (musicOn) {

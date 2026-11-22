@@ -87,6 +87,14 @@ class Compositor(
         pendingAlert.getAndSet(AlertUpdate(g, System.nanoTime()))?.graphic?.bitmap?.recycle()
     }
 
+    private val pendingCaption = AtomicReference<CaptionUpdate?>(null)
+    private class CaptionUpdate(val graphic: app.irlsupreme.engine.captions.CaptionGraphic?)
+
+    /** The live caption strip to show from the next frame (null: none). The compositor takes the bitmap. */
+    fun showCaption(g: app.irlsupreme.engine.captions.CaptionGraphic?) {
+        pendingCaption.getAndSet(CaptionUpdate(g))?.graphic?.bitmap?.recycle()
+    }
+
     /** False while what's on stream holds alerts back (Privacy, Weak signal, Camera lost); see [SceneRules]. */
     @Volatile var alertsAllowed = true
         private set
@@ -344,6 +352,8 @@ class Compositor(
         val slate: SlateDrawer,
         val alert: AlertLayer,
     ) {
+        /** The live caption strip. */
+        val caption = CaptionLayer(main.width, main.height)
         /**
          * Cards are drawn on first use and kept for the stream (a 1080p card is ~8 MB of GPU memory), one slot per card
          * and [CardLayer], indexed `card.ordinal * layers + layer.ordinal` so the per-tick lookup allocates nothing. A
@@ -778,6 +788,10 @@ class Compositor(
         alertsAllowed = allowAlerts
         pendingAlert.getAndSet(null)?.let { a -> guarded("alert upload", Unit) { g.alert.offer(a.graphic, a.atNs) } }
         if (!allowAlerts && g.alert.showing) g.alert.free() // held scenes: the alert goes at once, never under the card
+        pendingCaption.getAndSet(null)?.let { c -> guarded("caption upload", Unit) { g.caption.offer(c.graphic) } }
+        // Captions go wherever the voice can be heard, cards included; never on Privacy (the mic is off), nor on Weak
+        // signal (that card must stay cheap, and its audio may be breaking up).
+        val allowCaptions = sceneCard != Slates.Card.PRIVACY && sceneCard != Slates.Card.WEAK_SIGNAL
         val layersAllowed = when (sceneCard) {
             null -> true
             Slates.Card.PRIVACY, Slates.Card.WEAK_SIGNAL -> false // privacy; and the weak card must stay cheap
@@ -795,7 +809,12 @@ class Compositor(
         fun drawAlert(vpW: Int, vpH: Int) {
             if (allowAlerts) guarded("alert", Unit) { g.alert.draw(now, vpW, vpH, cut = thermalRung >= 2) }
         }
+        /** Captions go over the overlays and under alerts (an alert is brief; the words carry on beneath it). */
+        fun drawCaption() {
+            if (allowCaptions) guarded("caption", Unit) { g.caption.draw() }
+        }
         drawLayers()
+        drawCaption()
         drawAlert(config.width, config.height)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         pruneBackdrops(g, now)
@@ -863,6 +882,7 @@ class Compositor(
                 GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
                 g.programOes.draw(cam.texture, cam.previewTexMatrix)
                 drawLayers()
+                drawCaption()
                 drawAlert(g.previewFbo.width, g.previewFbo.height)
             } else {
                 g.program2d.draw(g.main.texture)
@@ -1361,6 +1381,8 @@ class Compositor(
         runCatching { g.slate.release() }
         runCatching { g.alert.free() }
         pendingAlert.getAndSet(null)?.graphic?.bitmap?.recycle()
+        runCatching { g.caption.free() }
+        pendingCaption.getAndSet(null)?.graphic?.bitmap?.recycle()
         runCatching { g.browser?.release(wait = false) }
         for (b in g.retiring) runCatching { b.release(wait = false) }
         browserRef = null

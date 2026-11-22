@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
@@ -84,6 +85,11 @@ internal fun ScenesSheet(
     alertsOn: Boolean = true,
     /** Turns the Pocket screen on (null hides the row). */
     onPocketScreen: (() -> Unit)? = null,
+    /** Live captions: whether they're on, and what the engine says about them (null: not started). */
+    captionsOn: Boolean = false,
+    captionStatus: app.irlsupreme.engine.CaptionStatus? = null,
+    /** Turns captions on or off (null hides the row). */
+    onCaptions: ((Boolean) -> Unit)? = null,
 ) {
     val c = LocalFbColors.current
     Column(
@@ -110,10 +116,43 @@ internal fun ScenesSheet(
         }
         Hairline(color = c.rule)
         FlipRow(flipValue, onFlip)
+        if (onCaptions != null) {
+            Hairline(color = c.rule)
+            CaptionsRow(captionsOn, captionStatus, onCaptions)
+        }
         if (onPocketScreen != null) {
             Hairline(color = c.rule)
             PocketRow(onPocketScreen)
         }
+    }
+}
+
+/** What the Captions row says: off, or how they're doing. */
+internal fun captionsValue(on: Boolean, status: app.irlsupreme.engine.CaptionStatus?): String = when {
+    !on -> "Off"
+    status == app.irlsupreme.engine.CaptionStatus.STARTING -> "Starting"
+    status == app.irlsupreme.engine.CaptionStatus.PAUSED -> "Paused · phone hot"
+    status == app.irlsupreme.engine.CaptionStatus.UNAVAILABLE -> "Not available"
+    else -> "On"
+}
+
+/** "Captions": live captions of what viewers hear you say, drawn on the stream; a switch. */
+@Composable
+private fun CaptionsRow(on: Boolean, status: app.irlsupreme.engine.CaptionStatus?, onChange: (Boolean) -> Unit) {
+    val c = LocalFbColors.current
+    val value = captionsValue(on, status)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .toggleable(value = on, role = Role.Switch, onValueChange = onChange)
+            .semantics { contentDescription = "Captions"; stateDescription = value }
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text("Captions", style = FbType.row, color = c.text, modifier = Modifier.clearAndSetSemantics {})
+        Text(value, style = FbType.rowValue, color = c.text2, modifier = Modifier.clearAndSetSemantics {})
     }
 }
 

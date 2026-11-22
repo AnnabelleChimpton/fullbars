@@ -62,6 +62,9 @@ class StreamEngine(private val context: Context) {
     @Volatile private var mixRing: app.irlsupreme.engine.audio.PcmRing? = null
     /** This stream's card music ([setCardMusic]); null while not streaming. */
     @Volatile private var music: app.irlsupreme.engine.audio.CardMusicPlayer? = null
+    /** Live captions while they're on. */
+    @Volatile private var captions: app.irlsupreme.engine.captions.Captions? = null
+    @Volatile private var captionStatus: CaptionStatus? = null
     @Volatile private var output: StreamOutput? = null
     @Volatile private var monitor: ScheduledExecutorService? = null
     private var ingest: RtmpIngestServer? = null
@@ -285,6 +288,7 @@ class StreamEngine(private val context: Context) {
             it.start()
         }
         (config.camera as? CameraInput.Rtmp)?.let { startIngest(it, config) }
+        config.captions?.let { startCaptions(it, config) }
         monitor = Executors.newSingleThreadScheduledExecutor { Thread(it, "engine-monitor") }.also {
             it.scheduleWithFixedDelay(::tick, 500, 500, TimeUnit.MILLISECONDS)
             it.scheduleWithFixedDelay(::abrTick, 250, 250, TimeUnit.MILLISECONDS)
@@ -433,6 +437,7 @@ class StreamEngine(private val context: Context) {
         output?.stop(); output = null
         abr = null
         rtmpAbr = null
+        stopCaptions()
         audio?.stop(); audio = null
         music?.stop(); music = null
         _micLevel.value = app.irlsupreme.engine.audio.MicLevel.SILENT
@@ -737,7 +742,55 @@ class StreamEngine(private val context: Context) {
     /** Stop feeding the preview (a dark pocket screen) without detaching it; the stream is untouched. */
     fun setPreviewSuppressed(on: Boolean) { compositor?.previewSuppressed = on }
 
+    /**
+     * Live captions on ([options]) or off (null), mid-stream. They hear only the voice viewers hear, are recognised
+     * on the phone, and are drawn over the picture (not on Privacy or Weak signal).
+     */
+    @Synchronized
+    fun setCaptions(options: CaptionOptions?) {
+        val cfg = config ?: return
+        if (options == captions?.options) return
+        stopCaptions()
+        if (options != null && compositor != null) startCaptions(options, cfg)
+        publish()
+    }
+
+    private fun startCaptions(options: CaptionOptions, cfg: StreamConfig) {
+        if (android.os.Build.VERSION.SDK_INT < 33) {
+            captionStatus = CaptionStatus.UNAVAILABLE
+            note("captions unavailable: they need Android 13")
+            return
+        }
+        val c = app.irlsupreme.engine.captions.Captions(
+            context, cfg.audioSampleRate, cfg.width, cfg.height, options,
+            show = { g -> compositor?.showCaption(g) ?: g?.bitmap?.recycle() },
+            onStatus = { st, why ->
+                if (st != captionStatus) note("captions ${st.name.lowercase()}${why?.let { ": $it" } ?: ""}")
+                captionStatus = st
+            },
+        )
+        captions = c
+        captionStatus = CaptionStatus.STARTING
+        audio?.voiceTap = c.tap
+        c.start()
+        note("captions on (${options.language}, ${options.size.name.lowercase()}, ${options.position.name.lowercase()})")
+    }
+
+    /** Debug builds: feeds a 16 kHz mono 16-bit clip to live captions in place of the voice (it isn't streamed). */
+    fun debugCaptionClip(pcm: ByteArray) { captions?.feedClip(pcm) }
+
+    private fun stopCaptions() {
+        if (captions == null) captionStatus = null
+        val c = captions ?: return
+        captions = null
+        captionStatus = null
+        audio?.voiceTap = null
+        c.stop()
+        note("captions off${if (c.restarts > 0) " (recogniser restarted ${c.restarts}x)" else ""}")
+    }
+
     fun setMicMuted(muted: Boolean) {
+        if (muted) captions?.clear()
         audio?.muted = muted
         updateSlateAudio()
         publish()
@@ -860,6 +913,7 @@ class StreamEngine(private val context: Context) {
     private fun applyThermal(now: Long, status: Int, comp: Compositor, immediate: Boolean) {
         val cfg = config ?: return
         countRungTime(now, comp.thermalRung)
+        captions?.setPaused(comp.thermalRung >= CAPTIONS_OFF_RUNG)
         val low = ThermalLadder.batteryLow(batteryPct, batteryCharging)
         val rung = if (immediate) ladder.stepUp(status, headroom, low) else ladder.update(now, status, headroom, low)
         if (rung != comp.thermalRung) {
@@ -1063,6 +1117,7 @@ class StreamEngine(private val context: Context) {
             thermalRung = comp.thermalRung,
             previewPaused = comp.previewPaused,
             cameraFacing = comp.cameraFacing,
+            captions = captionStatus,
             zoomRatio = comp.zoomRatio,
             micMuted = a?.muted == true,
             liveSinceMs = liveSinceMs,
@@ -1124,6 +1179,8 @@ class StreamEngine(private val context: Context) {
     private companion object {
         /** After a first scene's crossfade, a frame or two more before [goLive] sends anything. */
         private const val FIRST_SCENE_MARGIN_MS = 70L
+        /** The heat rung that pauses live captions (the recogniser costs most of a core); they resume below it. */
+        const val CAPTIONS_OFF_RUNG = 3
         const val TAG = "Engine"
         const val HEADROOM_EVERY_MS = 10_000L
         const val RAMP_GRACE_MS = 20_000L

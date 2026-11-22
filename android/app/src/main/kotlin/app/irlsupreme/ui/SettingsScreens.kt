@@ -96,6 +96,7 @@ import app.irlsupreme.service.ExternalCamera
 import app.irlsupreme.service.StreamDelay
 import app.irlsupreme.service.HelperState
 import app.irlsupreme.service.HelperStatus
+import app.irlsupreme.service.CaptionSettings
 import app.irlsupreme.service.CardStore
 import app.irlsupreme.service.MicSettings
 import app.irlsupreme.service.cardsValue
@@ -284,6 +285,8 @@ fun SettingsScreen(c: SetupController, nav: Navigator) = PageScaffold("Settings"
     val cards by CardStore.state(LocalContext.current).collectAsState()
     val socials by CardStore.socialsState(LocalContext.current).collectAsState()
     ValueRow("Scene cards", cardsValue(cards, socials), valueIsFigure = false, onClick = { nav.open(Screen.CARDS) })
+    val captions by CaptionSettings.state(LocalContext.current).collectAsState()
+    ValueRow("Captions", captionsSettingValue(captions), valueIsFigure = false, onClick = { nav.open(Screen.CAPTIONS) })
 
     if (isAggressiveOem) {
         SectionHeader("Phone")

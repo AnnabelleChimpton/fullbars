@@ -161,7 +161,8 @@ class StreamService : Service() {
                     val fps = StreamRules.fps(choices.fps, choices.camera is CameraInput.Phone) {
                         app.irlsupreme.engine.video.CameraCapabilities.supports(this, CameraPrefs.startFacing(this), choices.width, choices.height, 60)
                     }
-                    val config = StreamRules.config(target, choices, fps).copy(startInPreview = preview)
+                    val config = StreamRules.config(target, choices, fps)
+                        .copy(startInPreview = preview, captions = CaptionSettings.current(this).options())
                     SessionLogText.startLines(sessionStart(config, choices.fps)).forEach(log::essential)
                     // The battery as the stream starts, for the recap's battery per hour and the heat ladder's floor.
                     readBattery()
@@ -320,6 +321,10 @@ class StreamService : Service() {
                     log.line("lip sync offset now ${SessionLogText.signedMs(ms.toLong())}")
                     engine.setAvOffsetNs(ms * 1_000_000L)
                 }
+            }
+            launch {
+                // Captions: the live Scenes sheet's switch (or Settings) writes the setting; the stream follows here.
+                CaptionSettings.state(this@StreamService).drop(1).collect { engine.setCaptions(it.options()) }
             }
             launch { PocketStatus.state.collect { s -> s?.let { log.line("pocket: ${it.label}") } } }
             launch {

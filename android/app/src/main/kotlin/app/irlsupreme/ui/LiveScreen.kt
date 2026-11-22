@@ -104,6 +104,7 @@ import app.irlsupreme.engine.StreamEngine
 import app.irlsupreme.engine.CameraPhase
 import app.irlsupreme.service.AlertQueue
 import app.irlsupreme.service.CameraPrefs
+import app.irlsupreme.service.CaptionSettings
 import app.irlsupreme.service.ChatFeed
 import app.irlsupreme.service.ChatLine
 import app.irlsupreme.service.HelperHotspotStatus
@@ -370,6 +371,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         engine.setMicMuted(muted)
     }
 
+    val captionPrefs by CaptionSettings.state(ctx).collectAsState()
     // Flip and pinch only mean something while the phone camera is what's being sent.
     val phoneCamera = state.activeSource == "phone"
     // Said politely after a flip from the button or a double tap on the preview. The sheet's Flip row speaks its own
@@ -589,6 +591,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                     onTestAlert = if (isTest) ({ k -> scenesOpen = false; AlertQueue.post(k.alert()) }) else null,
                     alertsOn = overlays.alertsOn,
                     onPocketScreen = { scenesOpen = false; pocketHintAt = 0L; pocketScreen = true },
+                    captionsOn = captionPrefs.on, captionStatus = state.captions,
+                    onCaptions = { on -> CaptionSettings.setOn(ctx, on) },
                 )
             }
             val instrument: @Composable (InstrumentLayout, Modifier) -> Unit = { layout, m ->

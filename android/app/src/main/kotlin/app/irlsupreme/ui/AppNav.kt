@@ -45,7 +45,7 @@ import app.irlsupreme.service.PendingPairing
 import app.irlsupreme.ui.theme.FbMotion
 
 /** The setup screens. The live screen isn't here: MainActivity shows it while streaming. */
-enum class Screen { HOME, SETTINGS, TWITCH, CAMERA, CONNECTIONS, QUALITY, SCREEN_OFF, HELPERS, OVERLAYS, MIC, CARDS, ALERTS, ALSO_STREAM }
+enum class Screen { HOME, SETTINGS, TWITCH, CAMERA, CONNECTIONS, QUALITY, SCREEN_OFF, HELPERS, OVERLAYS, MIC, CARDS, ALERTS, ALSO_STREAM, CAPTIONS }
 
 /** A tiny back stack: no navigation library needed for seven screens. */
 class Navigator(internal val stack: SnapshotStateList<Screen>) {
@@ -127,6 +127,7 @@ fun SetupApp(c: SetupController) {
                     Screen.CARDS -> CardsPage(c, nav)
                     Screen.ALERTS -> AlertsPage(c, nav)
                     Screen.ALSO_STREAM -> AlsoStreamPage(c, nav)
+                    Screen.CAPTIONS -> CaptionsPage(nav)
                 }
             }
             // Home's pinned go-live bar is tall; keep snackbars above it, but only while it shows (not on the welcome).

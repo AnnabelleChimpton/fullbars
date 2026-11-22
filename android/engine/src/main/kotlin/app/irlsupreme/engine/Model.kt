@@ -98,6 +98,8 @@ data class StreamConfig(
      * until [StreamEngine.goLive]. The streamer checks the picture and the sound first, as in any camera app.
      */
     val startInPreview: Boolean = false,
+    /** Live captions burned into the picture (null: off). They can be turned on and off mid-stream too. */
+    val captions: CaptionOptions? = null,
     val width: Int = 1920,
     val height: Int = 1080,
     val fps: Int = 30,
@@ -219,6 +221,8 @@ data class EngineState(
     val running: Boolean = false,
     /** Running in preview ([StreamConfig.startInPreview]): nothing is sent yet; [StreamEngine.goLive] starts sending. */
     val preview: Boolean = false,
+    /** Live captions: null while off. */
+    val captions: CaptionStatus? = null,
     /** The running stream is portrait (the live screen locks to portrait); false for landscape. */
     val portrait: Boolean = false,
     val connection: ConnectionPhase = ConnectionPhase.IDLE,
@@ -490,3 +494,24 @@ data class SessionSummary(
         get() = if (batteryStartPct < 0 || batteryEndPct < 0 || batterySpanMs < 600_000) null
         else (batteryStartPct - batteryEndPct) * 3_600_000.0 / batterySpanMs
 }
+
+/**
+ * Live captions: what's said, recognised on the phone (nothing leaves it) and drawn on the stream. [language] is a
+ * BCP 47 tag ("en-US"); [maskOffensive] asks the recogniser to star out swear words.
+ */
+data class CaptionOptions(
+    val language: String,
+    val size: CaptionSize = CaptionSize.MEDIUM,
+    val position: CaptionPosition = CaptionPosition.BOTTOM,
+    val maskOffensive: Boolean = true,
+)
+
+enum class CaptionSize { SMALL, MEDIUM, LARGE }
+
+enum class CaptionPosition { BOTTOM, TOP }
+
+/**
+ * Where live captions are: [STARTING] until the recogniser is ready, [LISTENING] while it runs, [PAUSED] while the
+ * phone is too hot (it comes back when it cools), [UNAVAILABLE] when this phone can't caption in the chosen language.
+ */
+enum class CaptionStatus { STARTING, LISTENING, PAUSED, UNAVAILABLE }

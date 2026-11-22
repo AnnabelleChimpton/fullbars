@@ -92,6 +92,11 @@ class AudioPipeline(
         get() = stage.music
         set(v) { stage.music = v }
 
+    /** Live captions' feed (see [app.irlsupreme.engine.captions.VoiceTap]); null while captions are off. */
+    var voiceTap: app.irlsupreme.engine.captions.VoiceTap?
+        get() = stage.voiceTap
+        set(v) { stage.voiceTap = v }
+
     /**
      * An RTMP camera's audio (Pocket 3 / DJI Mic). When set, each mic chunk is replaced by the camera's samples for
      * the same moment whenever the camera has them; the mic stays the clock and the fallback.

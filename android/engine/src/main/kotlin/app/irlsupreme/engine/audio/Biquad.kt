@@ -34,6 +34,15 @@ internal class Biquad(private val channels: Int) {
         set((1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - alpha) / a0)
     }
 
+    /** A 2nd-order Butterworth low-pass at [hz] (RBJ cookbook): flat below, 12 dB per octave above. */
+    fun setLowPass(sampleRate: Int, hz: Double, q: Double = BUTTERWORTH_Q) {
+        val w0 = 2 * PI * hz / sampleRate
+        val alpha = sin(w0) / (2 * q)
+        val c = cos(w0)
+        val a0 = 1 + alpha
+        set((1 - c) / 2 / a0, (1 - c) / a0, (1 - c) / 2 / a0, -2 * c / a0, (1 - alpha) / a0)
+    }
+
     /** Sets the normalised coefficients (a0 = 1). */
     fun set(b0: Double, b1: Double, b2: Double, a1: Double, a2: Double) {
         this.b0 = b0; this.b1 = b1; this.b2 = b2; this.a1 = a1; this.a2 = a2

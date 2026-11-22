@@ -49,6 +49,8 @@ import app.irlsupreme.ui.StreamOrientation
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_scene BRB   (or LIVE, STARTING_SOON, ...)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_mic off   (or on)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --ez debug_screenshots true   (setup screens capturable)
+ *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_captions on|off   (live captions; mid-stream too)
+ *   ... --es debug_caption_clip speech.pcm   (while streaming with captions: feed a 16 kHz clip to them instead of the voice)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_camera external   (or phone)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --ei debug_pocket_kbps 6000
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_browser test   (or crash, off)
@@ -125,6 +127,11 @@ class DebugActivity : ComponentActivity() {
         }
         intent.getStringExtra("debug_scene")?.let { s ->
             runCatching { Scene.valueOf(s) }.getOrNull()?.let { scene -> withEngine { it.setScene(scene) } }
+        }
+        intent.getStringExtra("debug_captions")?.let { v -> app.irlsupreme.service.CaptionSettings.setOn(applicationContext, v == "on") }
+        intent.getStringExtra("debug_caption_clip")?.let { f -> // a 16 kHz mono PCM file in files/: fed to captions instead of the voice
+            val bytes = java.io.File(filesDir, f).readBytes()
+            withEngine { it.debugCaptionClip(bytes) }
         }
         intent.getStringExtra("debug_mic")?.let { v -> withEngine { it.setMicMuted(v == "off") } }
         intent.getStringExtra("debug_browser")?.let { v -> // "test": a built-in animated test page; "crash": kill its renderer; "off"
