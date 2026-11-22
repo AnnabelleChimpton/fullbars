@@ -1,5 +1,7 @@
 package app.irlsupreme.ui
 
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.layout.onSizeChanged
 import android.os.BatteryManager
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -538,6 +540,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
     val onChat: (() -> Unit)? = if (ending) null else ({ chatOpen = !chatOpen; scenesOpen = false; micOpen = false; sheetKind = SheetKind.CHAT })
     // On a card the camera isn't on air, so the flip key goes (the Scenes sheet's Flip row still sets it for the return).
     val flipButton: (() -> Unit)? = if (phoneCamera && !ending && state.scene == Scene.LIVE) ({ flip(true) }) else null
+    // The portrait plate's height, so the picture can stop above it (0 in landscape, where the plate is a side column).
+    var portraitPlatePx by remember { mutableIntStateOf(0) }
 
     Box(
         Modifier
@@ -558,6 +562,10 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                 }
             },
     ) {
+        // In portrait the plate is opaque, so the picture stops above it: the whole frame viewers get (captions and
+        // alerts along its bottom included) is in view, not hidden behind the keys.
+        val platePad = with(LocalDensity.current) { portraitPlatePx.toDp() }
+        Box(Modifier.fillMaxSize().padding(bottom = platePad)) {
         Preview(
             engine,
             fps = state.fps,
@@ -571,9 +579,11 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
             onSurface = { surfaceView = it },
         )
         if (frameShown) NotOnCameraFrame()
+        }
 
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val landscape = maxWidth > maxHeight
+            LaunchedEffect(landscape) { if (landscape) portraitPlatePx = 0 }
             // The chat sheet stops short of the pill, so the preview and the pill stay in view while you read.
             val chatMax = maxHeight * 0.6f
             val sheet: @Composable (Modifier) -> Unit = { m ->
@@ -648,6 +658,7 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                     Column(
                         Modifier
                             .fillMaxWidth()
+                            .onSizeChanged { portraitPlatePx = it.height }
                             .absorbTouches()
                             // Opaque in portrait: the plate is its own band, never figures over a busy picture.
                             .background(OverVideo.scrim.copy(alpha = 1f))
