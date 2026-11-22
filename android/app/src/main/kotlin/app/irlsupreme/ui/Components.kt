@@ -1,5 +1,7 @@
 package app.irlsupreme.ui
 
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.Lifecycle
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -886,20 +888,46 @@ fun CopyKey(text: String, modifier: Modifier = Modifier, sensitive: Boolean = fa
 
 /**
  * A shell command or address in mono on a sunk s1 plate, selectable, with a [CopyKey]. [sensitive] for anything that
- * works like a password (helper password, mod remote link, camera addresses).
+ * works like a password (helper password, mod remote link, camera addresses): it shows masked, with an eye to reveal
+ * it, and masks itself again after [REVEAL_MS], when the app goes to the background, or when the page closes. Copy
+ * works while it's masked. [label] is what TalkBack calls it ("Helper password, hidden").
  */
 @Composable
-fun CodeBlock(text: String, modifier: Modifier = Modifier, sensitive: Boolean = false) {
+fun CodeBlock(text: String, modifier: Modifier = Modifier, sensitive: Boolean = false, label: String = "Code") {
     val c = LocalFbColors.current
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(shown) { if (shown) { delay(REVEAL_MS); shown = false } }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { shown = false }
+    val masked = sensitive && !shown
     Row(
         modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
             .background(c.s1, FbShape.small).padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        SelectionContainer(Modifier.weight(1f).padding(vertical = 10.dp)) { Text(text, style = FbType.value, color = c.text) }
+        if (masked) {
+            // A fixed number of dots, so the length doesn't show either.
+            Text(
+                MASK, style = FbType.value, color = c.text,
+                modifier = Modifier.weight(1f).padding(vertical = 10.dp).clearAndSetSemantics { contentDescription = "$label, hidden" },
+            )
+        } else {
+            SelectionContainer(Modifier.weight(1f).padding(vertical = 10.dp)) { Text(text, style = FbType.value, color = c.text) }
+        }
+        if (sensitive) {
+            GlyphButton(
+                if (shown) FbIcons.EyeOff else FbIcons.Visibility,
+                contentDescription = if (shown) "Hide $label" else "Show $label",
+                onClick = { shown = !shown },
+            )
+        }
         CopyKey(text, sensitive = sensitive)
     }
 }
+
+/** How long a revealed [CodeBlock] stays readable. */
+internal const val REVEAL_MS = 30_000L
+private const val MASK = "••••••••••••"
+
 
 /** Text-field colours on the ladder: a ruleStrong outline at rest, Bone when focused, no fill. */
 @Composable

@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -293,11 +294,9 @@ fun SettingsScreen(c: SetupController, nav: Navigator) = PageScaffold("Settings"
         ValueRow("Keep streaming with the screen off", rememberScreenOffValue(), valueIsFigure = false, onClick = { nav.open(Screen.SCREEN_OFF) })
     }
 
-    SectionHeader("Labs")
-    SwitchRow("DJI Pocket 3${footnoteMark(1)}", checked = c.labsDji, onCheckedChange = c::setLabs)
-
-    Footnote(1, "DJI Pocket 3: Fullbars starts it and its stream over Bluetooth. $UNOFFICIAL")
-    AboutFootnotes(onLicences = { licences = true })
+    // The Pocket 3 (Labs) is turned on where it's chosen, Settings › Camera, with its warning confirmed there.
+    SectionHeader("About")
+    AboutRow(onLicences = { licences = true })
     if (licences) LicencesDialog(onDismiss = { licences = false })
 }
 
@@ -316,24 +315,35 @@ internal fun rememberScreenOffValue(): String {
 }
 
 /**
- * Which build this is (testers need to say), the GPL source offer and the licence notices the APK must carry, as two
- * footnotes rather than a section: they matter, but nobody comes to Settings for them. The offer is in words rather
- * than a link, so it stays true for builds passed on by anyone.
+ * "About Fullbars", its version as the value (testers need to say which build): it opens the affiliation line, the GPL
+ * source offer and the licence notices the APK must carry, one tap away rather than filling the foot of Settings. The
+ * offer is in words rather than a link, so it stays true for builds passed on by anyone.
  */
 @Composable
-private fun AboutFootnotes(onLicences: () -> Unit) {
+private fun AboutRow(onLicences: () -> Unit) {
     val ctx = LocalContext.current
+    val c = LocalFbColors.current
     val version = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull().orEmpty() }
-    Footnote(
-        null,
-        (if (version.isEmpty()) "Fullbars. " else "Fullbars $version. ") + "Not made by or affiliated with DJI or Twitch.",
-        link = "Open-source licences", onLink = onLicences,
-    )
-    Footnote(
-        null,
-        "Fullbars is free software under the GNU General Public License, version 3: you can share and change it. " +
-            "Whoever gave you this app can give you its source code too; ask them for it.",
-    )
+    var open by remember { mutableStateOf(false) }
+    ValueRow("About Fullbars", version, valueIsFigure = true, onClick = { open = true })
+    if (open) {
+        AlertDialog(
+            onDismissRequest = { open = false },
+            title = { Text(if (version.isEmpty()) "Fullbars" else "Fullbars $version", style = FbType.cta) },
+            text = {
+                Text(
+                    "Not made by or affiliated with DJI or Twitch.\n\n" +
+                        "Fullbars is free software under the GNU General Public License, version 3: you can share and change " +
+                        "it. Whoever gave you this app can give you its source code too; ask them for it.",
+                    style = FbType.help,
+                )
+            },
+            confirmButton = { FbButton("Open-source licences", onClick = { open = false; onLicences() }, kind = FbButtonKind.Text) },
+            dismissButton = { FbButton("Close", onClick = { open = false }, kind = FbButtonKind.Text) },
+            shape = FbShape.medium, containerColor = c.s1, titleContentColor = c.text, textContentColor = c.text2,
+            tonalElevation = 0.dp,
+        )
+    }
 }
 
 /** A block of the notices file: the asset is Markdown, kept to headings, bullets and paragraphs so this can show it. */
@@ -555,12 +565,6 @@ fun TwitchPage(c: SetupController, nav: Navigator) = PageScaffold("Twitch", nav:
 
     ModsSection(c, signedOut)
 
-    Footnote(
-        1,
-        "The mod remote switches Camera, BRB, Privacy, Starting soon, Ending and your own scenes. It's served by your " +
-            "server, so it works while you're live with Combine connections. Share the link only with people you trust.",
-    )
-
     if (confirmSignOut) {
         ConfirmDialog(
             title = "Sign out of Twitch?",
@@ -616,7 +620,7 @@ fun CameraPage(c: SetupController, nav: Navigator) = PageScaffold("Camera", nav:
         // Always choosable: with Labs off, one dialog turns it on here instead of a detour through Settings.
         RadioRow(
             "DJI Pocket 3",
-            supporting = if (c.labsDji) "Labs · Fullbars starts it over Bluetooth." else "Labs · unofficial. Fullbars starts it over Bluetooth.",
+            supporting = "Labs · unofficial. Fullbars starts it over Bluetooth; pair your DJI Mic with it for sound.",
             selected = c.cameraKind == ExternalCamera.Kind.POCKET,
         ) { if (c.labsDji) c.chooseCamera(ExternalCamera.Kind.POCKET) else confirmLabs = true }
         RadioRow(
@@ -767,9 +771,8 @@ private fun PocketSetup(c: SetupController) {
     step(2)
 
     SectionHeader("When you go live")
-    HelpText("Fullbars does these in order. The live screen shows each one as it happens.${footnoteMark(1)}")
+    HelpText("Fullbars does these in order. The live screen shows each one as it happens.")
     PocketStep.entries.forEach { s -> StepRow(s.number, PocketStep.entries.size, s.title(net), status = null, detail = s.guide(net)) }
-    Footnote(1, "For sound, pair your DJI Mic with the Pocket 3. $UNOFFICIAL")
 }
 
 @Composable
@@ -781,7 +784,7 @@ private fun RtmpSetup(c: SetupController) {
         HelpText("Connect the phone to Wi‑Fi (or turn on its hotspot) so a camera can reach it.")
     } else {
         HelpText("Point your camera at:")
-        urls.forEach { CodeBlock(it, sensitive = true) } // the random path is what keeps strangers off it
+        urls.forEach { CodeBlock(it, sensitive = true, label = "Camera address") } // the random path is what keeps strangers off it
     }
     HelpText("Its sound replaces the phone mic. If it drops out, the phone camera and mic take over.")
 }
@@ -812,7 +815,7 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
     // Master-switch rule: the label says what the switch does, never the page title again.
     SwitchRow(
         "Use Wi‑Fi and mobile data together",
-        supporting = "Needs your own server.${footnoteMark(1)}",
+        supporting = "Needs your own server. If both connections drop, viewers see the Signal lost card, not a frozen stream.",
         checked = c.combine,
         onCheckedChange = c::changeCombine,
     )
@@ -848,7 +851,10 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
     } else {
         BrbStatusRow(state, failure = null, port = 0, justPaired = false)
         // The only way in without a server: say what it is and what it costs (footnote) before asking for a command.
-        HelpText("Set one up once on a small rented server.${footnoteMark(2)}")
+        HelpText(
+            "Set one up once on a small rented server: about €4–8 a month, or Oracle's free tier (Linux with Docker). " +
+                "Its setup guide (BRB-SERVER.md) comes with Fullbars' source code. Without one, Fullbars streams straight to Twitch.",
+        )
         HelpText("1 · On your server, run")
         CodeBlock(PAIR_COMMAND)
         HelpText("2 · Scan the code it shows")
@@ -860,14 +866,6 @@ fun ConnectionsPage(c: SetupController, nav: Navigator) = PageScaffold("Combine 
         }
     }
 
-    Footnote(1, "If both connections drop, viewers see the Signal lost card instead of a frozen stream.")
-    if (p == null) {
-        Footnote(
-            2,
-            "About €4–8 a month, or Oracle's free tier: a Linux server with Docker and the Fullbars BRB server. Its " +
-                "setup guide (BRB-SERVER.md) comes with Fullbars' source code. Without one, Fullbars streams straight to Twitch.",
-        )
-    }
 
     if (confirmForget) {
         ConfirmDialog(
@@ -1209,7 +1207,7 @@ private fun ModRemoteSection(c: SetupController) {
     val ctx = LocalContext.current
     var confirmNew by remember { mutableStateOf(false) }
     SectionHeader("Mod remote")
-    HelpText("A page your mods open in their browser to switch your scenes.${footnoteMark(1)}")
+    HelpText("A page your mods open to switch your scenes. Share it only with people you trust.")
     val link = c.remoteLink
     if (c.pairing == null) {
         FbButton("Get the link", {}, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary, enabled = false)
@@ -1217,7 +1215,7 @@ private fun ModRemoteSection(c: SetupController) {
     } else if (link == null) {
         FbButton("Get the link", c::loadRemoteLink, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), kind = FbButtonKind.Secondary)
     } else {
-        CodeBlock(link, sensitive = true)
+        CodeBlock(link, sensitive = true, label = "Mod remote link")
         Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             FbButton("Share", {
                 // Mods' first sight is a browser warning; the shared text tells them it's expected and how to get past.

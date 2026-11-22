@@ -4,7 +4,9 @@ import android.graphics.Bitmap
 import android.net.wifi.WifiManager
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -40,6 +42,9 @@ import com.journeyapps.barcodescanner.BarcodeEncoder
 fun HelpersPage(c: SetupController, nav: Navigator) = PageScaffold("Helper phones", nav::back) {
     val helping by HelperStatus.state.collectAsState()
     var confirmNewCode by remember { mutableStateOf(false) }
+    // Not saved: leaving the page closes the pairing code again, and it never opens by itself.
+    var adding by remember { mutableStateOf(false) }
+    var moblinCode by remember { mutableStateOf(false) }
     var showMoblin by rememberSaveable { mutableStateOf(false) }
     var moblinPassword by rememberSaveable { mutableStateOf("") }
     var moblinAddress by rememberSaveable { mutableStateOf("") }
@@ -49,12 +54,12 @@ fun HelpersPage(c: SetupController, nav: Navigator) = PageScaffold("Helper phone
         return@PageScaffold
     }
 
-    HelpText("A spare phone with its own mobile data adds its connection to your stream.${footnoteMark(1)}")
+    HelpText("A spare phone with its own mobile data adds its connection to your stream.")
 
     SectionHeader("When this phone streams")
     SwitchRow(
         "Accept helper phones",
-        supporting = if (c.combine) "Helpers join while you're live with Combine connections."
+        supporting = if (c.combine) "Helpers join while you're live. Some phones ask you to tap Connect on the helper each time."
         else "Turn on Combine connections first; helpers add to it.",
         checked = c.helpersOn,
         onCheckedChange = c::changeHelpersOn,
@@ -76,15 +81,33 @@ fun HelpersPage(c: SetupController, nav: Navigator) = PageScaffold("Helper phone
             enabled = staAp,
             onCheckedChange = c::changeHelperHotspot,
         )
-        HelpText("On the helper: Fullbars › Settings › Helper phones › Scan the streaming phone's code.${footnoteMark(2)}")
-        QrCode(c.helperLink)
-        HelpText("Using Moblin as the helper? Use this password:")
-        CodeBlock(c.helperPassword, sensitive = true)
-        FbButton("Make a new code", { confirmNewCode = true }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
+        // The pairing code is a password (the QR carries it too), so it's behind a button, closed again when the page is.
+        if (!adding) {
+            FbButton(
+                "Add a helper phone", { adding = true },
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary,
+            )
+        } else {
+            HelpText(
+                "On the helper: Fullbars › Settings › Helper phones › Scan the streaming phone's code. " +
+                    if (c.helperHotspot && staAp) "Keep Bluetooth on for both phones." else "Then connect it to this phone's hotspot or the same Wi‑Fi.",
+            )
+            QrCode(c.helperLink)
+            if (!moblinCode) {
+                FbButton("Using Moblin?", { moblinCode = true }, Modifier.padding(horizontal = 16.dp), kind = FbButtonKind.Text)
+            } else {
+                HelpText("Use this password in Moblin:")
+                CodeBlock(c.helperPassword, sensitive = true, label = "Helper password")
+            }
+            Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                FbButton("Make a new code", { confirmNewCode = true }, kind = FbButtonKind.Text)
+                FbButton("Hide the code", { adding = false; moblinCode = false }, kind = FbButtonKind.Text)
+            }
+        }
     }
 
     SectionHeader("Help another phone")
-    HelpText("Lend this phone's mobile data to a phone that's streaming. Keep it charged.${footnoteMark(3)}")
+    HelpText("Lend this phone's mobile data to a phone that's streaming. Keep it charged; it uses data fast.")
     // The phone this one helped last: a value row, with the one-tap way back to it.
     c.helpingHost?.let { h ->
         ValueRow("Streaming phone", h.name.ifEmpty { "The last phone" }, valueIsFigure = false)
@@ -112,22 +135,6 @@ fun HelpersPage(c: SetupController, nav: Navigator) = PageScaffold("Helper phone
         )
     }
 
-    Footnote(
-        1,
-        "Another carrier, another path through weak spots. It joins this phone's hotspot (or the same Wi‑Fi) by itself. " +
-            "Some phones (Android 16) ask you to tap Connect on the helper each time you go live, so keep it handy " +
-            "until it says Helping.",
-    )
-    // Its ² mark only exists inside the helpers block, so the note goes with it. The hotspot only runs when the
-    // phone can do STA+AP, so a saved-on preference alone doesn't mean helpers get its details over Bluetooth.
-    if (c.helpersOn) {
-        Footnote(
-            2,
-            if (c.helperHotspot && staAp) "Keep Bluetooth on for both phones."
-            else "Then connect it to this phone's hotspot or the same Wi‑Fi.",
-        )
-    }
-    Footnote(3, "It uses data as fast as it can send.")
 
     if (confirmNewCode) {
         ConfirmDialog(
@@ -206,7 +213,8 @@ private fun HelpingStatus(s: HelperState, c: SetupController) {
         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
     )
     if (s is HelperState.Helping && s.forwarding) ValueRow("Sending", helpingSent(s.upKbps, s.totalMb), valueIsFigure = true)
-    if (t.line.isNotEmpty()) HelpText(t.line + if (t.note != null) footnoteMark(1) else "", modifier = Modifier.padding(top = 4.dp))
+    if (t.line.isNotEmpty()) HelpText(t.line, modifier = Modifier.padding(top = 4.dp))
+    t.note?.let { HelpText(it) }
     if (s == HelperState.WifiOff) {
         val ctx = LocalContext.current
         FbButton(
@@ -221,7 +229,6 @@ private fun HelpingStatus(s: HelperState, c: SetupController) {
         "Stop helping", c::stopHelping,
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), kind = FbButtonKind.Secondary,
     )
-    t.note?.let { Footnote(1, it) }
 }
 
 /** The pairing code, black on a white rS plate: scanners need the quiet zone whatever the theme. */

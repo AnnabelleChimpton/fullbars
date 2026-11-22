@@ -139,7 +139,7 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
     }
 
     SectionHeader("Tips")
-    HelpText("Tips through StreamElements or Streamlabs show as alerts too.${footnoteMark(1)}")
+    HelpText("Tips through StreamElements or Streamlabs show as alerts too, with the name and amount (not the message).")
     val tipTokenSet = c.tipsSeJwt.isNotBlank() || c.tipsSlToken.isNotBlank()
     // Tips ride on the alerts switch (StreamService skips every alert while it's off): say so rather than stay silent.
     if (tipTokenSet && !s.alertsOn) {
@@ -152,18 +152,18 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
     SecretField(
         c.tipsSeJwt, c::changeTipsSeJwt, "StreamElements token",
         supporting = if ("StreamElements" in problems) "StreamElements refused this token. Copy it again."
-        else "StreamElements dashboard › your avatar › Channels › Show secrets › JWT token",
+        else "Keep it private. StreamElements dashboard › your avatar › Channels › Show secrets › JWT token",
     )
     SecretField(
         c.tipsSlToken, c::changeTipsSlToken, "Streamlabs token",
         supporting = if ("Streamlabs" in problems) "Streamlabs refused this token. Copy it again."
-        else "Streamlabs › Settings › API Settings › API Tokens › Your Socket API Token",
+        else "Keep it private. Streamlabs › Settings › API Settings › API Tokens › Your Socket API Token",
     )
 
     SectionHeader("Web overlay")
     SwitchRow(
         "Show a web overlay",
-        supporting = "The link you'd add to OBS as a browser source.${footnoteMark(2)}",
+        supporting = "The StreamElements or Streamlabs link you'd add to OBS. Its alerts show without their sounds, and it isn't in the preview.",
         checked = s.browserOn,
         onCheckedChange = { set(s.copy(browserOn = it)) },
     )
@@ -187,12 +187,6 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
         onCheckedChange = { set(s.copy(onCards = it)) },
     )
 
-    Footnote(
-        1,
-        "On any stream, while Show alerts is on. Paste a token from your account there and keep it private. Tip " +
-            "messages aren't shown, only the name and amount.",
-    )
-    Footnote(2, "From StreamElements or Streamlabs. Its alerts show without their sounds, and it isn't in the preview.")
 }
 
 /** What the preview shows the layers over. A preview control only: it changes nothing about the stream. */
