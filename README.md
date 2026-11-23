@@ -55,13 +55,20 @@ connection. For bonding and staying live through dropouts, set up a BRB server.
   the card, music under it, or show a web page instead of the card.
 - **Alerts drawn on the phone.** Follows, subs, gift subs, bits, raids, and tips through StreamElements or
   Streamlabs. For each kind: whether it shows and the smallest worth showing, how long it stays up, its words,
-  picture, colours and its own sound. Where alerts go and how big they are is yours too.
+  picture, colours and its own sound. Where alerts go and how big they are is yours too. You feel each one land:
+  a firm buzz, and who sent it in the notice line.
+- **Viewer TTS.** A "Make me talk" channel points reward that reads viewers' messages out on stream, and alerts said
+  out loud ("Thank you Sam for the 500 bits!"), each kind as you choose, with or without their message. Spoken on
+  the phone in one bright, dramatic voice and mixed into the stream, never through your mic. Your own blocked words,
+  your Twitch blocked terms and a built-in list of the worst slurs are filtered out; mods can `!skip`, and channel
+  points for anything not said go back.
 - **Live captions.** What viewers hear you say, recognised on the phone (nothing is sent anywhere) and written on
   the stream. Android 13 or newer.
 - **Chat with you.** Twitch chat with emotes on the live screen, and chat read aloud into your earbuds (everyone, or
   only mods, VIPs and subs). It reads only while headphones are connected, so it never goes out on stream.
 - **Help from your mods.** Chat commands (`!brb`, `!live`, `!privacy`, `!starting`, `!ending`, `!scene <name>`,
-  `!restartcam`, and `!end` with a confirmation word) and a web remote they can open in a browser.
+  `!restartcam`, `!skip` for viewer TTS, and `!end` with a confirmation word) and a web remote they can open in a
+  browser.
 - **Overlays.** Chat, a line of text, an image such as a logo, and a StreamElements or Streamlabs overlay URL.
 - **Also stream to.** Your BRB server can send the same stream to Kick, YouTube or any RTMP server, up to three at
   once. Your phone still uploads it only once. Test streams never go anywhere but Twitch's test.
