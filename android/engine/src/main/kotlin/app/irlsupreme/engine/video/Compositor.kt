@@ -679,7 +679,7 @@ class Compositor(
         val holdNs = if (cam.switchingSinceNs != 0L) FLIP_HOLD_NS else HOLD_NS
         cameraPhase = when {
             extFresh -> CameraPhase.LIVE
-            cam.phase == CameraPhase.LIVE && cam.lastFrameNs != 0L && now - cam.lastFrameNs > holdNs -> CameraPhase.LOST
+            cam.phase == CameraPhase.LIVE && SceneRules.phoneCameraLost(now, cam.lastFrameNs, cam.liveSinceNs, holdNs) -> CameraPhase.LOST
             else -> cam.phase
         }
 
@@ -1549,6 +1549,21 @@ internal object SceneRules {
 
     /** The external camera's last frame is held this long at most before the phone camera or a card takes over. */
     const val EXT_HOLD_NS = 3_000_000_000L
+    /** How long a phone camera that just went LIVE (opened, reopened or flipped) has to send its first frame. */
+    const val FIRST_FRAME_GRACE_NS = 2_000_000_000L
+
+    /**
+     * Whether a LIVE phone camera counts as lost at [nowNs]: no frame for [holdNs] since its last one ([lastFrameNs],
+     * 0 if none yet), or no first frame within [FIRST_FRAME_GRACE_NS] of the session going LIVE at [liveSinceNs]. A
+     * frame from before that (the standby camera closed while the Pocket was steady, then reopened for a dropout) is
+     * no evidence either way: judging by it flashed "Camera lost" for the half second the camera took to start.
+     */
+    fun phoneCameraLost(nowNs: Long, lastFrameNs: Long, liveSinceNs: Long, holdNs: Long): Boolean = when {
+        lastFrameNs != 0L && lastFrameNs >= liveSinceNs -> nowNs - lastFrameNs > holdNs
+        liveSinceNs != 0L -> nowNs - liveSinceNs > FIRST_FRAME_GRACE_NS
+        else -> false
+    }
+
     /** Silence from the external camera before the phone camera may take over (and is opened). */
     const val PHONE_OPEN_AFTER_NS = 1_000_000_000L
     /** After the external camera's clock anchors, its last frame is held (not the phone camera shown) this long. */

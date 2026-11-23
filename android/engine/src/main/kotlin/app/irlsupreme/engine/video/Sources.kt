@@ -142,6 +142,12 @@ class CameraSource(
 
     @Volatile var lastFrameNs = 0L
         private set
+    /**
+     * When the current session went LIVE (System.nanoTime), 0 before. A [lastFrameNs] older than this is from before a
+     * close or flip: the reopened camera hasn't sent its first frame yet, which isn't the same as losing it.
+     */
+    @Volatile var liveSinceNs = 0L
+        private set
     @Volatile var phase = CameraPhase.OFF
         private set
     /** The camera actually open (or being opened): may differ from what was asked if the phone has no front camera. */
@@ -470,6 +476,7 @@ class CameraSource(
                     session = s
                     try {
                         startRepeating(d, s, "start")
+                        liveSinceNs = System.nanoTime()
                         phase = CameraPhase.LIVE
                         retryDelayMs = 500
                     } catch (e: Exception) {

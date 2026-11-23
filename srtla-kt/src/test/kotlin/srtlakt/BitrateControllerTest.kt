@@ -77,6 +77,27 @@ class BitrateControllerTest {
     }
 
     @Test
+    fun `a frozen picture isn't a resend storm`() {
+        // A Pocket dropout: the encoder's output falls to ~60% for a second or two while the links still send the
+        // usual ~1.1x of the target, with a modest queue. Link bytes / media bytes reads ~1.8, but nothing is resent.
+        val c = controller()
+        run(c, 1.0, queueMs = 20)
+        val t = c.targetBps
+        repeat(8) {
+            now += 250
+            c.update(now, stats(queueMs = 127, txBps = (c.targetBps * 1.1).toLong()), mediaBps = (c.targetBps * 0.6).toLong())
+        }
+        assertTrue(c.overhead > BitrateController.STORM_OVERHEAD, "the raw ratio does spike: ${c.overhead}")
+        assertTrue(c.targetBps >= t, "no cut: ${c.targetBps}")
+        // The same frozen picture during a real storm (resends at 2x the target) still cuts.
+        repeat(4) {
+            now += 250
+            c.update(now, stats(queueMs = 150, txBps = c.targetBps * 2L), mediaBps = (c.targetBps * 0.6).toLong())
+        }
+        assertTrue(c.targetBps < t, "storm cut: ${c.targetBps}")
+    }
+
+    @Test
     fun `after an episode it settles under the cliff before probing again`() {
         val c = controller()
         run(c, 1.0, queueMs = 20)

@@ -114,6 +114,13 @@ class BitrateController(
     /** Link bytes per media byte, smoothed. */
     var overhead: Double = 1.0
         private set
+    /**
+     * Link bytes per byte the encoder is asked for (or produces, if more), smoothed: the storm test's ratio. When the
+     * picture freezes (an external camera's dropout) the encoder's output falls for a second or two while the links
+     * still send what was queued, so link bytes / media bytes jumps without a single resend. Against what's asked,
+     * that reads as ordinary; a real storm's resends push it past [STORM_OVERHEAD] either way.
+     */
+    private var stormOverhead: Double = 1.0
     /** NAKed packets per packet sent over the last ~2 s (0 before there are enough packets to tell). */
     var nakRate: Double = 0.0
         private set
@@ -258,11 +265,13 @@ class BitrateController(
         if (mediaBps > 0 && stats.totalTxBitsPerSec > 0) {
             val r = stats.totalTxBitsPerSec.toDouble() / mediaBps
             overhead = overhead * 0.5 + r * 0.5
+            val asked = max(mediaBps, targetBps.toLong())
+            stormOverhead = stormOverhead * 0.5 + stats.totalTxBitsPerSec.toDouble() / asked * 0.5
         }
         val sinceDecrease = if (lastDecreaseMs == Long.MIN_VALUE) Long.MAX_VALUE else nowMs - lastDecreaseMs
         // A real resend storm always comes with queueing; overhead alone can spike for a second because the link
         // rate is measured over 1 s while the target moves every 250 ms.
-        val storm = overhead > STORM_OVERHEAD && queue > preset.rampQueueMs
+        val storm = stormOverhead > STORM_OVERHEAD && queue > preset.rampQueueMs
 
         if (queue > preset.backOffQueueMs || storm) {
             if (congestedSinceMs == Long.MIN_VALUE) congestedSinceMs = nowMs
