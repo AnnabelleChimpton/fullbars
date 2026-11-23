@@ -59,6 +59,16 @@ data class AlertPaint(
 }
 
 /**
+ * Whether viewer TTS says an alert out loud as its card comes in, in the diva voice: not at all, a thank-you
+ * ("Thank you Sam for the 500 bits!"), or the thank-you and the words that came with it (subs' and cheers' messages).
+ */
+enum class AlertSay(val title: String) {
+    OFF("Off"),
+    THANKS("Say thanks"),
+    MESSAGE("Thanks and their message"),
+}
+
+/**
  * What the streamer set for one kind, beyond its words and picture ([AlertStyles]): whether it shows at all, the
  * smallest one worth showing, how long it stays up and its colours. The defaults are how alerts have always been.
  */
@@ -75,6 +85,10 @@ data class AlertKindOptions(
     val resubMonths: Int = 0,
     val length: AlertLength = AlertLength.NORMAL,
     val paint: AlertPaint = AlertPaint(),
+    /** Said out loud by viewer TTS as it comes in. */
+    val say: AlertSay = AlertSay.OFF,
+    /** The smallest that's said, in [minimum]'s units; 0 says every one that shows. */
+    val sayFrom: Long = 0,
 ) {
     val isCustom: Boolean get() = this != AlertKindOptions()
 }
@@ -105,6 +119,21 @@ object AlertFilter {
             is TwitchAlert.Tip -> o.minimum <= 0 || (TipAmount.hundredths(a.amount)?.let { it >= o.minimum } ?: true)
         }
         return if (shows) AlertVerdict.SHOW else AlertVerdict.BELOW_MINIMUM
+    }
+
+    /**
+     * Whether [a], which shows, is said out loud too: its kind's [AlertKindOptions.say] is on and it's at least
+     * [AlertKindOptions.sayFrom] (bits, gift subs, raiders, or a tip's hundredths).
+     */
+    fun says(a: TwitchAlert, o: AlertKindOptions): Boolean {
+        if (o.say == AlertSay.OFF) return false
+        return when (a) {
+            is TwitchAlert.Follow, is TwitchAlert.Sub -> true
+            is TwitchAlert.GiftSubs -> a.count >= o.sayFrom
+            is TwitchAlert.Cheer -> a.bits >= o.sayFrom
+            is TwitchAlert.Raid -> a.viewers >= o.sayFrom
+            is TwitchAlert.Tip -> o.sayFrom <= 0 || (TipAmount.hundredths(a.amount)?.let { it >= o.sayFrom } ?: true)
+        }
     }
 
     /** The session log's line for a held-back alert: its kind and why, never who sent it. */
@@ -300,6 +329,8 @@ object AlertOptionsCodec {
                 accent = enumOf(r.string(key(k, "accent")), AlertAccent.OFF),
                 accentColor = color("accent_color") ?: AlertColors.DEFAULT_ACCENT,
             ),
+            say = enumOf(r.string(key(k, "say")), AlertSay.OFF).let { if (it == AlertSay.MESSAGE && !hasMessage(k)) AlertSay.THANKS else it },
+            sayFrom = if (hasMinimum(k)) boundMinimum(k, r.long(key(k, "say_from"), 0)) else 0,
         )
     }
 
@@ -314,6 +345,8 @@ object AlertOptionsCodec {
         key(k, "text") to o.paint.text?.let(AlertColors::opaque),
         key(k, "accent") to o.paint.accent.takeIf { it != AlertAccent.OFF }?.name,
         key(k, "accent_color") to AlertColors.opaque(o.paint.accentColor).takeIf { it != AlertColors.DEFAULT_ACCENT },
+        key(k, "say") to o.say.takeIf { it != AlertSay.OFF }?.name,
+        key(k, "say_from") to boundMinimum(k, o.sayFrom).takeIf { it > 0 && hasMinimum(k) },
     )
 
     fun encodeGlobal(place: AlertPlace, size: AlertSize): Map<String, Any?> = mapOf(
@@ -324,6 +357,9 @@ object AlertOptionsCodec {
     /** [o] as it reads back from storage: bounded, with what doesn't apply to [k] dropped. */
     fun normalize(k: AlertKind, o: AlertKindOptions): AlertKindOptions =
         decode(MapReader(encodeKind(k, o).filterValues { it != null })).of(k)
+
+    /** Kinds whose alerts carry the viewer's own words: resubs' messages and cheers'. */
+    fun hasMessage(k: AlertKind): Boolean = k == AlertKind.SUB || k == AlertKind.BITS
 
     /** Kinds with a minimum: bits, gift subs, raids and tips. */
     fun hasMinimum(k: AlertKind): Boolean = k == AlertKind.BITS || k == AlertKind.GIFT || k == AlertKind.RAID || k == AlertKind.TIP

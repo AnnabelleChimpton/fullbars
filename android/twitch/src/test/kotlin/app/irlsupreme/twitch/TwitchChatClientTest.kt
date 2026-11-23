@@ -1,6 +1,8 @@
 package app.irlsupreme.twitch
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -218,6 +220,82 @@ class TwitchChatClientTest {
         }
     }
 
+    @Test fun redemptionsOfTheSetRewardArrive() = runBlocking(Dispatchers.Default) {
+        withTimeout(20_000) {
+            val chat = client()
+            chat.setRedemptionReward(REWARD_ID)
+            val got = Channel<Redemption>(Channel.UNLIMITED)
+            val collector = launch(start = CoroutineStart.UNDISPATCHED) { chat.redemptions.collect { got.send(it) } }
+            val job = launch { chat.messages("1001").collect { } }
+
+            // chat, chat notifications, follows, then the reward's redemptions on the same session.
+            repeat(3) { subscriptions.next() }
+            val sub = Json.parseToJsonElement(subscriptions.next().bodyText()).jsonObject
+            assertEquals("channel.channel_points_custom_reward_redemption.add", sub["type"]!!.jsonPrimitive.content)
+            assertEquals("1", sub["version"]!!.jsonPrimitive.content)
+            val condition = sub["condition"]!!.jsonObject
+            assertEquals("1001", condition["broadcaster_user_id"]!!.jsonPrimitive.content)
+            assertEquals(REWARD_ID, condition["reward_id"]!!.jsonPrimitive.content)
+            assertEquals("session-1", sub["transport"]!!.jsonObject["session_id"]!!.jsonPrimitive.content)
+            chat.alertSubscriptions.first { it.redemptions == SubscriptionStatus.Active }
+
+            val ws = sockets.next()
+            ws.send(redemptionNotification("r-other", "not ours", rewardId = "another-reward"))
+            ws.send(redemptionNotification("r-1", " hello chat "))
+            val r = got.receive()
+            assertEquals("hello chat", r.text)
+            assertEquals("Cooler_User", r.user)
+            assertEquals(REWARD_ID, r.rewardId)
+            ws.send(redemptionNotification("r-1", " hello chat ")) // duplicate delivery: dropped
+
+            // Cleared mid-stream: no new subscription, and the old reward's redemptions are dropped.
+            chat.setRedemptionReward(null)
+            chat.alertSubscriptions.first { it.redemptions == SubscriptionStatus.Pending }
+            ws.send(redemptionNotification("r-2", "after clearing"))
+            // A new reward subscribes on the live session at once.
+            chat.setRedemptionReward("reward-2")
+            val sub2 = Json.parseToJsonElement(subscriptions.next().bodyText()).jsonObject
+            assertEquals("reward-2", sub2["condition"]!!.jsonObject["reward_id"]!!.jsonPrimitive.content)
+            ws.send(redemptionNotification("r-3", "new reward", rewardId = "reward-2"))
+            assertEquals("new reward", got.receive().text)
+            assertTrue("dropped redemptions never arrive", got.tryReceive().isFailure)
+
+            // A revoked redemption subscription (reward deleted on Twitch) doesn't end chat.
+            ws.send(revocation("v-r", "authorization_revoked").replace("channel.chat.message", "channel.channel_points_custom_reward_redemption.add"))
+            val failed = chat.alertSubscriptions.first { it.redemptions is SubscriptionStatus.Failed }
+            assertTrue((failed.redemptions as SubscriptionStatus.Failed).reason.contains("authorization_revoked"))
+            assertEquals(ChatConnectionState.Connected, chat.state.value)
+
+            job.cancel()
+            collector.cancel()
+        }
+    }
+
+    @Test fun redemptionsWithoutTheScopeNeedSignIn() = runBlocking(Dispatchers.Default) {
+        withTimeout(20_000) {
+            val old = token().copy(scopes = TwitchConfig.DEFAULT_SCOPES - TwitchConfig.SCOPE_MANAGE_REDEMPTIONS)
+            val chat = client(FakeTokens(old))
+            chat.setRedemptionReward(REWARD_ID)
+            val job = launch { chat.messages("1001").collect { } }
+            repeat(3) { subscriptions.next() }
+            assertEquals(SubscriptionStatus.NeedsSignIn, chat.alertSubscriptions.first { it.redemptions != SubscriptionStatus.Pending }.redemptions)
+            assertNull("no redemption subscription without the scope", subscriptions.poll(300, TimeUnit.MILLISECONDS))
+            job.cancel()
+        }
+    }
+
+    @Test fun noRewardNoRedemptionSubscription() = runBlocking(Dispatchers.Default) {
+        withTimeout(20_000) {
+            val chat = client()
+            val job = launch { chat.messages("1001").collect { } }
+            repeat(3) { subscriptions.next() }
+            sockets.next()
+            assertNull(subscriptions.poll(300, TimeUnit.MILLISECONDS))
+            assertEquals(SubscriptionStatus.Pending, chat.alertSubscriptions.value.redemptions)
+            job.cancel()
+        }
+    }
+
     @Test fun backoffGrowsAndCaps() {
         val chat = TwitchChatClient(TwitchConfig(CLIENT_ID), HelixClient(TwitchConfig(CLIENT_ID)), FakeTokens(),
             options = ChatOptions(initialBackoffMs = 1_000, maxBackoffMs = 60_000))
@@ -227,6 +305,24 @@ class TwitchChatClientTest {
     }
 
     companion object {
+        const val REWARD_ID = "92af127c-7326-4483-a52b-b0da0be61c01"
+
+        /** Shape follows the channel.channel_points_custom_reward_redemption.add example in the EventSub reference. */
+        fun redemptionNotification(id: String, input: String, rewardId: String = REWARD_ID) = """
+            {"metadata":{"message_id":"$id","message_type":"notification","message_timestamp":"2026-11-22T17:16:03.17106713Z","subscription_type":"channel.channel_points_custom_reward_redemption.add","subscription_version":"1"},
+             "payload":{
+               "subscription":{"id":"f1c2a387-161a-49f9-a165-0f21d7a4e1c4","type":"channel.channel_points_custom_reward_redemption.add","version":"1","status":"enabled","cost":0,
+                 "condition":{"broadcaster_user_id":"1001","reward_id":"$rewardId"},"transport":{"method":"websocket","session_id":"session-1"},"created_at":"2026-11-22T17:10:12.634234626Z"},
+               "event":{
+                 "id":"17fa2df1-ad76-4804-bfa5-a40ef63efe63",
+                 "broadcaster_user_id":"1001","broadcaster_user_login":"streamer","broadcaster_user_name":"Streamer",
+                 "user_id":"9001","user_login":"cooler_user","user_name":"Cooler_User",
+                 "user_input":"$input","status":"unfulfilled",
+                 "reward":{"id":"$rewardId","title":"Make me talk","cost":500,"prompt":"Type what I should say"},
+                 "redeemed_at":"2026-11-22T17:16:03.17106713Z"
+               }}}
+        """.trimIndent()
+
         fun welcome(sessionId: String, keepalive: Int) = """
             {"metadata":{"message_id":"w-$sessionId-${System.nanoTime()}","message_type":"session_welcome","message_timestamp":"2023-07-19T14:56:51.634234626Z"},
              "payload":{"session":{"id":"$sessionId","status":"connected","connected_at":"2023-07-19T14:56:51.616329898Z","keepalive_timeout_seconds":$keepalive,"reconnect_url":null}}}

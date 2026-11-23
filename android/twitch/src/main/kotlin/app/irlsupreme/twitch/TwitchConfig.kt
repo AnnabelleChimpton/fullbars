@@ -38,6 +38,14 @@ data class TwitchConfig(
         const val SCOPE_WRITE_CHAT = "user:write:chat"
         /** Follow alerts via EventSub `channel.follow` v2. Tokens from older app versions lack it: sign in again. */
         const val SCOPE_READ_FOLLOWERS = "moderator:read:followers"
+        /**
+         * Viewer TTS by channel points: create, pause and update Fullbars' own reward, refund or fulfil its
+         * redemptions, and receive them via EventSub `channel.channel_points_custom_reward_redemption.add`.
+         * Tokens from older app versions lack it: sign in again.
+         */
+        const val SCOPE_MANAGE_REDEMPTIONS = "channel:manage:redemptions"
+        /** Read the channel's blocked terms (Get Blocked Terms), so viewer TTS never says them. */
+        const val SCOPE_READ_BLOCKED_TERMS = "moderator:read:blocked_terms"
 
         val DEFAULT_SCOPES: List<String> = listOf(
             SCOPE_READ_STREAM_KEY,
@@ -45,6 +53,8 @@ data class TwitchConfig(
             SCOPE_READ_CHAT,
             SCOPE_WRITE_CHAT,
             SCOPE_READ_FOLLOWERS,
+            SCOPE_MANAGE_REDEMPTIONS,
+            SCOPE_READ_BLOCKED_TERMS,
         )
 
         /** Config using the client ID baked in at build time from local.properties `twitch.clientId`. */

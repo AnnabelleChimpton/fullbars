@@ -372,12 +372,17 @@ internal fun notice(
     micInput: String? = null,
     pocketHint: Boolean = false,
     battery: String? = null,
+    alert: String? = null,
+    tts: String? = null,
 ): String? = when {
     holdHint -> HOLD_HINT
     noAudio != null -> noAudio
     micInput != null -> micInput
     micLoud -> MIC_LOUD_HINT
     firstMute -> FIRST_MUTE_HINT
+    // Good news, but news the streamer may have missed while looking at the camera: ahead of the standing notices.
+    alert != null -> alert
+    tts != null -> tts
     battery != null -> battery
     pocketHint -> POCKET_HINT
     cameraLink != null -> cameraLink
@@ -395,6 +400,13 @@ internal const val POCKET_HINT = "Phone is warming up. Scenes › Pocket screen 
  */
 internal fun pocketHintDue(thermalRung: Int, thermalStatus: Int, thermalHeadroom: Float): Boolean =
     thermalRung >= 1 && (thermalStatus >= 2 || thermalHeadroom >= 0.85f)
+/** The notice line while a viewer's TTS message is up: "TTS from Sam, next" then "TTS from Sam". Pure. */
+internal fun ttsNotice(now: app.irlsupreme.service.TtsNow): String =
+    if (now.speaking) "TTS from ${now.user}" else "TTS from ${now.user}, next · Skip in Scenes"
+
+/** How long an alert ("Gift subs from …, 5 subs") stays in the notice line after it lands. */
+internal const val ALERT_NOTICE_MS = 12_000L
+
 /** How long the Pocket screen offer and a mic change stay in the notice line. */
 internal const val LONG_NOTICE_MS = 6_000L
 

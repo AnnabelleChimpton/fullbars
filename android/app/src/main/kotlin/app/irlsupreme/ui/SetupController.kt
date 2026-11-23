@@ -484,6 +484,10 @@ class SetupController internal constructor(private val ctx: Context, private val
 
     /** Signed in with a token from an older version that didn't ask for moderator:read:followers, so no follow alerts. */
     var followAlertsNeedSignIn by mutableStateOf(false); private set
+    /** What viewer TTS needs from Twitch: its reward and refunds, and the channel's blocked terms. */
+    private val TTS_SCOPES = listOf(TwitchConfig.SCOPE_MANAGE_REDEMPTIONS, TwitchConfig.SCOPE_READ_BLOCKED_TERMS)
+    /** This sign-in can't make or refund the viewer TTS reward (it predates that permission). */
+    var ttsNeedsSignIn by mutableStateOf(false); private set
 
     /**
      * At launch and on every return to the app. Shows the saved account at once (no "Checking" flash, no welcome for
@@ -501,20 +505,22 @@ class SetupController internal constructor(private val ctx: Context, private val
         if (resumePendingSignIn()) return
         val stored = withContext(Dispatchers.IO) { runCatching { twitch.session.stored() }.getOrNull() }
         if (stored == null) {
-            signIn = SignIn.SignedOut; followAlertsNeedSignIn = false; channel = null
+            signIn = SignIn.SignedOut; followAlertsNeedSignIn = false; ttsNeedsSignIn = false; channel = null
             return
         }
         val savedLogin = stored.login ?: "your channel"
         if (signIn !is SignIn.SignedIn) signIn = SignIn.SignedIn(savedLogin)
         followAlertsNeedSignIn = !stored.hasScopes(listOf(TwitchConfig.SCOPE_READ_FOLLOWERS))
+        ttsNeedsSignIn = !stored.hasScopes(TTS_SCOPES)
         try {
             val token = withContext(Dispatchers.IO) { twitch.session.current() }
             signIn = SignIn.SignedIn(token.login ?: savedLogin)
             followAlertsNeedSignIn = !token.hasScopes(listOf(TwitchConfig.SCOPE_READ_FOLLOWERS))
+            ttsNeedsSignIn = !token.hasScopes(TTS_SCOPES)
             if (channel == null) loadChannel()
         } catch (e: TwitchException) {
             Log.w(TAG, "sign-in check failed: ${e.message}")
-            if (!e.isTransient) { signIn = SignIn.SignedOut; followAlertsNeedSignIn = false; channel = null }
+            if (!e.isTransient) { signIn = SignIn.SignedOut; followAlertsNeedSignIn = false; ttsNeedsSignIn = false; channel = null }
         } catch (e: java.io.IOException) {
             Log.w(TAG, "sign-in check failed: ${e.javaClass.simpleName}")
         }
@@ -653,6 +659,7 @@ class SetupController internal constructor(private val ctx: Context, private val
             val again = signInBefore != null
             signIn = SignIn.SignedIn(token.login ?: "your channel")
             followAlertsNeedSignIn = !token.hasScopes(listOf(TwitchConfig.SCOPE_READ_FOLLOWERS))
+            ttsNeedsSignIn = !token.hasScopes(TTS_SCOPES)
             if (again) snackbar = if (followAlertsNeedSignIn) "Signed in again." else "Signed in again. Follow alerts are on."
             signInBefore = null
             loadChannel()
@@ -706,7 +713,7 @@ class SetupController internal constructor(private val ctx: Context, private val
     fun signOut() {
         scope.launch {
             withContext(Dispatchers.IO) { runCatching { twitch.session.signOut() } }
-            signIn = SignIn.SignedOut; channel = null; followAlertsNeedSignIn = false
+            signIn = SignIn.SignedOut; channel = null; followAlertsNeedSignIn = false; ttsNeedsSignIn = false
         }
     }
 

@@ -40,6 +40,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
@@ -233,6 +234,7 @@ class StreamService : Service() {
         startHotspot(target)
         startOverlays(config.width, config.height)
         startAlerts(config.width, config.height)
+        startTts()
         startTips()
         if (target is OutputTarget.Bonded) startRemote()
         if (ExternalCamera.kind(this) == ExternalCamera.Kind.POCKET) startPocket()
@@ -560,7 +562,10 @@ class StreamService : Service() {
                     runCatching { twitch.session.validate() }
                 }
             }
-            launch { twitch.chat.alerts.collect { AlertQueue.post(it) } }
+            launch {
+                twitch.chat.alerts.collect { AlertQueue.post(it) }
+            }
+            launch { runTtsTwitch(twitch) }
             // Which alerts Twitch will actually send this stream: in the log, so a missing follow alert has a reason.
             launch {
                 twitch.chat.alertSubscriptions.collect { a ->
@@ -614,6 +619,8 @@ class StreamService : Service() {
         }
         ChatCommand.End -> { scope.launch { delay(1_500); main.post { stopAndForget(EndReason.MOD) } }; "Ending the stream" }
         is ChatCommand.Quality -> "Quality changes from chat aren't supported yet"
+        // TODO(viewer TTS): stop the speaking message and reply "Skipped" once the TTS player is wired in.
+        ChatCommand.Skip -> if (TtsQueue.now.value != null) { TtsQueue.skip(); "TTS skipped" } else null
     }
 
     /** Shows [scene] for a mod (`!scene`, the mod remote): a built-in as its own command does, your own scenes directly. */
@@ -703,11 +710,19 @@ class StreamService : Service() {
                 val st = engine.state.value
                 // Your own scenes go up with their names, so the remote shows a button for each.
                 val own = SceneNames.created.map { (scene, name) -> scene.name to name }
-                runCatching { client.pollRemote(st.running, st.scene.name, !st.micMuted, own) }.getOrNull()?.forEach { picked ->
-                    val scene = ModScenes.fromRemote(picked, SceneNames.created)
-                    if (scene != null) {
-                        Log.i(TAG, "mod remote: ${SceneNames.logName(scene)}")
-                        showScene(scene)
+                runCatching { client.pollRemote(st.running, st.scene.name, !st.micMuted, own) }.getOrNull()?.forEach { cmd ->
+                    when (cmd) {
+                        RemoteCommand.SkipTts -> {
+                            Log.i(TAG, "mod remote: skip TTS")
+                            TtsQueue.skip()
+                        }
+                        is RemoteCommand.Scene -> {
+                            val scene = ModScenes.fromRemote(cmd.name, SceneNames.created)
+                            if (scene != null) {
+                                Log.i(TAG, "mod remote: ${SceneNames.logName(scene)}")
+                                showScene(scene)
+                            }
+                        }
                     }
                 }
                 delay(2_000)
@@ -718,12 +733,240 @@ class StreamService : Service() {
     private var speaker: ChatSpeaker? = null
 
     /** Reads [m] into the streamer's headphones if Settings › Twitch › Read chat aloud says so (and headphones are on). */
+    private fun readAloudMode(): ReadAloud =
+        ReadAloud.entries.firstOrNull { it.name == getSharedPreferences("settings", MODE_PRIVATE).getString("read_aloud", null) } ?: ReadAloud.OFF
+
     private fun readAloud(m: app.irlsupreme.twitch.ChatMessage, isCommand: Boolean) {
-        val mode = ReadAloud.entries.firstOrNull { it.name == getSharedPreferences("settings", MODE_PRIVATE).getString("read_aloud", null) } ?: ReadAloud.OFF
+        val mode = readAloudMode()
         if (!ChatSpeechText.shouldRead(m, mode, isCommand)) return
         val text = ChatSpeechText.utterance(m) ?: return
         val s = speaker ?: ChatSpeaker(this).also { speaker = it }
         s.say(text)
+    }
+
+    /**
+     * An alert reaching viewers, told to the streamer, who is usually looking at the camera, not the phone: a firm buzz
+     * from here, so it's felt whatever is on screen (another app, the Pocket screen), and the sentence read aloud
+     * when chat is. The Live screen also puts it in the notice line. On the first real stream a 5-sub gift went
+     * unnoticed: the only cue was two faint ticks, and only while the Live screen was up.
+     */
+    private fun tellStreamer(card: AlertCard) {
+        app.irlsupreme.ui.theme.FbHaptics.play(this, app.irlsupreme.ui.theme.HapticPattern.ALERT)
+        if (readAloudMode() == ReadAloud.OFF) return
+        (speaker ?: ChatSpeaker(this).also { speaker = it }).say(card.spoken)
+    }
+
+    // --- Viewer TTS ---------------------------------------------------------------------------------------------------
+
+    private var ttsJob: Job? = null
+    private var ttsSpeaker: TtsSpeaker? = null
+    private var ttsEarbuds: SoundPlayer? = null
+    /** The channel's Twitch blocked terms, fetched as the stream starts (empty without the scope). */
+    @Volatile private var ttsTwitchTerms: List<String> = emptyList()
+    /**
+     * Settles a channel points request on Twitch: FULFILLED once spoken, CANCELED (the points go back) when dropped or
+     * skipped. Set once Twitch is up for the stream; a no-op until then and for bits.
+     */
+    @Volatile private var ttsSettle: suspend (TtsRequest, Boolean) -> Unit = { _, _ -> }
+
+    /**
+     * An alert the streamer wants said out loud ([AlertSay], per kind), handed to viewer TTS as its card comes in: a
+     * thank-you goes at once (after the chime), said over its own card; with the viewer's message it waits the
+     * streamer's wait like any viewer text, so a mod can !skip it. Only while viewer TTS is on.
+     */
+    private fun sayAlert(a: app.irlsupreme.twitch.TwitchAlert, card: AlertCard) {
+        val tts = TtsSettings.current(this)
+        if (!tts.on) return
+        val o = AlertOptionsStore.state(this).value.of(AlertKind.of(a))
+        if (!AlertFilter.says(a, o)) return
+        val blocked = tts.ownList + (if (tts.twitchTerms) ttsTwitchTerms else emptyList())
+        if (AlertSpeech.messageBlocked(a, o.say, blocked)) sessionLog?.line("tts: alert message left out (blocked word)")
+        val line = AlertSpeech.line(a, o.say, blocked) ?: return
+        val withWords = o.say == AlertSay.MESSAGE && line.length > (AlertSpeech.line(a, AlertSay.THANKS, blocked)?.length ?: 0)
+        TtsQueue.post(
+            TtsRequest(
+                "alert-${card.id}", TtsSource.ALERT, card.name, line, alertId = card.id,
+                waitS = if (withWords) null else 0, notBeforeMs = System.currentTimeMillis() + ALERT_SAY_DELAY_MS,
+            ),
+        )
+    }
+
+    private fun settleTts(r: TtsRequest, spoken: Boolean) {
+        if (r.source != TtsSource.POINTS) return
+        val settle = ttsSettle
+        // Not the service's scope: refunds as the stream ends must still go out after the service has gone.
+        ttsAfterScope.launch {
+            runCatching { settle(r, spoken) }.onFailure { Log.w(TAG, "tts: settling a redemption failed: ${it.javaClass.simpleName}") }
+        }
+    }
+
+    /** The reward this stream unpaused, paused again when the stream ends. */
+    @Volatile private var ttsRewardUp: String? = null
+
+    /**
+     * Twitch's side of viewer TTS for this stream, following the settings as they change (Scenes' switch included):
+     * the channel's blocked terms once; Fullbars' "Make me talk" reward found or made, matched to the price, cooldown
+     * and prompt, unpaused, and its redemptions queued; paused again when TTS or channel points go off, and when the
+     * stream ends ([pauseTtsReward]). Failures are logged and leave TTS on bits only.
+     */
+    private suspend fun runTtsTwitch(twitch: app.irlsupreme.twitch.TwitchClient) = kotlinx.coroutines.coroutineScope {
+        launch {
+            twitch.chat.redemptions.collect { r ->
+                TtsQueue.post(TtsRequest("points-${r.id}", TtsSource.POINTS, r.user, r.text, redemptionId = r.id, rewardId = r.rewardId))
+            }
+        }
+        var termsTried = false
+        TtsSettings.state(this@StreamService).map { TtsReward.wanted(it) }.distinctUntilChanged().collect { w ->
+            if (w.on && w.twitchTerms && !termsTried) {
+                termsTried = true
+                runCatching { twitch.blockedTerms() }
+                    .onSuccess { ttsTwitchTerms = it; sessionLog?.line("tts: ${it.size} Twitch blocked terms") }
+                    .onFailure { sessionLog?.line("tts: Twitch blocked terms unavailable (${it.javaClass.simpleName})") }
+            }
+            if (!w.on || !w.pointsOn) {
+                twitch.chat.setRedemptionReward(null)
+                pauseTtsReward()
+                return@collect
+            }
+            val reward = runCatching { ensureTtsReward(twitch, w) }
+                .onFailure { sessionLog?.line("tts: no channel points reward (${it.javaClass.simpleName})") }
+                .getOrNull() ?: return@collect
+            TtsSettings.update(this@StreamService) { it.copy(rewardId = reward) }
+            ttsRewardUp = reward
+            ttsSettle = { r, spoken ->
+                val rid = r.redemptionId
+                if (rid != null) twitch.updateRedemptionStatus(
+                    r.rewardId ?: reward, rid,
+                    if (spoken) app.irlsupreme.twitch.RedemptionStatus.FULFILLED else app.irlsupreme.twitch.RedemptionStatus.CANCELED,
+                )
+            }
+            twitch.chat.setRedemptionReward(reward)
+            sessionLog?.line("tts: channel points reward up")
+        }
+    }
+
+    /** Fullbars' reward, made if it's gone, set to [w] and unpaused; its id. */
+    private suspend fun ensureTtsReward(twitch: app.irlsupreme.twitch.TwitchClient, w: TtsReward): String {
+        val saved = TtsSettings.current(this).rewardId
+        val mine = twitch.customRewards(onlyManageable = true)
+        val found = mine.firstOrNull { it.id == saved } ?: mine.firstOrNull { it.title == TtsReward.TITLE }
+        return if (found == null) {
+            twitch.createCustomReward(TtsReward.TITLE, w.cost, w.prompt, userInputRequired = true, globalCooldownSec = w.cooldownS, isPaused = false).id
+        } else {
+            twitch.updateCustomReward(found.id, isPaused = false, cost = w.cost, globalCooldownSec = w.cooldownS, prompt = w.prompt, isEnabled = true).id
+        }
+    }
+
+    /** Pauses the reward this stream unpaused, so viewers can't spend points while nobody will hear them. */
+    private fun pauseTtsReward() {
+        val id = ttsRewardUp ?: return
+        ttsRewardUp = null
+        val twitch = Twitch.get(this)
+        ttsAfterScope.launch {
+            runCatching { twitch.updateCustomReward(id, isPaused = true) }
+                .onFailure { Log.w(TAG, "tts: pausing the reward failed: ${it.javaClass.simpleName}") }
+        }
+    }
+
+    private fun stopTts() {
+        ttsJob?.cancel(); ttsJob = null
+        pauseTtsReward()
+        engine.stopSpeech()
+        ttsEarbuds?.stop(); ttsEarbuds = null
+        ttsSpeaker?.shutdown(); ttsSpeaker = null
+        // Points still waiting go back to the viewers who spent them.
+        TtsQueue.clear().forEach { settleTts(it, spoken = false) }
+        TtsQueue.show(null)
+        TtsQueue.onDropped { }
+        ttsSettle = { _, _ -> }
+        ttsTwitchTerms = emptyList()
+    }
+
+    /**
+     * Viewer TTS, one message at a time ([TtsQueue]): filtered ([TtsText.prepare]: a drop is logged by reason and
+     * refunded), held for the streamer's wait (mods can !skip meanwhile) and until no alert card is up and alerts may
+     * show (not on Privacy, a weak signal, a lost camera or a held card) with the mic on, then mixed into the stream in
+     * its own slot ([StreamEngine.playSpeech]) and, in headphones only, played to the streamer at the same moment.
+     * Synthesis runs during the wait. The log has the source and the voice, never who or what.
+     */
+    private fun startTts() {
+        stopTts()
+        val speaker = TtsSpeaker(this).also { ttsSpeaker = it }
+        val earbuds = SoundPlayer(this).also { ttsEarbuds = it }
+        val audio = getSystemService(android.media.AudioManager::class.java)
+        val testStream = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("live_test", false)
+        TtsQueue.onDropped { r ->
+            sessionLog?.line("tts: dropped (queue full)${if (r.source == TtsSource.POINTS) ", refunded" else ""}")
+            settleTts(r, spoken = false)
+        }
+        ttsJob = scope.launch {
+            var skipsSeen = TtsQueue.skips.value
+            fun skipped() = TtsQueue.skips.value != skipsSeen
+            fun refundWord(r: TtsRequest) = if (r.source == TtsSource.POINTS) ", refunded" else ""
+            fun afterSkip(r: TtsRequest, p: TtsPrefs) {
+                skipsSeen = TtsQueue.skips.value
+                sessionLog?.line("tts: skipped${refundWord(r)}")
+                settleTts(r, spoken = false)
+                if (p.skipClearsQueue) TtsQueue.clear().forEach {
+                    sessionLog?.line("tts: cleared by a skip${refundWord(it)}")
+                    settleTts(it, spoken = false)
+                }
+            }
+            fun canSpeak(r: TtsRequest): Boolean {
+                val st = engine.state.value
+                return AlertQueue.current.value.let { it == null || it.id == r.alertId } && engine.alertsAllowed && AlertHold.allowed(st) && !st.micMuted
+            }
+            while (isActive) {
+                val r = TtsQueue.next()
+                if (r == null) {
+                    skipsSeen = TtsQueue.skips.value // a skip with nothing up doesn't carry over to the next one
+                    delay(TTS_POLL_MS)
+                    continue
+                }
+                val p = TtsSettings.current(this@StreamService)
+                if (!p.on && r.source != TtsSource.TEST) { settleTts(r, spoken = false); continue }
+                val blocked = p.ownList + (if (p.twitchTerms) ttsTwitchTerms else emptyList())
+                val prep = TtsText.prepare(r.text, blocked)
+                if (prep is TtsPrepared.Drop) {
+                    sessionLog?.line("tts: dropped (${prep.why.reason})${refundWord(r)}")
+                    settleTts(r, spoken = false)
+                    continue
+                }
+                prep as TtsPrepared.Speak
+                val speakAt = maxOf(System.currentTimeMillis() + (r.waitS ?: p.waitS) * 1000L, r.notBeforeMs)
+                TtsQueue.show(TtsNow(r.user, speaking = false, speakAtMs = speakAt, waiting = TtsQueue.waiting()))
+                val clip = async { speaker.synthesize(prep.text) }
+                while (!skipped() && (System.currentTimeMillis() < speakAt || !canSpeak(r))) delay(TTS_POLL_MS)
+                if (skipped()) {
+                    clip.cancel()
+                    afterSkip(r, p)
+                    TtsQueue.show(null)
+                    continue
+                }
+                val c = clip.await()
+                if (c == null) {
+                    sessionLog?.line("tts: dropped (the phone couldn't speak it)${refundWord(r)}")
+                    settleTts(r, spoken = false)
+                    TtsQueue.show(null)
+                    continue
+                }
+                engine.playSpeech(c, p.gainDb.toFloat())
+                val heard = TtsHeard.of(Headphones.connected(audio), p.earbuds, testStream)
+                if (heard != TtsHeard.NOT_HERE) earbuds.play(c.toPcmClip())
+                TtsQueue.show(TtsNow(r.user, speaking = true, speakAtMs = speakAt, waiting = TtsQueue.waiting()))
+                sessionLog?.line("tts: spoken (${r.source.word}; ${heard.words})")
+                while (engine.speechPlaying && !skipped()) delay(TTS_POLL_MS)
+                if (skipped()) {
+                    engine.stopSpeech()
+                    earbuds.stop()
+                    afterSkip(r, p)
+                } else {
+                    settleTts(r, spoken = true)
+                }
+                TtsQueue.show(null)
+                delay(TTS_GAP_MS)
+            }
+        }
     }
 
     private var tipsJob: Job? = null
@@ -785,7 +1028,7 @@ class StreamService : Service() {
                 }
                 if (!engine.alertsAllowed || !AlertHold.allowed(engine.state.value)) { delay(AlertTiming.HOLD_POLL_MS); continue }
                 turn.done()
-                showAlert(AlertText.card(a), s, width, height)
+                showAlert(a, AlertText.card(a), s, width, height)
             }
         }
     }
@@ -795,7 +1038,7 @@ class StreamService : Service() {
      * dwell and wipes it out), with the chime started so its attack lands on the first fully revealed frame. Returns
      * after the exit and the gap before the next alert.
      */
-    private suspend fun showAlert(card: AlertCard, s: OverlaySettings, width: Int, height: Int) {
+    private suspend fun showAlert(alert: app.irlsupreme.twitch.TwitchAlert, card: AlertCard, s: OverlaySettings, width: Int, height: Int) {
         val st = engine.state.value
         val onCard = AlertHold.onCard(st.scene)
         // A corner layer only counts where it's drawn: over a card, only if the streamer put the layers on cards too.
@@ -813,6 +1056,8 @@ class StreamService : Service() {
         try {
             delay(enterMs)
             AlertQueue.show(card) // fully revealed: the Live screen announces it now
+            tellStreamer(card)
+            sayAlert(alert, card)
             delay(card.dwellMs)
         } finally {
             AlertQueue.show(null)
@@ -971,6 +1216,7 @@ class StreamService : Service() {
         stopHotspot()
         overlayJob?.cancel(); overlayJob = null
         alertJob?.cancel(); alertJob = null
+        stopTts()
         tipsJob?.cancel(); tipsJob = null
         speaker?.shutdown(); speaker = null
         remoteJob?.cancel(); remoteJob = null
@@ -1114,6 +1360,16 @@ class StreamService : Service() {
         private const val AUDIO_DIAGNOSTICS_AFTER_MS = 10_000L
         /** A keyframe poll gives up after this: the next one is due soon anyway. */
         private const val KEYFRAME_POLL_TIMEOUT_MS = 1_500L
+        /** How often the TTS player looks at its queue, the skip and the speech (ms), and its gap after a message. */
+        private const val TTS_POLL_MS = 100L
+        private const val TTS_GAP_MS = 600L
+        /** A thank-you starts this long after its card is in, once the chime has landed. */
+        private const val ALERT_SAY_DELAY_MS = 900L
+        /**
+         * Settling viewer TTS on Twitch (refunds, pausing the reward) as a stream ends: short calls that must outlive
+         * the service's own scope, which is cancelled when it's destroyed.
+         */
+        private val ttsAfterScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         const val ACTION_START = "app.irlsupreme.START"
         const val ACTION_STOP = "app.irlsupreme.STOP"
         const val ACTION_SCENE = "app.irlsupreme.SCENE"

@@ -148,6 +148,8 @@ import app.irlsupreme.ui.live.endKey
 import app.irlsupreme.ui.live.linkCells
 import app.irlsupreme.ui.live.micCell
 import app.irlsupreme.ui.live.batteryNotice
+import app.irlsupreme.ui.live.ALERT_NOTICE_MS
+import app.irlsupreme.ui.live.ttsNotice
 import app.irlsupreme.ui.live.batteryStep
 import app.irlsupreme.ui.live.rememberChatText
 import app.irlsupreme.ui.live.MicSheet
@@ -431,17 +433,22 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         }
     }
 
-    // A Twitch alert is felt and spoken politely, never over an assertive loss: it waits 1.5 s behind one.
+    // A Twitch alert is spoken politely, never over an assertive loss: it waits 1.5 s behind one. The buzz comes from
+    // the stream service (felt whatever is on screen); the notice line keeps who and what up for a glance afterwards.
     val alert by AlertQueue.current.collectAsState()
     var alertText by remember { mutableStateOf<String?>(null) }
+    var alertNotice by remember { mutableStateOf<String?>(null) }
+    val ttsPrefs by app.irlsupreme.service.TtsSettings.state(ctx).collectAsState()
+    val ttsNow by app.irlsupreme.service.TtsQueue.now.collectAsState()
     LaunchedEffect(alert?.id) {
         val a = alert ?: return@LaunchedEffect
+        alertNotice = a.spoken
+        launch { delay(ALERT_NOTICE_MS); if (alertNotice == a.spoken) alertNotice = null }
         while (true) {
             val wait = alertWaitMs(System.currentTimeMillis(), lastAssertiveAt)
             if (wait <= 0L) break
             delay(wait)
         }
-        FbHaptics.play(view, HapticPattern.ALERT)
         alertText = a.spoken
     }
 
@@ -510,6 +517,8 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
         noAudio = if (state.micMuted) null else audioProblem(state.audioInput),
         // On a card the pill already says "mic off"; the hint is for the camera, where nothing else does.
         firstMute = firstMuteAt != 0L && state.scene == Scene.LIVE,
+        alert = alertNotice,
+        tts = ttsNow?.let(::ttsNotice),
         cameraLink = cameraLink,
         helperProblem = helperProblem?.takeIf { it != seenProblem }?.let { "No helper hotspot. Tap the pill for why." },
         micLoud = micLoud && !state.micMuted && !micOpen,
@@ -617,6 +626,9 @@ fun LiveScreen(engine: StreamEngine, state: EngineState, isTest: Boolean = false
                     onPocketScreen = { scenesOpen = false; pocketHintAt = 0L; pocketScreen = true },
                     captionsOn = captionPrefs.on, captionStatus = state.captions,
                     onCaptions = { on -> CaptionSettings.setOn(ctx, on) },
+                    ttsOn = ttsPrefs.on, ttsNow = ttsNow,
+                    onTts = { on -> app.irlsupreme.service.TtsSettings.update(ctx) { it.copy(on = on) } },
+                    onTtsSkip = { app.irlsupreme.service.TtsQueue.skip() },
                 )
             }
             val instrument: @Composable (InstrumentLayout, Modifier) -> Unit = { layout, m ->

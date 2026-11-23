@@ -197,12 +197,12 @@ class BrbClient(private val pairing: BrbPairing) {
      * Tells the server what viewers see and collects the mods' picks since the last poll (scene names). [own] are the
      * streamer's own scenes, (enum name, name as shown), so the remote can offer them. Blocking.
      */
-    fun pollRemote(live: Boolean, scene: String, micOn: Boolean, own: List<Pair<String, String>> = emptyList()): List<String> {
+    fun pollRemote(live: Boolean, scene: String, micOn: Boolean, own: List<Pair<String, String>> = emptyList()): List<RemoteCommand> {
         val scenes = org.json.JSONArray().apply { own.forEach { (id, name) -> put(JSONObject().put("id", id).put("name", name)) } }
         val body = JSONObject().put("live", live).put("scene", scene).put("mic", micOn).put("scenes", scenes)
             .toString().toRequestBody("application/json".toMediaType())
         val cmds = call(Request.Builder().url("$base/v1/remote/poll").post(body)).optJSONArray("commands") ?: return emptyList()
-        return (0 until cmds.length()).mapNotNull { cmds.optJSONObject(it)?.optString("scene")?.takeIf { s -> s.isNotEmpty() } }
+        return (0 until cmds.length()).mapNotNull { cmds.optJSONObject(it)?.let(RemoteCommand::of) }
     }
 
     /**
@@ -397,4 +397,19 @@ internal class SlateRetry(
 /** A pairing link that arrived from outside (a tapped fullbars:// link) and waits for the user's OK on the setup screen. */
 object PendingPairing {
     val link = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+}
+
+/** What a mod picked on the remote: a scene by name, or a skip of the viewer TTS being said (`{"action":"skip"}`). */
+sealed interface RemoteCommand {
+    data class Scene(val name: String) : RemoteCommand
+    data object SkipTts : RemoteCommand
+
+    companion object {
+        /** One command from the server's poll answer; null for one this app doesn't know (a newer server's). */
+        fun of(o: JSONObject): RemoteCommand? = when {
+            o.optString("action") == "skip" -> SkipTts
+            o.optString("scene").isNotEmpty() -> Scene(o.optString("scene"))
+            else -> null
+        }
+    }
 }

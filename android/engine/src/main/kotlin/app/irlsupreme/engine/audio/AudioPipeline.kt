@@ -87,6 +87,18 @@ class AudioPipeline(
     fun playEffect(samples: ShortArray, startAtNs: Long, gain: Float, replaces: Boolean) =
         stage.playEffect(samples, startAtNs, gain, replaces)
 
+    /**
+     * A viewer's TTS message ([samples] in the stream's layout) mixed into the stream at [gain] from the next chunk,
+     * in a slot of its own next to the alert sounds (neither cuts the other off). Replaces one still waiting to start.
+     */
+    fun playSpeech(samples: ShortArray, gain: Float = 1f) = stage.playSpeech(samples, gain)
+
+    /** Fades the TTS message out (~20 ms) and drops one waiting to start. */
+    fun stopSpeech() = stage.stopSpeech()
+
+    /** Whether a TTS message is waiting to start or playing. */
+    val speechPlaying: Boolean get() = stage.speechPlaying
+
     /** Card music, mixed under the voice inside the limiter; null for none. */
     internal var music: MusicSource?
         get() = stage.music

@@ -57,6 +57,8 @@ import app.irlsupreme.service.AlertOptionsCodec
 import app.irlsupreme.service.AlertOptionsStore
 import app.irlsupreme.service.AlertPaint
 import app.irlsupreme.service.AlertPlace
+import app.irlsupreme.service.AlertSay
+import app.irlsupreme.service.AlertSpeech
 import app.irlsupreme.service.AlertSize
 import app.irlsupreme.service.AlertStyleText
 import app.irlsupreme.service.AlertStyles
@@ -145,6 +147,7 @@ internal fun alertKindSummary(
             sound == AlertSoundChoice.NONE -> add("no sound")
         }
         if (lookCustom || o.paint != AlertPaint()) add("custom look")
+        if (o.say != AlertSay.OFF) add("said out loud")
     }
     return if (parts.isEmpty()) "Default" else parts.joinToString(" · ").replaceFirstChar { it.uppercase() }
 }
@@ -221,6 +224,7 @@ private fun AlertKindSettings(kind: AlertKind, o: AlertKindOptions, soundsOn: Bo
         onCheckedChange = { set(o.copy(on = it)) },
     )
     if (o.on) MinimumRows(kind, o, ::set)
+    if (o.on) SayRows(kind, o, ::set)
 
     SectionHeader("Length")
     KeyChoice("Length", AlertLength.entries, o.length, { it.title }) { set(o.copy(length = it)) }
@@ -246,6 +250,46 @@ private fun AlertKindSettings(kind: AlertKind, o: AlertKindOptions, soundsOn: Bo
 /** "4 s", "3.6 s". */
 private fun seconds(ms: Long): String =
     if (ms % 1000 == 0L) "${ms / 1000} s" else String.format(Locale.US, "%.1f s", ms / 1000.0)
+
+/**
+ * Said out loud by viewer TTS as it comes in: off, a thank-you, or the thank-you and their words; for kinds with an
+ * amount, the smallest worth saying. A sample line shows what's said; a note says so when viewer TTS itself is off.
+ */
+@Composable
+private fun SayRows(kind: AlertKind, o: AlertKindOptions, set: (AlertKindOptions) -> Unit) {
+    val ctx = LocalContext.current
+    val tts by app.irlsupreme.service.TtsSettings.state(ctx).collectAsState()
+    SectionHeader("Say it out loud")
+    KeyChoice("Say it out loud", alertSayChoices(kind), o.say, ::alertSayTitle) { set(o.copy(say = it)) }
+    if (o.say == AlertSay.OFF) return
+    AlertSpeech.line(SampleAlert.valueOf(kind.name).alert(0), o.say)?.let { HelpText("\u201c$it\u201d") }
+    if (!tts.on) {
+        InlineError(
+            "Viewer TTS is off, so nothing is said.", actionLabel = "Turn on",
+            onAction = { app.irlsupreme.service.TtsSettings.update(ctx) { it.copy(on = true) } },
+        )
+    }
+    when (kind) {
+        AlertKind.FOLLOW, AlertKind.SUB -> Unit
+        AlertKind.TIP -> NumberField(
+            "Smallest tip to say", if (o.sayFrom > 0) TipAmount.format(o.sayFrom) else "", decimal = true,
+            supporting = "Blank says every tip that shows.",
+            parse = TipAmount::parseMinimum,
+        ) { set(o.copy(sayFrom = AlertOptionsCodec.boundMinimum(kind, it))) }
+        else -> {
+            val label = when (kind) {
+                AlertKind.BITS -> "Fewest bits to say"
+                AlertKind.GIFT -> "Fewest gift subs to say"
+                else -> "Fewest raiders to say"
+            }
+            NumberField(
+                label, if (o.sayFrom > 0) "${o.sayFrom}" else "", decimal = false,
+                supporting = "Blank says every one that shows.",
+                parse = { s -> if (s.isBlank()) 0 else s.trim().toLongOrNull()?.takeIf { it >= 0 } },
+            ) { set(o.copy(sayFrom = AlertOptionsCodec.boundMinimum(kind, it))) }
+        }
+    }
+}
 
 /** The smallest of [kind] worth showing: a number, or for subs, Prime and resub months. */
 @Composable

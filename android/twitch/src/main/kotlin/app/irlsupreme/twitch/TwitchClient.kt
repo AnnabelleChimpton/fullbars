@@ -67,4 +67,49 @@ class TwitchClient(
     suspend fun searchCategories(query: String): List<TwitchCategory> = session.withToken { token ->
         helix.searchCategories(token, query)
     }
+
+    /**
+     * The signed-in channel's channel points rewards (scope channel:manage:redemptions); with [onlyManageable], only
+     * the ones Fullbars created. [TwitchException.Forbidden] when the channel has no channel points.
+     */
+    suspend fun customRewards(onlyManageable: Boolean = true): List<CustomReward> = session.withToken { token ->
+        helix.getCustomRewards(token, userId(token), onlyManageable)
+    }
+
+    /** Creates a channel points reward on the signed-in channel. See [HelixClient.createCustomReward]. */
+    suspend fun createCustomReward(
+        title: String,
+        cost: Int,
+        prompt: String? = null,
+        userInputRequired: Boolean = true,
+        globalCooldownSec: Int = 0,
+        isPaused: Boolean = false,
+    ): CustomReward = session.withToken { token ->
+        helix.createCustomReward(token, userId(token), title, cost, prompt, userInputRequired, globalCooldownSec, isPaused)
+    }
+
+    /** Changes a reward Fullbars created; pass only what changes. See [HelixClient.updateCustomReward]. */
+    suspend fun updateCustomReward(
+        rewardId: String,
+        isPaused: Boolean? = null,
+        cost: Int? = null,
+        globalCooldownSec: Int? = null,
+        prompt: String? = null,
+        isEnabled: Boolean? = null,
+    ): CustomReward = session.withToken { token ->
+        helix.updateCustomReward(token, userId(token), rewardId, isPaused, cost, globalCooldownSec, prompt, isEnabled)
+    }
+
+    /** Fulfils (keeps the points) or cancels (refunds) a waiting redemption. See [HelixClient.updateRedemptionStatus]. */
+    suspend fun updateRedemptionStatus(rewardId: String, redemptionId: String, status: RedemptionStatus) = session.withToken { token ->
+        helix.updateRedemptionStatus(token, userId(token), rewardId, redemptionId, status)
+    }
+
+    /** The signed-in channel's blocked terms (scope moderator:read:blocked_terms), every page. */
+    suspend fun blockedTerms(): List<String> = session.withToken { token ->
+        val id = userId(token)
+        helix.getBlockedTerms(token, id, id)
+    }
+
+    private suspend fun userId(token: TwitchToken): String = token.userId ?: helix.getCurrentUser(token).id
 }

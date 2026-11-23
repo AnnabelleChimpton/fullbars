@@ -51,7 +51,10 @@ import app.irlsupreme.ui.StreamOrientation
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --ez debug_screenshots true   (setup screens capturable)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_captions on|off   (live captions; mid-stream too)
  *   ... --es debug_caption_clip speech.pcm   (while streaming with captions: feed a 16 kHz clip to them instead of the voice)
- *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_camera external   (or phone)
+ *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_camera external   (or phone, pocket)
+ *   ... --ez debug_as_test true   (with debug_url/debug_bond: count it as a Test stream, as Home's TEST would)
+ *   debug_camera, debug_url and debug_bond change the user's camera and TEST/LIVE choice; debug_stop (or
+ *   --ez debug_restore true) puts back what they were before the first debug change.
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --ei debug_pocket_kbps 6000
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_browser test   (or crash, off)
  *   adb shell am start -n app.irlsupreme/.debug.DebugActivity --es debug_alert raid   (follow|sub|resub|gift|raid|cheer)
@@ -101,19 +104,20 @@ class DebugActivity : ComponentActivity() {
         Log.i(TAG, "debug intent: ${intent.extras?.keySet()?.sorted()}")
         if (intent.getBooleanExtra("debug_screenshots", false)) ScreenCapture.allowed = true
         intent.getIntExtra("debug_pocket_kbps", 0).takeIf { it > 0 }?.let { ExternalCamera.setPocketKbps(this, it) }
-        intent.getStringExtra("debug_camera")?.let { // "external" | "phone"
-            ExternalCamera.setEnabled(this, it == "external")
+        intent.getStringExtra("debug_camera")?.let { // "external" | "phone" | "pocket"
+            saveOnce("camera_kind")
+            if (it == "pocket") ExternalCamera.setKind(this, ExternalCamera.Kind.POCKET) else ExternalCamera.setEnabled(this, it == "external")
             ExternalCamera.path(this)
         }
         intent.getStringExtra("debug_url")?.let { url ->
-            notATwitchTest()
+            notATwitchTest(intent.getBooleanExtra("debug_as_test", false))
             val (w, h, bps) = streamSize(intent)
             withPermissions(listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)) {
                 StreamService.start(this, url, w, h, bps, preview = intent.getBooleanExtra("debug_preview", false))
             }
         }
         intent.getStringExtra("debug_bond")?.let { // any value: stream to the paired BRB server (as set up in the app)
-            notATwitchTest()
+            notATwitchTest(intent.getBooleanExtra("debug_as_test", false))
             val (w, h, bps) = streamSize(intent)
             val p = BrbPairingStore(SecretStore(this)).load()
             if (p == null) Log.w(TAG, "debug_bond: no paired BRB server")
@@ -121,7 +125,8 @@ class DebugActivity : ComponentActivity() {
                 StreamService.startBonded(this, p.host, p.port, "live/${p.publishId}", p.srtPassphrase, w, h, bps, preview = intent.getBooleanExtra("debug_preview", false))
             }
         }
-        if (intent.getBooleanExtra("debug_stop", false)) StreamService.stop(this)
+        if (intent.getBooleanExtra("debug_stop", false)) { StreamService.stop(this); restoreSaved() }
+        if (intent.getBooleanExtra("debug_restore", false)) restoreSaved()
         intent.getStringExtra("debug_golive")?.let { s -> // end the preview: "camera", or a scene such as STARTING_SOON
             StreamService.goLive(this, runCatching { Scene.valueOf(s) }.getOrNull())
         }
@@ -140,6 +145,21 @@ class DebugActivity : ComponentActivity() {
                 else it.setBrowserOverlay(if (v == "test") BrowserSource.Content.Html(DEBUG_OVERLAY_HTML) else null)
             }
         }
+        intent.getStringExtra("debug_tts")?.let { text -> // a pretend viewer TTS message ("deep: hello chat")
+            app.irlsupreme.service.TtsQueue.post(
+                app.irlsupreme.service.TtsRequest("debug-tts-${System.nanoTime()}", app.irlsupreme.service.TtsSource.TEST, "Tester", text),
+            )
+        }
+        if (intent.getBooleanExtra("debug_tts_voices", false)) { // the engine's voices, to files/tts-voices.txt
+            val appCtx = applicationContext
+            Thread {
+                val speaker = app.irlsupreme.service.TtsSpeaker(appCtx)
+                val text: String = kotlinx.coroutines.runBlocking { speaker.describeVoices() }
+                java.io.File(appCtx.filesDir, "tts-voices.txt").writeText(text)
+                speaker.shutdown()
+            }.start()
+        }
+        intent.getBooleanExtra("debug_tts_skip", false).takeIf { it }?.let { app.irlsupreme.service.TtsQueue.skip() }
         intent.getStringExtra("debug_alert")?.let { kind -> // a pretend alert
             val id = "debug-${System.nanoTime()}"
             when (kind) {
@@ -173,7 +193,47 @@ class DebugActivity : ComponentActivity() {
     }
 
     /** Debug streams are never a Twitch test: the live screen and recap shouldn't say so. */
-    private fun notATwitchTest() = getSharedPreferences("settings", MODE_PRIVATE).edit { putBoolean("live_test", false) }
+    /**
+     * A debug stream isn't a Twitch Test unless [asTest] (it counts as one for the session log and for things that act
+     * differently in a Test, like viewer TTS on the speaker). The user's own TEST/LIVE choice is saved first and put back
+     * by [restoreSaved]: on 2026-11-22 debug streams left Home on LIVE, a public stream waiting to happen.
+     */
+    private fun notATwitchTest(asTest: Boolean = false) {
+        saveOnce("live_test")
+        getSharedPreferences("settings", MODE_PRIVATE).edit { putBoolean("live_test", asTest) }
+    }
+
+    /** Keeps the user's [key] (as it was before the first debug change) under a debug key, once, for [restoreSaved]. */
+    private fun saveOnce(key: String) {
+        val p = getSharedPreferences("settings", MODE_PRIVATE)
+        val saved = "debug_saved_$key"
+        if (p.contains(saved)) return
+        p.edit {
+            when (val v = p.all[key]) {
+                is Boolean -> putString(saved, "b:$v")
+                is String -> putString(saved, "s:$v")
+                else -> putString(saved, "none")
+            }
+        }
+    }
+
+    /** Puts back every setting [saveOnce] kept. */
+    private fun restoreSaved() {
+        val p = getSharedPreferences("settings", MODE_PRIVATE)
+        p.edit {
+            for ((k, v) in p.all) {
+                if (!k.startsWith("debug_saved_") || v !is String) continue
+                val key = k.removePrefix("debug_saved_")
+                when {
+                    v.startsWith("b:") -> putBoolean(key, v.removePrefix("b:").toBoolean())
+                    v.startsWith("s:") -> putString(key, v.removePrefix("s:"))
+                    else -> remove(key)
+                }
+                remove(k)
+            }
+        }
+        Log.i(TAG, "debug: restored the user's settings")
+    }
 
     /** `--es debug_quality HD720` etc. (default 1080p) in `--es debug_orientation portrait|landscape` (default: Settings). */
     private fun streamSize(intent: Intent): Triple<Int, Int, Int> {

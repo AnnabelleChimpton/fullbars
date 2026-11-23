@@ -20,6 +20,8 @@ sealed interface ChatCommand {
      */
     data class Quality(val preset: String) : ChatCommand
     data object RestartCam : ChatCommand
+    /** `!skip`: stops the viewer TTS message that's speaking. */
+    data object Skip : ChatCommand
 }
 
 /** Who may issue commands. The broadcaster is always allowed. */
@@ -57,7 +59,7 @@ data class CommandSender(
 
 /** Pure parser for mod commands. No I/O, no state. */
 object ChatCommandParser {
-    private val COMMANDS = setOf("brb", "live", "privacy", "starting", "ending", "scene", "end", "restartcam")
+    private val COMMANDS = setOf("brb", "live", "privacy", "starting", "ending", "scene", "end", "restartcam", "skip")
 
     /** The most of a `!scene` name kept: longer than any scene's name, short enough to echo back. */
     const val MAX_SCENE_NAME = 40
@@ -74,6 +76,7 @@ object ChatCommandParser {
         CommandHelp("!ending", "Shows your Ending card."),
         CommandHelp("!scene <name>", "Shows any scene by its name, your own too. !scene camera goes back to your camera."),
         CommandHelp("!restartcam", "Restarts the camera."),
+        CommandHelp("!skip", "Stops the viewer TTS that's speaking."),
         CommandHelp("!end ${policy.endConfirmationWord}", "Ends the stream."),
     )
 
@@ -107,6 +110,7 @@ object ChatCommandParser {
             "starting" -> ChatCommand.StartingSoon
             "ending" -> ChatCommand.Ending
             "restartcam" -> ChatCommand.RestartCam
+            "skip" -> ChatCommand.Skip
             "scene" -> {
                 if (args.isEmpty()) return CommandResult.Invalid(name, "Type !scene and a scene's name, like !scene brb")
                 ChatCommand.ShowScene(args.joinToString(" ").take(MAX_SCENE_NAME))

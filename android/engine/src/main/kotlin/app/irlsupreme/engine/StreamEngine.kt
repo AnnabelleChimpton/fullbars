@@ -565,6 +565,22 @@ class StreamEngine(private val context: Context) {
     }
 
     /**
+     * Mixes a viewer's TTS message into the stream at [gainDb] (into the limiter with the voice, never on the phone), in
+     * its own slot beside the alert sounds. A mute drops it. See [stopSpeech] and [speechPlaying].
+     */
+    fun playSpeech(clip: app.irlsupreme.engine.audio.AlertClip, gainDb: Float = 0f) {
+        val cfg = config ?: return
+        val samples = app.irlsupreme.engine.audio.AlertSoundLayout.forStream(clip, cfg.audioSampleRate, cfg.audioStereo)
+        audio?.playSpeech(samples, app.irlsupreme.engine.audio.ImportMath.dbToGain(gainDb.toDouble()))
+    }
+
+    /** Skips the TTS message: it fades out in ~20 ms. */
+    fun stopSpeech() { audio?.stopSpeech() }
+
+    /** Whether a TTS message is waiting to start or playing (false with no stream). */
+    val speechPlaying: Boolean get() = audio?.speechPlaying == true
+
+    /**
      * The music under the scene on air: null for none. It fades in over 0.8 s, loops without a seam, and fades out
      * over 0.8 s when this changes (another card's music fades in after). Mixed under the voice inside the limiter;
      * plays in preview too. A change of level alone glides, with no fade.

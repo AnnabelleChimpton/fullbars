@@ -83,7 +83,12 @@ class FoundationTest {
             listOf(s(Composition.PRIMITIVE_QUICK_RISE, 0.4f), s(Composition.PRIMITIVE_TICK, 0.8f, 60)),
             FbHaptics.steps(HapticPattern.RECOVERED),
         )
-        assertEquals(listOf(s(Composition.PRIMITIVE_TICK, 0.5f), s(Composition.PRIMITIVE_TICK, 0.5f, 70)), FbHaptics.steps(HapticPattern.ALERT))
+        assertEquals(
+            listOf(s(Composition.PRIMITIVE_QUICK_RISE, 0.8f), s(Composition.PRIMITIVE_CLICK, 1f, 80), s(Composition.PRIMITIVE_CLICK, 1f, 120)),
+            FbHaptics.steps(HapticPattern.ALERT),
+        )
+        // A motor without primitives (OnePlus 12): three firm pulses, ~400 ms in all, not two faint ticks.
+        assertEquals(listOf(0L, 80L, 90L, 80L, 90L, 80L), FbHaptics.waveform(HapticPattern.ALERT).toList())
         assertEquals(listOf(s(Composition.PRIMITIVE_THUD, 1f)), FbHaptics.steps(HapticPattern.HOLD_DONE))
         assertEquals(listOf(s(Composition.PRIMITIVE_LOW_TICK, 0.4f)), FbHaptics.steps(HapticPattern.HOLD_RELEASED))
         assertEquals(listOf(s(Composition.PRIMITIVE_TICK, 0.6f)), FbHaptics.steps(HapticPattern.COPIED))

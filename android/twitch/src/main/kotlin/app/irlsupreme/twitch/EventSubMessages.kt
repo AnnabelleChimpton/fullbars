@@ -108,6 +108,19 @@ sealed interface TwitchAlert {
     data class Tip(override val id: String, override val user: String, val amount: String) : TwitchAlert
 }
 
+/**
+ * A viewer redeeming Fullbars' channel points reward (`channel.channel_points_custom_reward_redemption.add`).
+ * [id] is the redemption's id, for [TwitchClient.updateRedemptionStatus]; [user] is the display name; [text] is what
+ * the viewer typed, trimmed (empty when the reward asks for nothing).
+ */
+data class Redemption(
+    val id: String,
+    val rewardId: String,
+    val user: String,
+    val userLogin: String,
+    val text: String,
+)
+
 /** Parsed EventSub WebSocket frame (https://dev.twitch.tv/docs/eventsub/handling-websocket-events/). */
 internal sealed interface EventSubMessage {
     val messageId: String
@@ -213,6 +226,18 @@ internal object EventSubParser {
             sourceBroadcasterUserId = e.sourceBroadcasterUserId,
             fragments = chatFragments(e.message?.fragments).takeIf { f -> f.any { it is ChatFragment.Emote } }.orEmpty(),
             notice = notice,
+        )
+    }
+
+    fun parseRedemption(event: JsonObject): Redemption {
+        val e = decodeOrThrow("channel points redemption event") { TwitchJson.decodeFromJsonElement(RedemptionDto.serializer(), event) }
+        val rewardId = e.reward?.id ?: throw TwitchException.Protocol("redemption without reward")
+        return Redemption(
+            id = e.id,
+            rewardId = rewardId,
+            user = e.userName ?: e.userLogin,
+            userLogin = e.userLogin,
+            text = e.userInput.orEmpty().trim(),
         )
     }
 
@@ -323,6 +348,19 @@ internal data class WatchStreakDto(
     @SerialName("streak_count") val streakCount: Int? = null,
     @SerialName("channel_points_awarded") val channelPointsAwarded: Int? = null,
 )
+
+@Serializable
+internal data class RedemptionDto(
+    val id: String,
+    @SerialName("user_login") val userLogin: String,
+    @SerialName("user_name") val userName: String? = null,
+    @SerialName("user_input") val userInput: String? = null,
+    val status: String? = null,
+    val reward: RedemptionRewardDto? = null,
+)
+
+@Serializable
+internal data class RedemptionRewardDto(val id: String)
 
 @Serializable
 internal data class FollowDto(@SerialName("user_name") val userName: String)

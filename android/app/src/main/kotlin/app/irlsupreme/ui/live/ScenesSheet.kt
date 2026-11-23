@@ -90,6 +90,12 @@ internal fun ScenesSheet(
     captionStatus: app.irlsupreme.engine.CaptionStatus? = null,
     /** Turns captions on or off (null hides the row). */
     onCaptions: ((Boolean) -> Unit)? = null,
+    /** Viewer TTS: whether it's on, and who's up (null: nobody). */
+    ttsOn: Boolean = false,
+    ttsNow: app.irlsupreme.service.TtsNow? = null,
+    /** Turns viewer TTS on or off (null hides the row). */
+    onTts: ((Boolean) -> Unit)? = null,
+    onTtsSkip: () -> Unit = {},
 ) {
     val c = LocalFbColors.current
     Column(
@@ -118,6 +124,10 @@ internal fun ScenesSheet(
             if (onCaptions != null) {
                 Hairline(color = c.rule)
                 CaptionsRow(captionsOn, captionStatus, onCaptions)
+            }
+            if (onTts != null) {
+                Hairline(color = c.rule)
+                TtsRow(ttsOn, ttsNow, onTts, onTtsSkip)
             }
             if (onPocketScreen != null) {
                 Hairline(color = c.rule)
@@ -153,6 +163,43 @@ private fun CaptionsRow(on: Boolean, status: app.irlsupreme.engine.CaptionStatus
     ) {
         Text("Captions", style = FbType.row, color = c.text, modifier = Modifier.clearAndSetSemantics {})
         Text(value, style = FbType.rowValue, color = c.text2, modifier = Modifier.clearAndSetSemantics {})
+    }
+}
+
+/** What the Viewer TTS row says: off, on, or whose message is up. Pure. */
+internal fun ttsRowValue(on: Boolean, now: app.irlsupreme.service.TtsNow?): String = when {
+    now != null && now.speaking -> "Saying ${now.user}'s"
+    now != null -> "${now.user}'s is next"
+    !on -> "Off"
+    else -> "On"
+}
+
+/**
+ * "Viewer TTS": a switch, and SKIP while a message is up (being said, or waiting to be). A skip stops it at once and,
+ * if the streamer chose that, clears the rest; their points go back.
+ */
+@Composable
+private fun TtsRow(on: Boolean, now: app.irlsupreme.service.TtsNow?, onChange: (Boolean) -> Unit, onSkip: () -> Unit) {
+    val c = LocalFbColors.current
+    val value = ttsRowValue(on, now)
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(end = if (now != null) 8.dp else 0.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            Modifier
+                .weight(1f)
+                .heightIn(min = 56.dp)
+                .toggleable(value = on, role = Role.Switch, onValueChange = onChange)
+                .semantics { contentDescription = "Viewer TTS"; stateDescription = value }
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("Viewer TTS", style = FbType.row, color = c.text, modifier = Modifier.clearAndSetSemantics {})
+            Text(value, style = FbType.rowValue, color = c.text2, modifier = Modifier.clearAndSetSemantics {})
+        }
+        if (now != null) app.irlsupreme.ui.FbButton("Skip", onSkip, kind = app.irlsupreme.ui.FbButtonKind.Secondary)
     }
 }
 

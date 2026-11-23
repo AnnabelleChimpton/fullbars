@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,11 +22,14 @@ import (
 //
 //	GET  /v1/remote          (paired) the remote's path, creating its secret if needed
 //	POST /v1/remote/reset    (paired) a new secret: old links stop working
-//	POST /v1/remote/poll     (paired) {"live","scene","mic","scenes"} in, {"commands":[{"id","scene"}]} out
+//	POST /v1/remote/poll     (paired) {"live","scene","mic","scenes"} in, {"commands":[{"id","scene"} or {"id","action"}]} out
 //	GET  /remote/{secret}         the page
 //	GET  /remote/{secret}/status  {"online","live","scene","mic","air","scenes"}
 //	POST /remote/{secret}/scene   {"scene":"BRB"}
+//	POST /remote/{secret}/skip    (no body) skip the viewer TTS message being read; 409 unless the phone is online and live
 //
+// A scene command reaches the phone as {"id":1,"scene":"BRB"}, exactly as before skips existed; a skip as
+// {"id":2,"action":"skip"}, with no scene, which phones that predate it ignore (they drop commands without one).
 // "scenes" are the streamer's own scenes the phone reports ([{"id":"CUSTOM_1","name":"Lunch"}]), so the page can
 // offer a button for each; an older phone sends none and the page shows the built-in five.
 type remote struct {
@@ -39,10 +43,14 @@ type remote struct {
 }
 
 type remoteCmd struct {
-	ID    int       `json:"id"`
-	Scene string    `json:"scene"`
-	at    time.Time // dropped if the phone hasn't collected it within remoteCmdTTL
+	ID     int       `json:"id"`
+	Scene  string    `json:"scene,omitempty"`  // a scene pick; always set on those
+	Action string    `json:"action,omitempty"` // remoteSkip; Scene is then empty
+	at     time.Time // dropped if the phone hasn't collected it within remoteCmdTTL
 }
+
+// remoteSkip is a mod skipping the viewer TTS message the phone is reading.
+const remoteSkip = "skip"
 
 type remoteStatus struct {
 	Live   bool          `json:"live"`
@@ -193,18 +201,58 @@ func (rm *remote) routes(mux *http.ServeMux, auth func(http.HandlerFunc) http.Ha
 		rm.add(body.Scene, time.Now())
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
+	mux.HandleFunc("POST /remote/{secret}/skip", func(w http.ResponseWriter, r *http.Request) {
+		if !rm.valid(r.PathValue("secret")) {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, 1024)); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+			return
+		}
+		if !rm.skip(time.Now()) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "the streamer isn't live"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	})
 }
 
 // add queues a mod's pick; the newest few are kept.
 func (rm *remote) add(scene string, now time.Time) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
+	rm.queue(remoteCmd{Scene: scene}, now)
+}
+
+// skip queues a mod's skip of the TTS message being read, only while the phone is online and live (a skip saved for
+// later would cut off some other viewer's message). It reports whether it was queued.
+func (rm *remote) skip(now time.Time) bool {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if !rm.liveLocked(now) {
+		return false
+	}
+	rm.queue(remoteCmd{Action: remoteSkip}, now)
+	return true
+}
+
+// queue adds a command with the next id, keeping the newest few; rm.mu is held.
+func (rm *remote) queue(c remoteCmd, now time.Time) {
 	rm.nextID++
-	rm.pending = append(rm.pending, remoteCmd{ID: rm.nextID, Scene: scene, at: now})
+	c.ID, c.at = rm.nextID, now
+	rm.pending = append(rm.pending, c)
 	if len(rm.pending) > remoteMaxCmds {
 		rm.pending = rm.pending[len(rm.pending)-remoteMaxCmds:]
 	}
 }
+
+// onlineLocked reports whether the phone polled recently; liveLocked, whether it's also live. rm.mu is held.
+func (rm *remote) onlineLocked(now time.Time) bool {
+	return !rm.seen.IsZero() && now.Sub(rm.seen) <= remoteOnline
+}
+
+func (rm *remote) liveLocked(now time.Time) bool { return rm.onlineLocked(now) && rm.status.Live }
 
 // poll records what viewers see and hands the phone the picks waiting for it (dropping stale ones).
 func (rm *remote) poll(st remoteStatus, now time.Time) []remoteCmd {
@@ -232,7 +280,7 @@ func (rm *remote) snapshot(now time.Time) map[string]any {
 	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
-	online := !rm.seen.IsZero() && now.Sub(rm.seen) <= remoteOnline
+	online := rm.onlineLocked(now)
 	scenes := rm.status.Scenes
 	if scenes == nil {
 		scenes = []remoteScene{}
@@ -240,8 +288,8 @@ func (rm *remote) snapshot(now time.Time) map[string]any {
 	return map[string]any{"online": online, "live": online && rm.status.Live, "scene": rm.status.Scene, "mic": rm.status.Mic, "air": air, "scenes": scenes}
 }
 
-// remotePage is the mods' page: what viewers see, and a button per scene (the streamer's own under the built-in
-// five, named with textContent only). No external resources.
+// remotePage is the mods' page: what viewers see, a button per scene (the streamer's own under the built-in five,
+// named with textContent only), and a quieter Skip TTS button under them. No external resources.
 const remotePage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <title>Fullbars mod remote</title>
@@ -255,6 +303,7 @@ button{min-height:64px;border-radius:14px;border:2px solid #3a3f4a;background:va
 button.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent) inset}
 button:disabled{opacity:.45}#live{grid-column:1/-1;min-height:72px}
 #own{margin-top:12px}#own:empty{display:none}
+button.sec{display:block;width:100%;min-height:52px;margin-top:20px;background:transparent;border-style:dashed;color:var(--dim)}
 #msg{color:var(--dim);margin-top:16px;min-height:1.4em}
 </style></head><body><main>
 <h1>Mod remote</h1><p id="st">Connecting…</p>
@@ -262,14 +311,15 @@ button:disabled{opacity:.45}#live{grid-column:1/-1;min-height:72px}
 <button id="live" data-s="LIVE">Camera</button>
 <button data-s="BRB">BRB</button><button data-s="PRIVACY">Privacy (mic off)</button>
 <button data-s="STARTING_SOON">Starting soon</button><button data-s="ENDING">Ending</button>
-</div><div class="grid" id="own"></div><p id="msg"></p></main>
+</div><div class="grid" id="own"></div>
+<button id="skip" class="sec" data-a="skip">Skip TTS</button><p id="msg"></p></main>
 <script>
 var base=location.pathname.replace(/\/$/,''),names={LIVE:'Camera',BRB:'BRB',PRIVACY:'Privacy',STARTING_SOON:'Starting soon',ENDING:'Ending'};
 var own={},ownKey='',grid=document.getElementById('own'),st=document.getElementById('st'),msg=document.getElementById('msg');
 function nameOf(id){return names[id]||own[id]||id}
-function send(b){msg.textContent='Sending…';
-fetch(base+'/scene',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scene:b.dataset.s})})
-.then(function(r){msg.textContent=r.ok?'Sent: '+nameOf(b.dataset.s)+'. It takes a couple of seconds.':'Didn\'t work. Reload the page.'})
+function send(b){msg.textContent='Sending…';var skip=b.dataset.a==='skip';
+fetch(base+(skip?'/skip':'/scene'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(skip?{}:{scene:b.dataset.s})})
+.then(function(r){msg.textContent=r.ok?'Sent: '+(skip?'skip the TTS message':nameOf(b.dataset.s))+'. It takes a couple of seconds.':r.status===409?'The streamer isn\'t live, so there\'s nothing to skip.':'Didn\'t work. Reload the page.'})
 .catch(function(){msg.textContent='Can\'t reach the server.'})}
 function render(list){list=list||[];var k=JSON.stringify(list);if(k===ownKey)return;ownKey=k;own={};grid.textContent='';
 list.forEach(function(x){own[x.id]=x.name;var b=document.createElement('button');b.dataset.s=x.id;b.textContent=x.name;b.onclick=function(){send(b)};grid.appendChild(b)})}

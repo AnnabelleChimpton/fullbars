@@ -162,6 +162,16 @@ class AudioImportTest {
         assertTrue(abs(y.last()) < 0.002f)
     }
 
+    @Test fun `TTS speech is cut at 20 s, not the alert sounds' 10`() {
+        val x = burst(0, rate * 25, 0, 0.2f)
+        val (clip, cut) = AudioImporter.finishAlert(x, 0, rate * 25, rate * 25, ImportMath.SPEECH_MAX_S)
+        assertTrue(cut)
+        assertEquals(rate * ImportMath.SPEECH_MAX_S, clip.pcm.size / 2)
+        val (short, shortCut) = AudioImporter.finishAlert(burst(0, rate * 15, 0, 0.2f), 0, rate * 15, rate * 15, ImportMath.SPEECH_MAX_S)
+        assertTrue(!shortCut)
+        assertEquals(rate * 15, short.pcm.size / 2)
+    }
+
     @Test fun `the hit is the first loud moment, not the loudest`() {
         val x = FloatArray(rate * 2)
         // A quiet tick at 10 ms, the real hit at 200 ms, a louder one at 600 ms.

@@ -89,11 +89,14 @@ func TestModRemote(t *testing.T) {
 	if code, _ := call("POST", path+"/scene", "", `{"scene":"EVIL"}`); code != 400 {
 		t.Fatalf("unknown scene: %d", code)
 	}
-	// The phone collects it once, and reports what viewers see.
+	// A skip needs the phone online and live, so none is saved up for later.
+	if code, _ := call("POST", path+"/skip", "", ""); code != 409 {
+		t.Fatalf("skip while offline: %d", code)
+	}
+	// The phone collects the pick once, in the same JSON as before skips existed, and reports what viewers see.
 	_, polled := call("POST", "/v1/remote/poll", p.Token, `{"live":true,"scene":"LIVE","mic":true}`)
-	cmds, _ := field(polled, "commands").([]any)
-	if len(cmds) != 1 || cmds[0].(map[string]any)["scene"] != "BRB" {
-		t.Fatalf("poll: %s", polled)
+	if polled != `{"commands":[{"id":1,"scene":"BRB"}]}`+"\n" {
+		t.Fatalf("poll: %q", polled)
 	}
 	_, polled = call("POST", "/v1/remote/poll", p.Token, `{"live":true,"scene":"BRB","mic":true}`)
 	if cmds, _ := field(polled, "commands").([]any); len(cmds) != 0 {
@@ -103,9 +106,29 @@ func TestModRemote(t *testing.T) {
 		t.Fatalf("status after poll: %s", st)
 	}
 
+	// Now live: a mod skips the TTS message, and the phone gets an action with no scene, once.
+	if code, _ := call("POST", path+"/skip", "", `{}`); code != 200 {
+		t.Fatalf("skip: %d", code)
+	}
+	if code, _ := call("POST", path+"/skip", "", strings.Repeat("x", 2048)); code != 400 {
+		t.Fatalf("oversized skip: %d", code)
+	}
+	if _, polled = call("POST", "/v1/remote/poll", p.Token, `{"live":true,"scene":"BRB","mic":true}`); polled != `{"commands":[{"id":2,"action":"skip"}]}`+"\n" {
+		t.Fatalf("skip poll: %q", polled)
+	}
+	if _, polled = call("POST", "/v1/remote/poll", p.Token, `{"live":true,"scene":"BRB","mic":true}`); polled != `{"commands":[]}`+"\n" {
+		t.Fatalf("a skip must be delivered once: %q", polled)
+	}
+	if !strings.Contains(string(page), ">Skip TTS</button>") {
+		t.Fatal("the page must offer Skip TTS")
+	}
+
 	// Wrong and old links get nothing; a reset retires the old one.
 	if code, _ := call("GET", "/remote/00000000000000000000000000000000", "", ""); code != 404 {
 		t.Fatalf("wrong secret: %d", code)
+	}
+	if code, _ := call("POST", "/remote/00000000000000000000000000000000/skip", "", ""); code != 404 {
+		t.Fatalf("skip with a wrong secret: %d", code)
 	}
 	_, reset := call("POST", "/v1/remote/reset", p.Token, "")
 	if field(reset, "path") == path {
@@ -113,6 +136,61 @@ func TestModRemote(t *testing.T) {
 	}
 	if code, _ := call("POST", path+"/scene", "", `{"scene":"LIVE"}`); code != 404 {
 		t.Fatalf("old link after reset: %d", code)
+	}
+	if code, _ := call("POST", path+"/skip", "", ""); code != 404 {
+		t.Fatalf("skip on an old link after reset: %d", code)
+	}
+}
+
+// A skip is only queued while the phone is online and live, is dropped like a pick if the phone doesn't collect it in
+// time, and shares the queue (ids, cap) with scene picks.
+func TestModRemoteSkip(t *testing.T) {
+	rm := &remote{dir: t.TempDir()}
+	t0 := time.Unix(1000, 0)
+	if rm.skip(t0) {
+		t.Fatal("no poll yet: a skip must be refused")
+	}
+	rm.poll(remoteStatus{Live: false, Scene: "LIVE"}, t0)
+	if rm.skip(t0) {
+		t.Fatal("online but not live: a skip must be refused")
+	}
+	rm.poll(remoteStatus{Live: true, Scene: "LIVE"}, t0)
+	if rm.skip(t0.Add(remoteOnline + time.Second)) {
+		t.Fatal("the phone stopped polling: a skip must be refused")
+	}
+
+	// Queued and drained, beside a scene pick whose JSON is unchanged.
+	rm.add("BRB", t0)
+	if !rm.skip(t0) {
+		t.Fatal("live: a skip must be queued")
+	}
+	got := rm.poll(remoteStatus{Live: true, Scene: "LIVE"}, t0)
+	b, _ := json.Marshal(got)
+	if string(b) != `[{"id":1,"scene":"BRB"},{"id":2,"action":"skip"}]` {
+		t.Fatalf("commands: %s", b)
+	}
+	if len(got) != 2 || got[1].Action != remoteSkip || got[1].Scene != "" {
+		t.Fatalf("skip: %+v", got)
+	}
+	if got := rm.poll(remoteStatus{Live: true}, t0); len(got) != 0 {
+		t.Fatalf("drained: %+v", got)
+	}
+
+	// Stale: the phone went quiet after the mod pressed Skip and came back too late.
+	t1 := t0.Add(time.Second)
+	if !rm.skip(t1) {
+		t.Fatal("still live: a skip must be queued")
+	}
+	if got := rm.poll(remoteStatus{Live: true}, t1.Add(remoteCmdTTL+time.Second)); len(got) != 0 {
+		t.Fatalf("a stale skip must be dropped: %+v", got)
+	}
+
+	// The queue cap holds for skips too.
+	for i := 0; i < 8; i++ {
+		rm.skip(t1.Add(remoteCmdTTL + time.Second))
+	}
+	if got := rm.poll(remoteStatus{Live: true}, t1.Add(remoteCmdTTL+time.Second)); len(got) != remoteMaxCmds {
+		t.Fatalf("expected at most %d, got %d", remoteMaxCmds, len(got))
 	}
 }
 

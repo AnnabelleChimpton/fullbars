@@ -74,12 +74,19 @@ object AudioImporter {
     /** Leading silence an alert file may have before its sound starts. */
     private const val ALERT_LEAD_MAX_S = 60
 
-    fun decodeAlert(file: File): ImportResult<AlertClip> {
+    /**
+     * A viewer's TTS message synthesised to [file] (any rate, usually 16-24 kHz mono WAV), as a clip for
+     * [app.irlsupreme.engine.StreamEngine.playSpeech]: silence trimmed at the ends (never inside), cut to
+     * [ImportMath.SPEECH_MAX_S] with a fade, at the alert sounds' loudness so a voice never towers over the streamer.
+     */
+    fun decodeSpeech(file: File): ImportResult<AlertClip> = decodeAlert(file, ImportMath.SPEECH_MAX_S)
+
+    fun decodeAlert(file: File, maxS: Int = ImportMath.ALERT_MAX_S): ImportResult<AlertClip> {
         val dec = AudioFileDecoder(file.path)
         try {
             try { dec.open() } catch (_: Exception) { return ImportResult.Failed(ImportFailure.UNREADABLE) }
             val rate = ImportMath.RATE
-            val keepMax = (ImportMath.ALERT_MAX_S + 1) * rate
+            val keepMax = (maxS + 1) * rate
             val preroll = rate * ImportMath.EDGE_FADE_MS / 1000
             var buf = FloatArray(rate * 2 * 2)
             var frames = 0
@@ -108,7 +115,7 @@ object AudioImporter {
             }
             if (frames == 0 && firstLoud < 0 && dropped == 0L) return ImportResult.Failed(ImportFailure.UNREADABLE)
             val range = ImportMath.soundRange(buf, frames, 2) ?: return ImportResult.Failed(ImportFailure.SILENT)
-            val (clip, cut) = finishAlert(buf, range.first, range.last + 1, frames)
+            val (clip, cut) = finishAlert(buf, range.first, range.last + 1, frames, maxS)
             return ImportResult.Ok(clip, cut)
         } finally {
             dec.close()
@@ -116,15 +123,15 @@ object AudioImporter {
     }
 
     /**
-     * Trims [x] to [from, until) with a few ms of what was before and after it, cuts it to [ImportMath.ALERT_MAX_S]
+     * Trims [x] to [from, until) with a few ms of what was before and after it, cuts it to [maxS] seconds
      * (fading the last [ImportMath.CUT_FADE_MS]), fades the edges, brings it to [ImportMath.ALERT_TARGET_LUFS] and
      * finds its hit. Pure. Also says whether it was cut.
      */
-    internal fun finishAlert(x: FloatArray, from: Int, until: Int, frames: Int): Pair<AlertClip, Boolean> {
+    internal fun finishAlert(x: FloatArray, from: Int, until: Int, frames: Int, maxS: Int = ImportMath.ALERT_MAX_S): Pair<AlertClip, Boolean> {
         val rate = ImportMath.RATE
         val edge = rate * ImportMath.EDGE_FADE_MS / 1000
         val start = (from - edge).coerceAtLeast(0)
-        val max = ImportMath.ALERT_MAX_S * rate
+        val max = maxS * rate
         val cut = until - start > max
         val end = if (cut) start + max else (until + edge).coerceAtMost(frames)
         val n = end - start

@@ -151,6 +151,11 @@ fun OverlaysPage(c: SetupController, nav: Navigator) = PageScaffold("Overlays", 
         )
     }
 
+    val ttsPrefs by app.irlsupreme.service.TtsSettings.state(androidx.compose.ui.platform.LocalContext.current).collectAsState()
+    val alertOpts by AlertOptionsStore.state(androidx.compose.ui.platform.LocalContext.current).collectAsState()
+    val saidKinds = AlertKind.entries.count { alertOpts.of(it).say != app.irlsupreme.service.AlertSay.OFF }
+    ValueRow("Viewer TTS", app.irlsupreme.service.ttsValue(ttsPrefs, saidKinds), valueIsFigure = false, onClick = { nav.open(Screen.TTS) })
+
     SectionHeader("From other services")
     ValueRow(
         "StreamElements or Streamlabs",

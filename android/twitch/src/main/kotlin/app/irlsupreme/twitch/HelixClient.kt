@@ -138,6 +138,149 @@ class HelixClient(
         return body.data.firstOrNull()?.id
     }
 
+    /**
+     * `GET /helix/channel_points/custom_rewards?broadcaster_id=` (scope channel:manage:redemptions). With
+     * [onlyManageable], only the rewards this app's Client ID created: the only ones it may update or refund.
+     * A 403 ([TwitchException.Forbidden]) means the channel has no channel points (not a partner or affiliate).
+     */
+    suspend fun getCustomRewards(token: TwitchToken, broadcasterId: String, onlyManageable: Boolean = true): List<CustomReward> {
+        val result = get(
+            token, "channel_points/custom_rewards",
+            "broadcaster_id" to broadcasterId, "only_manageable_rewards" to onlyManageable.toString(),
+        )
+        val body = decode("custom rewards") { TwitchJson.decodeFromString(DataList.serializer(CustomRewardDto.serializer()), result.body) }
+        return body.data.map { it.toReward() }
+    }
+
+    /**
+     * `POST /helix/channel_points/custom_rewards?broadcaster_id=` (scope channel:manage:redemptions). Redemptions
+     * wait in the request queue (unfulfilled), so they can be refunded. [globalCooldownSec] 0 turns the cooldown off.
+     * Twitch's create call takes no paused flag, so [isPaused] is a second request (a PATCH) right after.
+     * Twitch answers 400 when the channel already has a reward with this [title], 403 without channel points.
+     */
+    suspend fun createCustomReward(
+        token: TwitchToken,
+        broadcasterId: String,
+        title: String,
+        cost: Int,
+        prompt: String? = null,
+        userInputRequired: Boolean = true,
+        globalCooldownSec: Int = 0,
+        isPaused: Boolean = false,
+    ): CustomReward {
+        require(title.isNotBlank() && title.length <= MAX_REWARD_TITLE_LENGTH) { "Reward title must be 1..$MAX_REWARD_TITLE_LENGTH characters" }
+        require(cost >= 1) { "Reward cost must be at least 1" }
+        requireCooldown(globalCooldownSec)
+        if (prompt != null) requirePrompt(prompt)
+        val json = buildJsonObject {
+            put("title", title)
+            put("cost", cost)
+            if (prompt != null) put("prompt", prompt)
+            put("is_enabled", true)
+            put("is_user_input_required", userInputRequired)
+            put("is_global_cooldown_enabled", globalCooldownSec > 0)
+            if (globalCooldownSec > 0) put("global_cooldown_seconds", globalCooldownSec)
+            put("should_redemptions_skip_request_queue", false)
+        }
+        val request = authed(token, url("channel_points/custom_rewards", "broadcaster_id" to broadcasterId))
+            .post(json.toString().toRequestBody(JSON))
+            .build()
+        val created = rewardFrom(http.execute(request), "create custom reward")
+        return if (isPaused) updateCustomReward(token, broadcasterId, created.id, isPaused = true) else created
+    }
+
+    /**
+     * `PATCH /helix/channel_points/custom_rewards?broadcaster_id=&id=` (scope channel:manage:redemptions). Pass only
+     * what changes; [globalCooldownSec] 0 turns the cooldown off. Returns the reward as Twitch now has it. Only works
+     * on rewards this app created; a 404 means the reward is gone (deleted on Twitch).
+     */
+    suspend fun updateCustomReward(
+        token: TwitchToken,
+        broadcasterId: String,
+        rewardId: String,
+        isPaused: Boolean? = null,
+        cost: Int? = null,
+        globalCooldownSec: Int? = null,
+        prompt: String? = null,
+        isEnabled: Boolean? = null,
+    ): CustomReward {
+        require(isPaused != null || cost != null || globalCooldownSec != null || prompt != null || isEnabled != null) { "Nothing to update" }
+        if (cost != null) require(cost >= 1) { "Reward cost must be at least 1" }
+        if (globalCooldownSec != null) requireCooldown(globalCooldownSec)
+        if (prompt != null) requirePrompt(prompt)
+        val json = buildJsonObject {
+            if (isPaused != null) put("is_paused", isPaused)
+            if (cost != null) put("cost", cost)
+            if (globalCooldownSec != null) {
+                put("is_global_cooldown_enabled", globalCooldownSec > 0)
+                if (globalCooldownSec > 0) put("global_cooldown_seconds", globalCooldownSec)
+            }
+            if (prompt != null) put("prompt", prompt)
+            if (isEnabled != null) put("is_enabled", isEnabled)
+        }
+        val request = authed(token, url("channel_points/custom_rewards", "broadcaster_id" to broadcasterId, "id" to rewardId))
+            .patch(json.toString().toRequestBody(JSON))
+            .build()
+        return rewardFrom(http.execute(request), "update custom reward")
+    }
+
+    /**
+     * `PATCH /helix/channel_points/custom_rewards/redemptions?id=&broadcaster_id=&reward_id=` (scope
+     * channel:manage:redemptions): [RedemptionStatus.FULFILLED] keeps the viewer's points, [RedemptionStatus.CANCELED]
+     * refunds them. Only an unfulfilled redemption of a reward this app created can change; otherwise Twitch answers 404.
+     */
+    suspend fun updateRedemptionStatus(
+        token: TwitchToken,
+        broadcasterId: String,
+        rewardId: String,
+        redemptionId: String,
+        status: RedemptionStatus,
+    ) {
+        val json = buildJsonObject { put("status", status.name) }
+        val request = authed(
+            token,
+            url("channel_points/custom_rewards/redemptions", "id" to redemptionId, "broadcaster_id" to broadcasterId, "reward_id" to rewardId),
+        ).patch(json.toString().toRequestBody(JSON)).build()
+        val result = http.execute(request)
+        if (!result.isSuccessful) result.throwHelixError()
+    }
+
+    /**
+     * `GET /helix/moderation/blocked_terms?broadcaster_id=&moderator_id=` (scope moderator:read:blocked_terms), every
+     * page. [moderatorId] is the token's user (the broadcaster, for your own channel). Returns the terms' text.
+     */
+    suspend fun getBlockedTerms(token: TwitchToken, broadcasterId: String, moderatorId: String): List<String> {
+        val terms = mutableListOf<String>()
+        var cursor: String? = null
+        repeat(MAX_BLOCKED_TERM_PAGES) {
+            val query = buildList {
+                add("broadcaster_id" to broadcasterId)
+                add("moderator_id" to moderatorId)
+                add("first" to "100")
+                cursor?.let { add("after" to it) }
+            }
+            val result = get(token, "moderation/blocked_terms", *query.toTypedArray())
+            val body = decode("blocked terms") { TwitchJson.decodeFromString(BlockedTermsDto.serializer(), result.body) }
+            body.data.mapNotNullTo(terms) { it.text.trim().ifEmpty { null } }
+            val next = body.pagination?.cursor?.takeIf { it.isNotEmpty() }
+            if (next == null || next == cursor) return terms
+            cursor = next
+        }
+        return terms
+    }
+
+    private fun rewardFrom(result: HttpResult, what: String): CustomReward {
+        if (!result.isSuccessful) result.throwHelixError()
+        val body = decode(what) { TwitchJson.decodeFromString(DataList.serializer(CustomRewardDto.serializer()), result.body) }
+        return body.data.firstOrNull()?.toReward() ?: throw TwitchException.Protocol("$what response was empty")
+    }
+
+    private fun requireCooldown(seconds: Int) =
+        require(seconds in 0..MAX_REWARD_COOLDOWN_SEC) { "Global cooldown must be 0..$MAX_REWARD_COOLDOWN_SEC seconds" }
+
+    private fun requirePrompt(prompt: String) =
+        require(prompt.length <= MAX_REWARD_PROMPT_LENGTH) { "Reward prompt must be at most $MAX_REWARD_PROMPT_LENGTH characters" }
+
     private suspend fun get(token: TwitchToken, path: String, vararg query: Pair<String, String>): HttpResult {
         val result = http.execute(authed(token, url(path, *query)).get().build())
         if (!result.isSuccessful) result.throwHelixError()
@@ -159,6 +302,12 @@ class HelixClient(
     companion object {
         const val MAX_TITLE_LENGTH = 140
         const val MAX_CHAT_LENGTH = 500
+        const val MAX_REWARD_TITLE_LENGTH = 45
+        const val MAX_REWARD_PROMPT_LENGTH = 200
+        /** Seven days, Twitch's longest global cooldown. */
+        const val MAX_REWARD_COOLDOWN_SEC = 604_800
+        /** 100 terms a page: plenty for any channel, and a stop if Twitch ever kept handing back cursors. */
+        internal const val MAX_BLOCKED_TERM_PAGES = 50
         private val JSON = "application/json".toMediaType()
     }
 }
@@ -192,6 +341,24 @@ data class SendChatResult(
     val dropReasonCode: String?,
     val dropReasonMessage: String?,
 )
+
+/**
+ * A channel points reward. [globalCooldownSec] is 0 when the cooldown is off. [isPaused]: viewers see it but can't
+ * redeem it; [isEnabled] false hides it.
+ */
+data class CustomReward(
+    val id: String,
+    val title: String,
+    val cost: Int,
+    val isPaused: Boolean,
+    val isEnabled: Boolean,
+    val globalCooldownSec: Int,
+    val prompt: String = "",
+    val isUserInputRequired: Boolean = false,
+)
+
+/** What to do with a redemption waiting in the reward's queue: keep the points, or refund them. */
+enum class RedemptionStatus { FULFILLED, CANCELED }
 
 /** A stream key. `toString()` is redacted so it can never leak into logs or crash reports. */
 class StreamKey(val value: String) {
@@ -239,6 +406,44 @@ internal data class SendChatDto(
 
 @Serializable
 internal data class DropReasonDto(val code: String? = null, val message: String? = null)
+
+@Serializable
+internal data class CustomRewardDto(
+    val id: String,
+    val title: String = "",
+    val cost: Int = 0,
+    val prompt: String? = null,
+    @SerialName("is_paused") val isPaused: Boolean = false,
+    @SerialName("is_enabled") val isEnabled: Boolean = true,
+    @SerialName("is_user_input_required") val isUserInputRequired: Boolean = false,
+    @SerialName("global_cooldown_setting") val globalCooldown: GlobalCooldownDto? = null,
+) {
+    fun toReward() = CustomReward(
+        id = id,
+        title = title,
+        cost = cost,
+        isPaused = isPaused,
+        isEnabled = isEnabled,
+        globalCooldownSec = globalCooldown?.takeIf { it.isEnabled }?.seconds ?: 0,
+        prompt = prompt.orEmpty(),
+        isUserInputRequired = isUserInputRequired,
+    )
+}
+
+@Serializable
+internal data class GlobalCooldownDto(
+    @SerialName("is_enabled") val isEnabled: Boolean = false,
+    @SerialName("global_cooldown_seconds") val seconds: Int = 0,
+)
+
+@Serializable
+internal data class BlockedTermsDto(val data: List<BlockedTermDto> = emptyList(), val pagination: PaginationDto? = null)
+
+@Serializable
+internal data class BlockedTermDto(val text: String = "")
+
+@Serializable
+internal data class PaginationDto(val cursor: String? = null)
 
 @Serializable
 internal data class SubscriptionDto(val id: String, val status: String? = null)

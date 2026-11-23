@@ -47,6 +47,34 @@ class EventSubParserTest {
         assertNull(EventSubParser.parseChatMessage(n.event).color)
     }
 
+    @Test fun redemption() {
+        val n = EventSubParser.parse(TwitchChatClientTest.redemptionNotification("r-1", "  deep: hello chat  ")) as EventSubMessage.Notification
+        assertEquals("channel.channel_points_custom_reward_redemption.add", n.subscriptionType)
+        assertEquals(
+            Redemption(
+                id = "17fa2df1-ad76-4804-bfa5-a40ef63efe63",
+                rewardId = TwitchChatClientTest.REWARD_ID,
+                user = "Cooler_User",
+                userLogin = "cooler_user",
+                text = "deep: hello chat",
+            ),
+            EventSubParser.parseRedemption(n.event),
+        )
+    }
+
+    @Test fun redemptionWithoutInputOrDisplayName() {
+        val event = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"id":"x","user_id":"9","user_login":"quiet_one","user_input":"","status":"unfulfilled","reward":{"id":"rw","title":"t","cost":1,"prompt":""}}""",
+        ) as kotlinx.serialization.json.JsonObject
+        assertEquals(Redemption("x", "rw", "quiet_one", "quiet_one", ""), EventSubParser.parseRedemption(event))
+    }
+
+    @Test(expected = TwitchException.Protocol::class)
+    fun redemptionWithoutRewardIsAProtocolError() {
+        val event = kotlinx.serialization.json.Json.parseToJsonElement("""{"id":"x","user_login":"a"}""") as kotlinx.serialization.json.JsonObject
+        EventSubParser.parseRedemption(event)
+    }
+
     @Test fun unknownTypeIsTolerated() {
         val m = EventSubParser.parse("""{"metadata":{"message_id":"u","message_type":"something_new"},"payload":{}}""")
         assertEquals(EventSubMessage.Unknown("u", "something_new"), m)

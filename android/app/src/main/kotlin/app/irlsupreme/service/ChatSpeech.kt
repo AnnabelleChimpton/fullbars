@@ -47,6 +47,17 @@ object ChatSpeechText {
     const val MAX = 160
 }
 
+/** Whether something the streamer alone should hear can play: headphones or earbuds are connected. */
+object Headphones {
+    /** Headphones of any kind: wired, USB, Bluetooth (A2DP, LE audio, hearing aids). */
+    fun connected(audio: AudioManager): Boolean = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
+        it.type in setOf(
+            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_HEARING_AID,
+        )
+    }
+}
+
 /**
  * Reads chat aloud into the streamer's headphones, so they can follow chat without looking at the phone. **Only
  * while headphones or earbuds are connected**: from the phone's speaker it would go into the mic and onto the stream.
@@ -72,13 +83,7 @@ class ChatSpeaker(private val ctx: Context) : TextToSpeech.OnInitListener {
         ready = true
     }
 
-    /** Headphones of any kind: wired, USB, Bluetooth (A2DP, LE audio, hearing aids). */
-    fun headphonesConnected(): Boolean = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
-        it.type in setOf(
-            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_USB_HEADSET,
-            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_HEARING_AID,
-        )
-    }
+    fun headphonesConnected(): Boolean = Headphones.connected(audio)
 
     fun say(text: String) {
         if (!ready || !headphonesConnected()) return

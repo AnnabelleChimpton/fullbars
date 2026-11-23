@@ -22,6 +22,8 @@ object ImportMath {
 
     /** An alert sound's longest: longer files are cut, with [CUT_FADE_MS] of fade. */
     const val ALERT_MAX_S = 10
+    /** A viewer's TTS message, spoken: longer than an alert sound, cut with a fade past this. */
+    const val SPEECH_MAX_S = 20
     const val CUT_FADE_MS = 50
 
     /** Fades at a trimmed sound's ends, so cutting silence away never leaves a click. */

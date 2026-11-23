@@ -56,6 +56,34 @@ internal class MixStage(
     private var outHold = 0
     private var outFadeLeft = 0
 
+    /**
+     * A viewer's TTS message ([playSpeech]): its own slot, so an alert sound never cuts it off and it never cuts one
+     * off. One at a time; a new one replaces any still waiting to start. [stopSpeech] fades it out over
+     * [REPLACE_FADE_FRAMES]; a mute drops it, like the alert sounds.
+     */
+    private class Speech(val samples: ShortArray, val gain: Float)
+    @Volatile private var pendingSpeech: Speech? = null
+    @Volatile private var stopSpeechAsked = false
+    private var speech: Speech? = null
+    private var speechPos = 0
+    private var speechFadeLeft = 0
+    @Volatile private var speechOn = false
+
+    /** Whether a TTS message is waiting to start or playing. Any thread. */
+    val speechPlaying: Boolean get() = speechOn || pendingSpeech != null
+
+    /** See [AudioPipeline.playSpeech]. Any thread. */
+    fun playSpeech(samples: ShortArray, gain: Float = 1f) {
+        stopSpeechAsked = false
+        pendingSpeech = Speech(samples, gain)
+    }
+
+    /** See [AudioPipeline.stopSpeech]. Any thread. */
+    fun stopSpeech() {
+        pendingSpeech = null
+        stopSpeechAsked = true
+    }
+
     /** Live captions' feed: gets the voice each chunk, before alert sounds, music and the mute. Read once per chunk. */
     @Volatile var voiceTap: app.irlsupreme.engine.captions.VoiceTap? = null
 
@@ -202,6 +230,21 @@ internal class MixStage(
             addOutgoing(fxF, frames)
             fx = fxF
         }
+        // Viewer TTS, from the start of the chunk after it was asked for (no frame to land on). Dropped by a mute.
+        if (muted && (muteGain == 0f || preMute == 0f)) { pendingSpeech = null; speech = null; speechFadeLeft = 0 }
+        if (stopSpeechAsked) {
+            stopSpeechAsked = false
+            if (speech != null && speechFadeLeft == 0) speechFadeLeft = REPLACE_FADE_FRAMES
+        }
+        if (!muted) pendingSpeech?.let { p ->
+            pendingSpeech = null
+            speech = p; speechPos = 0; speechFadeLeft = 0
+        }
+        speech?.let { sp ->
+            if (fx == null) { fxF.fill(0f, 0, n); fx = fxF }
+            if (!addSpeech(fxF, frames, sp)) speech = null
+        }
+        speechOn = speech != null
 
         // Card music: under the voice, inside the limiter. While it plays, a mute turns down the voice and the alert
         // sounds here, before the limiter, and the music carries on; "mic off" music turns the voice down too.
@@ -250,6 +293,22 @@ internal class MixStage(
         val k = gain / 32768f
         while (d < dstSamples && i < e.size) { dst[d] += e[i] * k; d++; i++ }
         return i
+    }
+
+    /** The TTS message into [dst]; false once it's over (played out, or faded out after a stop). */
+    private fun addSpeech(dst: FloatArray, frames: Int, sp: Speech): Boolean {
+        val k = sp.gain / 32768f
+        var pos = speechPos
+        var f = 0
+        while (f < frames && pos + channels <= sp.samples.size) {
+            val g = if (speechFadeLeft > 0) { speechFadeLeft--; speechFadeLeft.toFloat() / REPLACE_FADE_FRAMES } else 1f
+            for (ch in 0 until channels) dst[f * channels + ch] += sp.samples[pos + ch] * k * g
+            pos += channels
+            f++
+            if (g == 0f) return false.also { speechPos = pos }
+        }
+        speechPos = pos
+        return pos + channels <= sp.samples.size
     }
 
     /** The replaced sound: on until the new one starts, then fading out. */

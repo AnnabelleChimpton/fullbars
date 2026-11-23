@@ -370,6 +370,13 @@ class LiveScreenLogicTest {
         assertNull(notice(false, null, false, null, null))
     }
 
+    @Test fun `an alert shows in the notice line, after the mic problems and ahead of the standing notices`() {
+        val gift = "Gift subs from someone, 5 subs"
+        assertEquals(gift, notice(false, null, false, "cam", "x", pocketHint = true, battery = "Phone battery 12%", alert = gift))
+        assertEquals(FIRST_MUTE_HINT, notice(false, null, true, null, null, alert = gift))
+        assertEquals("Mic in use by another app", notice(false, "Mic in use by another app", false, null, null, alert = gift))
+    }
+
     @Test fun `the timer reads whole minutes to TalkBack`() {
         assertEquals("CONNECTING", timerLabel(0, isTest = false))
         assertEquals("TEST", timerLabel(1, isTest = true))

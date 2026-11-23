@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -68,6 +71,15 @@ class TwitchChatClient(
     /** Alerts (subs, gifts, raids, cheers, follows) seen while [messages] is being collected. */
     val alerts: kotlinx.coroutines.flow.SharedFlow<TwitchAlert> = _alerts
 
+    private val _redemptions = kotlinx.coroutines.flow.MutableSharedFlow<Redemption>(extraBufferCapacity = 64)
+    /**
+     * Redemptions of the reward set with [setRedemptionReward], seen while [messages] is being collected. Only that
+     * reward's: after it changes or is cleared, redemptions of the old one are dropped.
+     */
+    val redemptions: kotlinx.coroutines.flow.SharedFlow<Redemption> = _redemptions
+
+    private val redemptionRewardId = MutableStateFlow<String?>(null)
+
     private val _alertSubscriptions = MutableStateFlow(AlertSubscriptions())
     /**
      * What happened to the alert subscriptions on the current chat session: for the session log, and so the app can
@@ -87,6 +99,18 @@ class TwitchChatClient(
     fun messages(broadcasterId: String, readerUserId: String = broadcasterId): Flow<ChatMessage> = channelFlow {
         config.requireClientId()
         runLoop(broadcasterId, readerUserId)
+    }
+
+    /**
+     * Which channel points reward's redemptions to receive on [redemptions] (Fullbars' own viewer TTS reward), or null
+     * for none. A setter rather than a [messages] parameter, so the app can find or create the reward without holding
+     * chat up, and turn it on or off mid-stream: it takes effect at once on the connected session, and on every
+     * session after (reconnects included). Needs [TwitchConfig.SCOPE_MANAGE_REDEMPTIONS]; without it
+     * [AlertSubscriptions.redemptions] says [SubscriptionStatus.NeedsSignIn]. Twitch keeps an old reward's subscription
+     * until the session ends; its redemptions are dropped here.
+     */
+    fun setRedemptionReward(rewardId: String?) {
+        redemptionRewardId.value = rewardId?.takeIf { it.isNotBlank() }
     }
 
     /** POST /helix/chat/messages as [senderId] (the signed-in user), refreshing the token on 401. */
@@ -159,17 +183,25 @@ class TwitchChatClient(
                 )
             }
             subscribeAlerts(broadcasterId, readerUserId, welcome.sessionId)
+            // Reconnect handovers keep the session (and its subscriptions), so this lives as long as the connection.
+            val redemptionWatcher = launch {
+                redemptionRewardId.collectLatest { subscribeRedemptions(broadcasterId, it, welcome.sessionId) }
+            }
             _state.value = ChatConnectionState.Connected
             onConnected()
-            while (true) {
-                val msg = parseOrNull(conn.receiveText(keepaliveMs + options.keepaliveGraceMs, "keepalive timeout")) ?: continue
-                if (msg is EventSubMessage.Reconnect) {
-                    val (next, newWelcome) = handover(conn, msg.reconnectUrl, dedupe)
-                    conn = next
-                    keepaliveMs = newWelcome.keepaliveMs()
-                } else {
-                    handle(msg, dedupe)
+            try {
+                while (true) {
+                    val msg = parseOrNull(conn.receiveText(keepaliveMs + options.keepaliveGraceMs, "keepalive timeout")) ?: continue
+                    if (msg is EventSubMessage.Reconnect) {
+                        val (next, newWelcome) = handover(conn, msg.reconnectUrl, dedupe)
+                        conn = next
+                        keepaliveMs = newWelcome.keepaliveMs()
+                    } else {
+                        handle(msg, dedupe)
+                    }
                 }
+            } finally {
+                redemptionWatcher.cancel()
             }
         } finally {
             conn.close()
@@ -190,7 +222,7 @@ class TwitchChatClient(
                 condition = mapOf("broadcaster_user_id" to broadcasterId, "user_id" to readerUserId), sessionId = sessionId,
             )
         }
-        _alertSubscriptions.value = _alertSubscriptions.value.copy(notifications = notifications)
+        _alertSubscriptions.update { it.copy(notifications = notifications) }
         val canFollow = runCatching { tokens.withToken { it.hasScopes(listOf(TwitchConfig.SCOPE_READ_FOLLOWERS)) } }.getOrDefault(false)
         val follows = if (!canFollow) SubscriptionStatus.NeedsSignIn else subscribeWithRetry {
             helix.createEventSubSubscription(
@@ -198,7 +230,24 @@ class TwitchChatClient(
                 condition = mapOf("broadcaster_user_id" to broadcasterId, "moderator_user_id" to readerUserId), sessionId = sessionId,
             )
         }
-        _alertSubscriptions.value = _alertSubscriptions.value.copy(follows = follows)
+        _alertSubscriptions.update { it.copy(follows = follows) }
+    }
+
+    /**
+     * The viewer TTS reward's redemptions on [sessionId], when there is a reward ([rewardId] null: none, and the status
+     * goes back to Pending). Needs channel:manage:redemptions, which sign-ins from older app versions lack.
+     */
+    private suspend fun subscribeRedemptions(broadcasterId: String, rewardId: String?, sessionId: String) {
+        _alertSubscriptions.update { it.copy(redemptions = SubscriptionStatus.Pending) }
+        if (rewardId == null) return
+        val canRedeem = runCatching { tokens.withToken { it.hasScopes(listOf(TwitchConfig.SCOPE_MANAGE_REDEMPTIONS)) } }.getOrDefault(false)
+        val status = if (!canRedeem) SubscriptionStatus.NeedsSignIn else subscribeWithRetry {
+            helix.createEventSubSubscription(
+                it, type = REDEMPTION_TYPE, version = "1",
+                condition = mapOf("broadcaster_user_id" to broadcasterId, "reward_id" to rewardId), sessionId = sessionId,
+            )
+        }
+        _alertSubscriptions.update { it.copy(redemptions = status) }
     }
 
     private suspend fun subscribeWithRetry(create: suspend (TwitchToken) -> Unit): SubscriptionStatus {
@@ -280,13 +329,22 @@ class TwitchChatClient(
                             EventSubParser.parseChatNotice(msg.messageId, msg.event)?.let { send(it) }
                         }
                         FOLLOW_TYPE -> _alerts.tryEmit(EventSubParser.parseFollow(msg.messageId, msg.event))
+                        REDEMPTION_TYPE -> {
+                            val r = EventSubParser.parseRedemption(msg.event)
+                            if (r.rewardId == redemptionRewardId.value) _redemptions.tryEmit(r)
+                        }
                     }
                 } catch (_: TwitchException.Protocol) {
                     return
                 }
             }
             // Losing an alert subscription isn't worth ending chat for.
-            is EventSubMessage.Revocation -> if (msg.subscriptionType == CHAT_MESSAGE_TYPE) throw TwitchException.SubscriptionRevoked(msg.status)
+            is EventSubMessage.Revocation -> when (msg.subscriptionType) {
+                CHAT_MESSAGE_TYPE -> throw TwitchException.SubscriptionRevoked(msg.status)
+                // e.g. the reward was deleted on Twitch: say so, so the app can stop offering it.
+                REDEMPTION_TYPE -> _alertSubscriptions.update { it.copy(redemptions = SubscriptionStatus.Failed("revoked: ${msg.status}")) }
+                else -> Unit
+            }
             is EventSubMessage.Keepalive, is EventSubMessage.Welcome, is EventSubMessage.Unknown, is EventSubMessage.Reconnect -> Unit
         }
     }
@@ -339,6 +397,7 @@ class TwitchChatClient(
         const val CHAT_MESSAGE_TYPE = "channel.chat.message"
         const val CHAT_NOTIFICATION_TYPE = "channel.chat.notification"
         const val FOLLOW_TYPE = "channel.follow"
+        const val REDEMPTION_TYPE = "channel.channel_points_custom_reward_redemption.add"
         /** Waits before each try: at once, then twice more spread over ~20 s. */
         internal val SUBSCRIBE_RETRY_MS = longArrayOf(0, 3_000, 15_000)
 
@@ -389,13 +448,20 @@ internal class RecentIds(private val capacity: Int) {
 sealed interface SubscriptionStatus {
     data object Pending : SubscriptionStatus
     data object Active : SubscriptionStatus
-    /** The sign-in lacks the permission (follows need moderator:read:followers): sign in to Twitch again. */
+    /**
+     * The sign-in lacks the permission (follows need moderator:read:followers, redemptions channel:manage:redemptions):
+     * sign in to Twitch again.
+     */
     data object NeedsSignIn : SubscriptionStatus
     data class Failed(val reason: String) : SubscriptionStatus
 }
 
-/** Subs/gifts/raids (chat notifications) and follows. */
+/**
+ * Subs/gifts/raids (chat notifications), follows, and the viewer TTS reward's redemptions ([redemptions] stays
+ * Pending while no reward is set with [TwitchChatClient.setRedemptionReward]).
+ */
 data class AlertSubscriptions(
     val notifications: SubscriptionStatus = SubscriptionStatus.Pending,
     val follows: SubscriptionStatus = SubscriptionStatus.Pending,
+    val redemptions: SubscriptionStatus = SubscriptionStatus.Pending,
 )

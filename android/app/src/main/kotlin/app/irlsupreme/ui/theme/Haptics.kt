@@ -43,7 +43,11 @@ object FbHaptics {
         HapticPattern.CAMERA_LOST -> List(3) { Step(Composition.PRIMITIVE_LOW_TICK, 0.8f, if (it == 0) 0 else 90) }
         HapticPattern.RECONNECTING -> listOf(Step(Composition.PRIMITIVE_QUICK_FALL, 1f), Step(Composition.PRIMITIVE_LOW_TICK, 1f, 60))
         HapticPattern.RECOVERED -> listOf(Step(Composition.PRIMITIVE_QUICK_RISE, 0.4f), Step(Composition.PRIMITIVE_TICK, 0.8f, 60))
-        HapticPattern.ALERT -> listOf(Step(Composition.PRIMITIVE_TICK, 0.5f), Step(Composition.PRIMITIVE_TICK, 0.5f, 70))
+        // A gift or a raid has to be felt through a pocket or a mount while walking: the firmest pattern after the losses,
+        // rising (good news), unlike any of them. The old two half-strength ticks went unnoticed on a real stream.
+        HapticPattern.ALERT -> listOf(
+            Step(Composition.PRIMITIVE_QUICK_RISE, 0.8f), Step(Composition.PRIMITIVE_CLICK, 1f, 80), Step(Composition.PRIMITIVE_CLICK, 1f, 120),
+        )
         HapticPattern.HOLD_DONE -> listOf(Step(Composition.PRIMITIVE_THUD, 1f))
         HapticPattern.HOLD_RELEASED -> listOf(Step(Composition.PRIMITIVE_LOW_TICK, 0.4f))
         HapticPattern.COPIED -> listOf(Step(Composition.PRIMITIVE_TICK, 0.6f))
@@ -57,7 +61,7 @@ object FbHaptics {
         HapticPattern.COPIED, HapticPattern.SIGNED_IN -> listOf(Fallback(HapticFeedbackConstants.CONFIRM))
         HapticPattern.WORSE, HapticPattern.CAMERA_LOST -> listOf(Fallback(HapticFeedbackConstants.REJECT))
         HapticPattern.RECONNECTING, HapticPattern.HOLD_DONE -> listOf(Fallback(HapticFeedbackConstants.LONG_PRESS))
-        HapticPattern.ALERT -> listOf(Fallback(HapticFeedbackConstants.CLOCK_TICK), Fallback(HapticFeedbackConstants.CLOCK_TICK, 70))
+        HapticPattern.ALERT -> listOf(Fallback(HapticFeedbackConstants.CONFIRM), Fallback(HapticFeedbackConstants.CONFIRM, 200))
         HapticPattern.HOLD_RELEASED -> emptyList()
     }
 
@@ -71,6 +75,28 @@ object FbHaptics {
         if (!enabled(view.context)) return
         if (compose(view.context, steps(p))) return
         fireFallback(view, fallback(p))
+    }
+
+    /**
+     * Plays [p] without a view, from the stream service: for news that must be felt whatever is on screen (another app,
+     * the Pocket screen). A motor without the primitives (the OnePlus 12 has none) gets [waveform] instead.
+     */
+    fun play(context: Context, p: HapticPattern) {
+        if (!enabled(context)) return
+        if (compose(context, steps(p))) return
+        val vibrator = vibrator(context)?.takeIf { it.hasVibrator() } ?: return
+        val timings = waveform(p)
+        if (timings.isEmpty()) return
+        vibrate(vibrator, VibrationEffect.createWaveform(timings, -1))
+    }
+
+    /**
+     * [play]'s on/off timings (off, on, off, on… ms) for a motor without primitives. An alert is three firm 80 ms pulses:
+     * the View fallback's two ~45 ms clock ticks were all the OnePlus played for a 5-sub gift, and nobody felt them.
+     */
+    fun waveform(p: HapticPattern): LongArray = when (p) {
+        HapticPattern.ALERT -> longArrayOf(0, 80, 90, 80, 90, 80)
+        else -> fallback(p).flatMapIndexed { i, f -> listOf(if (i == 0) 0L else f.delayMs.toLong(), 40L) }.toLongArray()
     }
 
     /** One of the hold-to-end perimeter ticks, [step] 1..7; anything else is ignored. */
@@ -99,13 +125,17 @@ object FbHaptics {
         val effect = VibrationEffect.startComposition().apply {
             steps.forEach { addPrimitive(it.primitive, it.scale, it.delayMs) }
         }.compose()
+        vibrate(vibrator, effect)
+        return true
+    }
+
+    private fun vibrate(vibrator: Vibrator, effect: VibrationEffect) {
         if (Build.VERSION.SDK_INT >= 33) {
             vibrator.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_TOUCH))
         } else {
             @Suppress("DEPRECATION")
             vibrator.vibrate(effect, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build())
         }
-        return true
     }
 
     private fun fireFallback(view: View, list: List<Fallback>) {

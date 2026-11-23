@@ -19,6 +19,18 @@ class ChatCommandParserTest {
         assertEquals(CommandResult.Accepted(ChatCommand.StartingSoon, "modperson"), parse("!starting"))
         assertEquals(CommandResult.Accepted(ChatCommand.Ending, "modperson"), parse("!ending"))
         assertEquals(CommandResult.Accepted(ChatCommand.RestartCam, "modperson"), parse("!restartcam"))
+        assertEquals(CommandResult.Accepted(ChatCommand.Skip, "modperson"), parse("!skip"))
+    }
+
+    @Test fun skipFollowsTheSamePermissionsAsTheOtherCommands() {
+        assertEquals(CommandResult.Accepted(ChatCommand.Skip, "streamer"), parse("!SKIP", broadcaster))
+        assertEquals(CommandResult.Accepted(ChatCommand.Skip, "modperson"), parse("!skip please")) // extra words ignored
+        assertEquals(CommandResult.NotAllowed("viewer"), parse("!skip", viewer))
+        assertEquals(CommandResult.NotAllowed("modperson"), parse("!skip", policy = CommandPolicy(allowModerators = false)))
+        assertEquals(CommandResult.Accepted(ChatCommand.Skip, "viewer"), parse("!skip", viewer, CommandPolicy(allowedLogins = setOf("viewer"))))
+        assertEquals(CommandResult.NotAllowed("streamer"), parse("!skip", broadcaster.copy(isFromSharedChat = true)))
+        assertEquals(CommandResult.NotACommand, parse("!skipped"))
+        assertTrue(ChatCommandParser.help().any { it.usage == "!skip" })
     }
 
     @Test fun caseAndWhitespaceInsensitive() {

@@ -180,6 +180,47 @@ class MixStageMusicTest {
     /** A steady level for [seconds], as a clip in the stream's layout. */
     private fun level(v: Float, seconds: Double) = ShortArray((rate * seconds).toInt() * 2) { (v * 32768).toInt().toShort() }
 
+    @Test fun `TTS speech and an alert sound play together, neither cutting the other off`() {
+        val r = Rig()
+        r.stage.playSpeech(level(0.1f, 2.0))
+        r.chunk(FloatArray(frames * 2))
+        assertTrue(r.stage.speechPlaying)
+        r.stage.playEffect(level(0.05f, 2.0), 0L, 1f, replaces = true)
+        val out = Metrics.channel(r.chunk(FloatArray(frames * 2)))
+        assertEquals(0.15f, out[frames / 2], 2e-3f)
+        // Another alert sound replaces the first; the speech carries on under both.
+        r.stage.playEffect(level(0.02f, 2.0), 0L, 1f, replaces = true)
+        repeat(3) { r.chunk(FloatArray(frames * 2)) }
+        assertEquals(0.12f, Metrics.channel(r.chunk(FloatArray(frames * 2)))[frames / 2], 2e-3f)
+    }
+
+    @Test fun `skipping TTS fades it out in 20 ms and frees the slot`() {
+        val r = Rig()
+        r.stage.playSpeech(level(0.2f, 3.0))
+        repeat(5) { r.chunk(FloatArray(frames * 2)) }
+        r.stage.stopSpeech()
+        val out = ArrayList<Float>()
+        repeat(3) { out.addAll(Metrics.channel(r.chunk(FloatArray(frames * 2))).toList()) }
+        val l = out.toFloatArray()
+        val la = r.dsp.latencyFrames
+        assertTrue(l[la + MixStage.REPLACE_FADE_FRAMES / 4] in 0.1f..0.2f) // fading, not cut
+        assertEquals(0f, l[la + MixStage.REPLACE_FADE_FRAMES + 10], 1e-4f)
+        assertEquals(0f, l.last(), 0f)
+        assertTrue(!r.stage.speechPlaying)
+    }
+
+    @Test fun `TTS speech ends by itself, and a mute drops it for good`() {
+        val r = Rig()
+        r.stage.playSpeech(level(0.1f, 0.05))
+        repeat(3) { r.chunk(FloatArray(frames * 2)) }
+        assertTrue(!r.stage.speechPlaying)
+        r.stage.playSpeech(level(0.1f, 3.0))
+        repeat(3) { r.chunk(FloatArray(frames * 2)) }
+        repeat(5) { r.chunk(FloatArray(frames * 2), muted = true) }
+        assertTrue(!r.stage.speechPlaying)
+        repeat(20) { assertEquals(0.0, Metrics.peak(r.chunk(FloatArray(frames * 2))), 0.0) }
+    }
+
     @Test fun `a new alert sound replaces the one still playing instead of stacking`() {
         val r = Rig()
         r.stage.playEffect(level(0.2f, 3.0), 0L, 1f, replaces = true)
