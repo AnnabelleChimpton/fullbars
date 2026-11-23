@@ -811,7 +811,7 @@ class Compositor(
         }
         /** Captions go over the overlays and under alerts (an alert is brief; the words carry on beneath it). */
         fun drawCaption() {
-            if (allowCaptions) guarded("caption", Unit) { g.caption.draw() }
+            if (allowCaptions) guarded("caption", Unit) { g.caption.draw(onCard = sceneCard != null || cameraLostShown) }
         }
         drawLayers()
         drawCaption()

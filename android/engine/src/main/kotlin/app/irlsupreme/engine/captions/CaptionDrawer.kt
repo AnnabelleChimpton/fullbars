@@ -9,22 +9,31 @@ import app.irlsupreme.engine.CaptionSize
 import app.irlsupreme.engine.video.BrandType
 import app.irlsupreme.engine.video.StreamPalette
 
-/** The caption strip, drawn once per change: [bitmap] goes at [leftPx], [topPx] in the output frame. */
-class CaptionGraphic(val bitmap: Bitmap, val leftPx: Int, val topPx: Int)
+/**
+ * The caption strip, drawn once per change: [bitmap] goes at [leftPx], [topPx] in the output frame over the camera, or
+ * [cardTopPx] over a card (further from the edge, clear of its ruler).
+ */
+class CaptionGraphic(val bitmap: Bitmap, val leftPx: Int, val topPx: Int, val cardTopPx: Int = topPx)
 
 /**
  * Where the caption strip sits and how big its type is, in u = min(w, h) / 100 of the output frame, like the cards
  * and alerts. Pure, so it's tested without a canvas.
  *
  * Bone type on Ink plates at the chat plates' 88%, one plate per line like broadcast captions, centred, two lines.
- * Bottom (the default) sits clear of the cards' ruler and its cursor (8u + 3.6u up from the bottom edge, see
- * Slates.rulerY), so the strip never covers a card's footer; Top sits clear of the cards' tag row. Lines are kept to a
- * readable measure: 70% of a landscape frame, 86% of a portrait one.
+ * Over the camera the strip sits [CAMERA_MARGIN_U] from the edge, inside the title-safe area, where viewers expect
+ * captions. Over a card it moves to [MARGIN_U], clear of the cards' ruler and its cursor (8u + 3.6u up from the bottom
+ * edge, see Slates.rulerY) or their tag row at the top, so it never covers a card's footer. Lines are kept to a
+ * readable measure, about 42 characters (the usual caption limit): 56% of a landscape frame, 86% of a portrait one.
+ *
+ * Viewers on the first real stream found the old strip too high, too big and too wide (13u up over the camera too,
+ * 5u type, 70% lines).
  */
 object CaptionGeometry {
     const val MAX_LINES = 2
-    /** From the frame's edge to the strip, u: the cards' 8u margin, the ruler's 3.6u cursor, and a gap. */
+    /** From the frame's edge to the strip over a card, u: the cards' 8u margin, the ruler's 3.6u cursor, and a gap. */
     const val MARGIN_U = 13f
+    /** From the frame's edge to the strip over the camera, u: just inside the title-safe 5%. */
+    const val CAMERA_MARGIN_U = 6f
     /** A plate's padding left and right of its line, u. */
     const val PAD_U = 1.6f
     /** Line height as a multiple of the type size. */
@@ -34,18 +43,18 @@ object CaptionGeometry {
 
     /** The type size in px for [size]. */
     fun textPx(size: CaptionSize, w: Int, h: Int): Float = unit(w, h) * when (size) {
-        CaptionSize.SMALL -> 4f
-        CaptionSize.MEDIUM -> 5f
-        CaptionSize.LARGE -> 6.5f
+        CaptionSize.SMALL -> 3.4f
+        CaptionSize.MEDIUM -> 4.2f
+        CaptionSize.LARGE -> 5.4f
     }
 
     /** The widest a line of text may be, px. */
-    fun maxTextWidth(w: Int, h: Int): Float = w * (if (w >= h) 0.70f else 0.86f) - 2 * PAD_U * unit(w, h)
+    fun maxTextWidth(w: Int, h: Int): Float = w * (if (w >= h) 0.56f else 0.86f) - 2 * PAD_U * unit(w, h)
 
-    /** The strip's top edge for [lines] lines at [size]. */
-    fun top(position: CaptionPosition, size: CaptionSize, lines: Int, w: Int, h: Int): Int {
+    /** The strip's top edge for [lines] lines at [size], over a card ([onCard]) or the camera. */
+    fun top(position: CaptionPosition, size: CaptionSize, lines: Int, w: Int, h: Int, onCard: Boolean): Int {
         val stripH = lines * textPx(size, w, h) * LINE_HEIGHT
-        val m = MARGIN_U * unit(w, h)
+        val m = (if (onCard) MARGIN_U else CAMERA_MARGIN_U) * unit(w, h)
         return (if (position == CaptionPosition.TOP) m else h - m - stripH).toInt()
     }
 }
@@ -91,7 +100,8 @@ class CaptionDrawer(private val outW: Int, private val outH: Int, private val si
         }
         paint.textScaleX = 1f
         val left = (outW - bw) / 2
-        val top = CaptionGeometry.top(position, size, lines.size, outW, outH)
-        return CaptionGraphic(bmp, left, top)
+        val top = CaptionGeometry.top(position, size, lines.size, outW, outH, onCard = false)
+        val cardTop = CaptionGeometry.top(position, size, lines.size, outW, outH, onCard = true)
+        return CaptionGraphic(bmp, left, top, cardTop)
     }
 }

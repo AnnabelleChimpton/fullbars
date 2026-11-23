@@ -13,6 +13,7 @@ internal class CaptionLayer(private val outW: Int, private val outH: Int) {
     private val program = TextureProgram(oes = false)
     private var tex = 0
     private var pos = GlUtil.IDENTITY
+    private var cardPos = GlUtil.IDENTITY
 
     val showing: Boolean get() = tex != 0
 
@@ -27,13 +28,16 @@ internal class CaptionLayer(private val outW: Int, private val outH: Int) {
             val l = g.leftPx.toFloat()
             val t = g.topPx.toFloat()
             pos = GlUtil.rectMatrix(l, t, l + b.width, t + b.height, outW, outH)
+            val ct = g.cardTopPx.toFloat()
+            cardPos = GlUtil.rectMatrix(l, ct, l + b.width, ct + b.height, outW, outH)
         } finally {
             g.bitmap.recycle()
         }
     }
 
-    fun draw() {
-        if (tex != 0) program.draw(tex, GlUtil.FLIP_V, pos, premultiplied = true)
+    /** Draws the strip where it goes over a card ([onCard]: clear of its ruler) or the camera. */
+    fun draw(onCard: Boolean) {
+        if (tex != 0) program.draw(tex, GlUtil.FLIP_V, if (onCard) cardPos else pos, premultiplied = true)
     }
 
     fun free() {

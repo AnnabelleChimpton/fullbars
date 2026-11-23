@@ -73,17 +73,33 @@ class VoiceFeedTest {
     }
 
     @Test fun `the strip sits above the bottom margin and grows upwards`() {
-        val one = CaptionGeometry.top(CaptionPosition.BOTTOM, CaptionSize.MEDIUM, 1, 1920, 1080)
-        val two = CaptionGeometry.top(CaptionPosition.BOTTOM, CaptionSize.MEDIUM, 2, 1920, 1080)
-        // u = 10.8: margin 13u = 140.4, a line 5u x 1.32 = 71.3.
-        assertEquals((1080 - 140.4 - 71.28).toInt(), one)
+        val one = CaptionGeometry.top(CaptionPosition.BOTTOM, CaptionSize.MEDIUM, 1, 1920, 1080, onCard = true)
+        val two = CaptionGeometry.top(CaptionPosition.BOTTOM, CaptionSize.MEDIUM, 2, 1920, 1080, onCard = true)
+        // u = 10.8: margin 13u = 140.4, a line 4.2u x 1.32 = 59.9.
+        assertEquals((1080 - 140.4 - 59.88).toInt(), one)
         assertTrue(two < one)
-        assertEquals(140, CaptionGeometry.top(CaptionPosition.TOP, CaptionSize.LARGE, 2, 1920, 1080))
-        // Clear of the cards' ruler cursor, whose top is 11.6u up from the bottom.
-        val bottomOfStrip = one + 5f * 10.8f * 1.32f
-        assertTrue(bottomOfStrip <= 1080 - 11.6f * 10.8f)
-        // Lines keep to 70% of a landscape frame, 86% of a portrait one (less the plate padding).
-        assertEquals(1920 * 0.70f - 2 * 1.6f * 10.8f, CaptionGeometry.maxTextWidth(1920, 1080), 0.5f)
+        assertEquals(140, CaptionGeometry.top(CaptionPosition.TOP, CaptionSize.LARGE, 2, 1920, 1080, onCard = true))
+        // Over a card: clear of the ruler cursor, whose top is 11.6u up from the bottom, even at the largest size.
+        val large = CaptionGeometry.top(CaptionPosition.BOTTOM, CaptionSize.LARGE, 1, 1920, 1080, onCard = true)
+        assertTrue(large + 5.4f * 10.8f * 1.32f <= 1080 - 11.6f * 10.8f)
+    }
+
+    @Test fun `over the camera the strip sits low, inside the title-safe area`() {
+        val onCamera = CaptionGeometry.top(CaptionPosition.BOTTOM, CaptionSize.MEDIUM, 2, 1920, 1080, onCard = false)
+        val onCard = CaptionGeometry.top(CaptionPosition.BOTTOM, CaptionSize.MEDIUM, 2, 1920, 1080, onCard = true)
+        assertTrue(onCamera > onCard)
+        val bottomOfStrip = onCamera + 2 * 4.2f * 10.8f * 1.32f
+        assertTrue(bottomOfStrip <= 1080 * 0.95f) // title-safe: 5% in from the edge
+        assertTrue(bottomOfStrip >= 1080 * 0.93f) // and no higher than it needs to be
+        assertEquals(6 * 10.8f, CaptionGeometry.top(CaptionPosition.TOP, CaptionSize.MEDIUM, 2, 1920, 1080, onCard = false).toFloat(), 1f)
+    }
+
+    @Test fun `lines keep to about 42 characters`() {
+        // 56% of a landscape frame, 86% of a portrait one, less the plate padding.
+        assertEquals(1920 * 0.56f - 2 * 1.6f * 10.8f, CaptionGeometry.maxTextWidth(1920, 1080), 0.5f)
         assertEquals(1080 * 0.86f - 2 * 1.6f * 10.8f, CaptionGeometry.maxTextWidth(1080, 1920), 0.5f)
+        // At medium, ~0.5 em a character: 42-48 characters a line, not the old ~60.
+        val chars = CaptionGeometry.maxTextWidth(1920, 1080) / (CaptionGeometry.textPx(CaptionSize.MEDIUM, 1920, 1080) * 0.5f)
+        assertTrue("$chars", chars in 40f..50f)
     }
 }
